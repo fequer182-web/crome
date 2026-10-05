@@ -53,9 +53,13 @@ if not defined CXX (
     goto :fail
 )
 
+for %%I in ("%CXX%") do set "CXX_DIR=%%~dpI"
+set "PATH=%CXX_DIR%;%PATH%"
+
 for /f "delims=" %%T in ('"%CXX%" -dumpmachine 2^>nul') do set "TARGET=%%T"
 
 echo [COMPILER] %CXX%
+echo [CXX BIN]  %CXX_DIR%
 echo [TARGET]   %TARGET%
 echo.
 
