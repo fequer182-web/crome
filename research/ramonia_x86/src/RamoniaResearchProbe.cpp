@@ -21,7 +21,7 @@
 #include <vector>
 
 // ============================================================================
-// OTCLab Ramonia x86 Research Probe V36
+// OTCLab Ramonia x86 Research Probe V37
 // DISCOVERY READ-ONLY + ONE-SHOT RUNTIME ABI CAPTURE
 // No internal game action is called by the probe. V33 temporarily replaces one
 // selected action entry byte with INT3, captures the natural game call made by
@@ -4455,10 +4455,10 @@ std::string SaveJson(const Report& r) {
     if (!o) return {};
 
     o << "{\n";
-    o << "  \"schema\": \"otclab-ramonia-x86-research-v36\",\n";
+    o << "  \"schema\": \"otclab-ramonia-x86-research-v37\",\n";
     o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
-    o << "  \"persistence\": {\"profileVersion\": 36, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
+    o << "  \"persistence\": {\"profileVersion\": 37, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
     o << "  \"build\": {\n";
     o << "    \"exe\": \"" << JsonEscape(r.module.path) << "\",\n";
@@ -4664,7 +4664,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V36\n"
+        << "        OTCLab Ramonia x86 Research Probe V37\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4682,7 +4682,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V36 - RUNTIME ABI CAPTURE");
+    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V37 - RUNTIME ABI CAPTURE");
 }
 
 
@@ -8790,16 +8790,44 @@ bool V36ScanU32Position(const Report& r,const V33MemSnap& snap,const std::string
     return false;
 }
 
+
+bool V37ScanU32U32U8Position(const Report& r,const V33MemSnap& snap,const std::string& source,
+                              const std::string& abiType,V36PositionMatch& out) {
+    if(snap.valid<9) return false;
+    const size_t maxOff=std::min<size_t>(snap.valid-9,24);
+    for(size_t off=0;off<=maxOff;++off) {
+        uint32_t x=0,y=0; uint8_t z=0;
+        std::memcpy(&x,snap.bytes+off,4);
+        std::memcpy(&y,snap.bytes+off+4,4);
+        z=snap.bytes[off+8];
+        if(!x || !y || x>65535 || y>65535 || z>15) continue;
+        if(!V36NearLocal(r,x,y,z)) continue;
+        out.ok=true; out.confirmed=true; out.source=source; out.abiType=abiType;
+        out.offset=off; out.x=x; out.y=y; out.z=z;
+        return true;
+    }
+    return false;
+}
+
 V36PositionMatch V36FindMovePosition(const Report& r,const V33Capture& c,int idx) {
     V36PositionMatch out;
     if(idx<0 || idx>=6) return out;
     const uint32_t raw=c.stack[idx+1];
     if(!V35IsCallerStackRef(c,raw)) return out;
 
+    // V36 runtime evidence on this exact Ramonia build showed:
+    //   32 03 00 00 43 07 00 00 07 ...
+    // => x=818 (u32), y=1859 (u32), z=7 (u8), one SQM from LocalPlayer.
+    // Keep the detector generic by validating the decoded xyz against live LP position.
+    if(V37ScanU32U32U8Position(r,c.argSnap[idx],"direct","position_u32_u32_u8_ref",out)) return out;
     if(V36ScanPackedPosition(r,c.argSnap[idx],"direct","position_u16_u16_u8_ref",out)) return out;
     if(V36ScanU32Position(r,c.argSnap[idx],"direct","position_u32x3_ref",out)) return out;
+
+    if(V37ScanU32U32U8Position(r,c.argNested0[idx],"p0","position_ptr_u32_u32_u8_ref",out)) return out;
     if(V36ScanPackedPosition(r,c.argNested0[idx],"p0","position_ptr_u16_u16_u8_ref",out)) return out;
     if(V36ScanU32Position(r,c.argNested0[idx],"p0","position_ptr_u32x3_ref",out)) return out;
+
+    if(V37ScanU32U32U8Position(r,c.argNested1[idx],"p1","position_second_ptr_u32_u32_u8_ref",out)) return out;
     if(V36ScanPackedPosition(r,c.argNested1[idx],"p1","position_second_ptr_u16_u16_u8_ref",out)) return out;
     if(V36ScanU32Position(r,c.argNested1[idx],"p1","position_second_ptr_u32x3_ref",out)) return out;
     return out;
@@ -8821,7 +8849,7 @@ void V36PrintMoveArg2Evidence(const Report& r,const V33Capture& c) {
     const V36PositionMatch m=V36FindMovePosition(r,c,idx);
     uint32_t lx=0,ly=0,lz=0;
     const bool lp=V36ReadLocalPosition(r,lx,ly,lz);
-    std::cout << "    [V36 MOVE ARG2] raw=" << HexU32(c.stack[idx+1]);
+    std::cout << "    [V37 MOVE ARG2] raw=" << HexU32(c.stack[idx+1]);
     if(lp) std::cout << " localPos={" << lx << "," << ly << "," << lz << "}";
     std::cout << "\n"
               << "      direct@" << HexU32(c.argSnap[idx].address)
@@ -8942,7 +8970,10 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
 
     std::string holderCls;
     if(V35HolderObject(r,c,idx,holderCls)) {
-        out.semantic=V34CreatureFamily(holderCls)?"Creature":holderCls;
+        if(token=="useWith" && idx==1)
+            out.semantic="Thing";
+        else
+            out.semantic=V34CreatureFamily(holderCls)?"Creature":holderCls;
         out.abiType="shared_object_ptr_ref";
         out.status="runtime_confirmed";
         out.rtti=holderCls;
@@ -8998,7 +9029,7 @@ void V34PromoteCapture(Report& r,const std::string& token) {
     r.actionAbi[token]=a;
     r.actionAbiRaw.erase(token);
 
-    std::cout << "    [V36 ABI] " << token
+    std::cout << "    [V37 ABI] " << token
               << " status=" << a.status
               << " cc=" << a.callingConvention << "\n";
     for(const auto& arg:a.args) {
@@ -9155,16 +9186,16 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] V36 fecha apenas actions ainda pendentes; move.arg2 e validado por Position proxima ao LocalPlayer.\n";
+              << "[RULE] V37 fecha o contrato Ramonia; move.arg2 aceita Position u32/u32/u8 validada contra o LocalPlayer.\n";
 
     for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
         if(V35ActionAlreadyConfirmed(r,tok)) {
-            std::cout << "[V36 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
+            std::cout << "[V37 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
             continue;
         }
         // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
         if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
-            std::cout << "[V36 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
+            std::cout << "[V37 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
             continue;
         }
         V33CaptureAction(r,tok);
@@ -9172,7 +9203,7 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V36 COMPLETE] actions pendentes foram reavaliadas; profile atualizado e espelhado no caminho canonico.\n";
+    std::cout << "\n[V37 COMPLETE] contrato principal de actions Ramonia persistido no profile canonico.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
