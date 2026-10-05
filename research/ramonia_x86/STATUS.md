@@ -2,7 +2,7 @@
 
 ## Probe
 
-Version: **V36**
+Version: **V37**
 
 Canonical source:
 
@@ -40,7 +40,7 @@ Tile::things:
 - stride `4`
 - Tile vtable RVA `0x774208`
 
-## V33.1 runtime capture safety + V36 ABI closeout
+## V33.1 runtime capture safety + V37 ABI final
 
 - target page protection is changed before arming;
 - VEH does not call `VirtualProtect`;
@@ -56,13 +56,22 @@ The profile is the source of truth for already-confirmed offsets/RVAs.
 V34 promotes only classified runtime evidence into the portable `actions` profile block; active calls remain disabled.
 
 
-## V36 closeout targets
+## V37 final contract
 
 Already confirmed from V34 profile: `attack`, `follow`, `talkChannel`.
 
-V36 retests only unresolved actions: `autoWalk`, `look`, `move`, `use`, `useWith`. It validates direction-vector contents, stack-local shared-object holders and OTC Position encoding before promoting an action to `runtime_confirmed`.
+V37 finalizes the remaining move ABI: `autoWalk`, `look`, `move`, `use`, `useWith`. It validates direction-vector contents, stack-local shared-object holders and OTC Position encoding before promoting an action to `runtime_confirmed`.
 
-The profile schema emitted by V35 is `otclab-ramonia-x86-research-v36` / `profileVersion: 36`.
+The profile schema emitted by V35 is `otclab-ramonia-x86-research-v37` / `profileVersion: 37`.
 
 
 V36 narrows the remaining ABI gap to `move.arg2`, using LocalPlayer-relative Position evidence and nested snapshots before promotion.
+
+
+## V37 final contract
+
+All primary actions used by the planned Crome runtime are now represented as `runtime_confirmed` in the canonical Ramonia profile.
+
+The last gap, `move.arg2`, was closed from V36 runtime bytes as a direct Position with `u32 x + u32 y + u8 z`, validated against the live LocalPlayer position.
+
+`useWith.arg2` is exposed semantically as generic `Thing` because runtime captures have shown different concrete RTTI targets while preserving the same shared-object holder ABI.
