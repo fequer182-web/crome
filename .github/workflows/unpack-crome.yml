@@ -1,0 +1,43 @@
+name: Import Crome archive
+
+on:
+  push:
+    paths:
+      - '.github/workflows/unpack-crome.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Crome.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .crome_import
+          mkdir -p .crome_import
+          unzip -q Crome.zip -d .crome_import
+          test -d .crome_import/Crome
+          cp -a .crome_import/Crome/. ./
+          rm -rf .crome_import
+
+      - name: Commit imported project files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No files to import."
+            exit 0
+          fi
+          git commit -m "Import current Crome project files"
+          git push
