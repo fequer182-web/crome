@@ -6,7 +6,7 @@ Esta pasta concentra a pesquisa da build Ramonia x86 e é a base oficial para as
 
 `src/RamoniaResearchProbe.cpp`
 
-Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V35**.
+Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V36**.
 
 ## Build rápido no Windows
 
@@ -26,7 +26,7 @@ O script:
 
 Saída esperada:
 
-`build/Ramonia_x86_Test/RamoniaResearchProbe_V35.dll`
+`build/Ramonia_x86_Test/RamoniaResearchProbe_V36.dll`
 
 > A pasta `build/` é gerada localmente e não é versionada pelo Git.
 
@@ -92,3 +92,12 @@ Ele fecha as ações que ainda estavam apenas `runtime_observed` usando evidênc
 - ações já `runtime_confirmed` no profile são puladas automaticamente.
 
 Quando executado dentro de `build/Ramonia_x86_Test`, cada save também espelha o profile para o caminho canônico `profiles/ramonia_x86/`. Assim o GitHub Desktop passa a mostrar o JSON atualizado sem cópia manual.
+
+
+## V36 — fechamento de move.arg2
+
+O V36 reaproveita todo o profile V35 e pula automaticamente as actions já `runtime_confirmed`. O foco é apenas o argumento de destino de `Game::move`.
+
+A captura examina o argumento direto e os dois primeiros níveis apontados por ele, procurando os layouts de Position observáveis na build. Para um movimento chão -> chão, a promoção exige uma posição plausível e próxima da posição atual do LocalPlayer, reduzindo falsos positivos.
+
+Se a classificação automática ainda não fechar, o console imprime um dump curto de bytes de `move.arg2`, `p0` e `p1` para a próxima análise sem repetir as outras actions.
