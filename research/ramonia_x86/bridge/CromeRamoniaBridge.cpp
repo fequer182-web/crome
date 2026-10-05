@@ -17,12 +17,24 @@
 
 namespace {
 
+static_assert(sizeof(void*) == 4, "CromeRamoniaBridge must be built as x86");
+
 HMODULE g_module{};
 volatile LONG g_running = 1;
 
 std::string g_status = "starting";
 std::string g_profileError;
 std::uintptr_t g_base{};
+std::uint32_t g_imageTimestamp{};
+std::uint32_t g_imageSize{};
+bool g_buildMatched{false};
+
+HWND g_gameWindow{};
+WNDPROC g_originalWndProc{};
+constexpr UINT kAttackSelectedMessage = WM_APP + 0x620;
+
+volatile LONG g_lastActionCode{};
+std::uint32_t g_lastActionTargetId{};
 
 struct Profile {
     std::string schema;
@@ -31,9 +43,17 @@ struct Profile {
     std::string timestamp;
     std::string sizeOfImage;
     std::string textHash;
+    std::uint32_t expectedTimestamp{};
+    std::uint32_t expectedImageSize{};
     std::uintptr_t gameRva{};
     std::size_t localPlayerOffset{};
+    std::size_t attackTargetOffset{};
+    std::size_t followTargetOffset{};
     std::size_t posX{}, posY{}, posZ{};
+    std::size_t creatureIdOffset{};
+    std::uintptr_t monsterVtableRva{};
+    std::uintptr_t attackMethodRva{};
+    bool attackRuntimeConfirmed{};
 
     struct Field {
         std::size_t offset{};
@@ -137,6 +157,10 @@ Profile loadProfile(const std::string& path) {
         p.timestamp = stringValue(build->get("timestamp"));
         p.sizeOfImage = stringValue(build->get("sizeOfImage"));
         p.textHash = stringValue(build->get("textHashFNV1A64"));
+        if (const auto n = integerValue(build->get("timestamp")))
+            p.expectedTimestamp = static_cast<std::uint32_t>(*n);
+        if (const auto n = integerValue(build->get("sizeOfImage")))
+            p.expectedImageSize = static_cast<std::uint32_t>(*n);
     }
 
     const auto* owners = root.get("owners");
@@ -148,6 +172,26 @@ Profile loadProfile(const std::string& path) {
     const auto lp = integerValue(child(layout, "localPlayerOffset"));
     if (!lp) throw std::runtime_error("gameLayout.localPlayerOffset missing");
     p.localPlayerOffset = static_cast<std::size_t>(*lp);
+    if (const auto n = integerValue(child(layout, "attackTargetOffset")))
+        p.attackTargetOffset = static_cast<std::size_t>(*n);
+    if (const auto n = integerValue(child(layout, "followTargetOffset")))
+        p.followTargetOffset = static_cast<std::size_t>(*n);
+
+    const auto* rtti = root.get("rtti");
+    const auto* monster = child(rtti, "Monster");
+    const auto* monsterVtables = child(monster, "vtables");
+    if (monsterVtables && monsterVtables->isArray() && !monsterVtables->array().empty()) {
+        const auto n = integerValue(&monsterVtables->array().front());
+        if (n) p.monsterVtableRva = static_cast<std::uintptr_t>(*n);
+    }
+
+    const auto* actions = root.get("actions");
+    const auto* attack = child(actions, "attack");
+    if (attack && attack->isObject()) {
+        if (const auto n = integerValue(attack->get("methodRva")))
+            p.attackMethodRva = static_cast<std::uintptr_t>(*n);
+        p.attackRuntimeConfirmed = stringValue(attack->get("status")) == "runtime_confirmed";
+    }
 
     const auto* runtime = root.get("runtime");
     const auto* position = child(runtime, "position");
@@ -159,6 +203,11 @@ Profile loadProfile(const std::string& path) {
     p.posY = static_cast<std::size_t>(*y);
     p.posZ = static_cast<std::size_t>(*z);
 
+    const auto* creatureLayout = child(runtime, "creatureLayout");
+    const auto* creatureId = child(creatureLayout, "id");
+    if (const auto n = integerValue(child(creatureId, "offset")))
+        p.creatureIdOffset = static_cast<std::size_t>(*n);
+
     const auto* fields = child(runtime, "selectedFields");
     p.health = readField(fields, "health");
     p.maxHealth = readField(fields, "maxHealth");
@@ -166,6 +215,11 @@ Profile loadProfile(const std::string& path) {
     p.maxMana = readField(fields, "maxMana");
     if (!p.health.valid || !p.maxHealth.valid || !p.mana.valid || !p.maxMana.valid)
         throw std::runtime_error("required player fields missing");
+    if (!p.expectedTimestamp || !p.expectedImageSize)
+        throw std::runtime_error("build fingerprint incomplete");
+    if (!p.monsterVtableRva || !p.creatureIdOffset || !p.attackMethodRva ||
+        !p.attackRuntimeConfirmed)
+        throw std::runtime_error("V37 attack contract incomplete");
 
     return p;
 }
