@@ -179,9 +179,9 @@
     "status": "runtime_or_static_consistent"
   },
   "runtime": {
-    "localPlayerPtr": "0x20CEE448",
-    "localPlayerVtableRva": "0x76E158",
-    "localPlayerVtableMatch": true,
+    "localPlayerPtr": "0x0",
+    "localPlayerVtableRva": "0x0",
+    "localPlayerVtableMatch": false,
     "position": {"x": "0xC", "y": "0x10", "z": "0x14", "direction": "0x4C"},
     "mapCenterCandidates": [],
     "mapCenterOffset": "0x1AC",
