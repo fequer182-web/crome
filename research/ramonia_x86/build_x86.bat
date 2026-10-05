@@ -150,15 +150,57 @@ if not exist "%OUT_INJECTOR%" (
 )
 
 echo.
-echo [DEPENDENCIAS] Injector x86:
+echo [AUDITORIA] Verificando arquitetura e dependencias do injector...
 if exist "%CXX_DIR%objdump.exe" (
+    "%CXX_DIR%objdump.exe" -f "%OUT_INJECTOR%" | findstr /I /C:"pei-i386" >nul
+    if errorlevel 1 (
+        echo [ERRO] O injector gerado nao e PE32/i386.
+        "%CXX_DIR%objdump.exe" -f "%OUT_INJECTOR%"
+        goto :fail
+    )
+    echo [ARCH] Injector PE32/i386: OK
+
+    echo.
+    echo [DEPENDENCIAS] Injector x86:
     "%CXX_DIR%objdump.exe" -p "%OUT_INJECTOR%" | findstr /I /C:"DLL Name"
+
     "%CXX_DIR%objdump.exe" -p "%OUT_INJECTOR%" | findstr /I /C:"libwinpthread-1.dll" /C:"libgcc_s_dw2-1.dll" /C:"libstdc++-6.dll" >nul
     if not errorlevel 1 (
         echo.
         echo [ERRO] O injector ainda depende de runtime MinGW dinamico.
         goto :fail
     )
+
+    > "%PKG_DIR%\BUILD_DIAGNOSTICS.txt" (
+        echo ============================================================
+        echo Crome Ramonia x86 - Build Diagnostics
+        echo ============================================================
+        echo COMPILER=%CXX%
+        echo CXX_BIN=%CXX_DIR%
+        echo TARGET=%TARGET%
+        echo.
+        echo ================= INJECTOR FILE HEADER =================
+        "%CXX_DIR%objdump.exe" -f "%OUT_INJECTOR%"
+        echo.
+        echo ================= INJECTOR IMPORTS =====================
+        "%CXX_DIR%objdump.exe" -p "%OUT_INJECTOR%" ^| findstr /I /C:"DLL Name"
+        echo.
+        echo ================= PROBE FILE HEADER ====================
+        "%CXX_DIR%objdump.exe" -f "%OUT_DLL%"
+        echo.
+        echo ================= PROBE IMPORTS ========================
+        "%CXX_DIR%objdump.exe" -p "%OUT_DLL%" ^| findstr /I /C:"DLL Name"
+        echo.
+        echo ================= RUNTIME FILES FOUND ==================
+        where libgcc_s_dw2-1.dll 2^>nul
+        where libstdc++-6.dll 2^>nul
+        where libwinpthread-1.dll 2^>nul
+    )
+    echo [DIAG] %PKG_DIR%\BUILD_DIAGNOSTICS.txt
+) else (
+    echo [ERRO] objdump.exe nao encontrado em:
+    echo        %CXX_DIR%
+    goto :fail
 )
 (
     echo Ramonia x86 Research Probe V33.1
