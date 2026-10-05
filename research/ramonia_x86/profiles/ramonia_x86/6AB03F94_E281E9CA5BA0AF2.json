@@ -179,7 +179,7 @@
     "status": "runtime_or_static_consistent"
   },
   "runtime": {
-    "localPlayerPtr": "0x2023E018",
+    "localPlayerPtr": "0x20AB0048",
     "localPlayerVtableRva": "0x76E158",
     "localPlayerVtableMatch": true,
     "position": {"x": "0xC", "y": "0x10", "z": "0x14", "direction": "0x4C"},
