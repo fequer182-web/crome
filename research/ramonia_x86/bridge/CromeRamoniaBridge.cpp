@@ -589,14 +589,36 @@ DWORD WINAPI bridgeThread(LPVOID) {
                     " version=" + std::to_string(profile.profileVersion));
             g_profile = std::move(profile);
             g_profileError.clear();
-            g_status = "profile_ready";
+
+            if (!readCurrentImageFingerprint())
+                throw std::runtime_error("cannot read current image fingerprint");
+
+            g_buildMatched =
+                g_imageTimestamp == g_profile->expectedTimestamp &&
+                g_imageSize == g_profile->expectedImageSize;
+
+            {
+                std::ostringstream fp;
+                fp << "[BUILD] runtime timestamp=0x" << std::hex << std::uppercase
+                   << g_imageTimestamp << " size=0x" << g_imageSize
+                   << " matched=" << (g_buildMatched ? "true" : "false");
+                logLine(fp.str());
+            }
+
+            if (!g_buildMatched)
+                throw std::runtime_error("runtime build does not match V37 profile");
+
+            if (!installGameThreadDispatcher())
+                throw std::runtime_error("game-thread dispatcher install failed");
+
+            g_status = "runtime_ready";
         } catch (const std::exception& e) {
-            g_profile.reset();
+            g_buildMatched = false;
             g_profileError = e.what();
             g_status = "profile_error";
             logLine("[PROFILE ERROR] " + g_profileError);
         } catch (...) {
-            g_profile.reset();
+            g_buildMatched = false;
             g_profileError = "unknown profile initialization error";
             g_status = "profile_error";
             logLine("[PROFILE ERROR] unknown exception");
