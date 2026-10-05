@@ -48,7 +48,7 @@ std::optional<Profile> g_profile;
 std::string moduleDirectory();
 
 std::filesystem::path bridgeLogPath() {
-    return std::filesystem::path(moduleDirectory()) / "CromeRamoniaBridge.log";
+    return moduleDirectory() + "\\CromeRamoniaBridge.log";
 }
 
 void logLine(const std::string& line) {
@@ -60,7 +60,7 @@ void logLine(const std::string& line) {
 
 void writeStatusFile() {
     try {
-        const auto path = std::filesystem::path(moduleDirectory()) / "CromeRamoniaBridge.status.txt";
+        const auto path = moduleDirectory() + "\\CromeRamoniaBridge.status.txt";
         std::ofstream o(path, std::ios::trunc | std::ios::binary);
         if (!o) return;
         o << "status=" << g_status << "\r\n"
@@ -71,20 +71,21 @@ void writeStatusFile() {
     } catch (...) {}
 }
 
-std::string readText(const std::filesystem::path& path) {
+std::string readText(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error("cannot open profile: " + path.string());
+    if (!f) throw std::runtime_error("cannot open profile: " + path);
     std::ostringstream ss;
     ss << f.rdbuf();
     return ss.str();
 }
 
-std::string moduleDirectory();
-
 std::string moduleDirectory() {
     char path[MAX_PATH]{};
-    GetModuleFileNameA(g_module, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path().string();
+    const DWORD len = GetModuleFileNameA(g_module, path, MAX_PATH);
+    if (!len) return ".";
+    std::string full(path, path + len);
+    const auto pos = full.find_last_of("\\/");
+    return pos == std::string::npos ? std::string(".") : full.substr(0, pos);
 }
 
 std::optional<std::uint64_t> integerValue(const crome::json::Value* v) {
@@ -119,7 +120,7 @@ Profile::Field readField(const crome::json::Value* fields, const char* name) {
     return out;
 }
 
-Profile loadProfile(const std::filesystem::path& path) {
+Profile loadProfile(const std::string& path) {
     const auto root = crome::json::parse(readText(path));
     if (!root.isObject()) throw std::runtime_error("profile root must be object");
 
@@ -169,13 +170,8 @@ Profile loadProfile(const std::filesystem::path& path) {
     return p;
 }
 
-std::filesystem::path findProfilePath() {
-    const auto dir = std::filesystem::path(moduleDirectory()) / "profiles" / "ramonia_x86";
-    if (!std::filesystem::exists(dir)) throw std::runtime_error("profiles\\ramonia_x86 not found");
-    for (const auto& e : std::filesystem::directory_iterator(dir)) {
-        if (e.is_regular_file() && e.path().extension() == ".json") return e.path();
-    }
-    throw std::runtime_error("Ramonia profile JSON not found");
+std::string findProfilePath() {
+    return moduleDirectory() + "\\profiles\\ramonia_x86\\6AB03F94_E281E9CA5BA0AF2.json";
 }
 
 template<class T>
@@ -353,7 +349,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
 
         try {
             const auto profilePath = findProfilePath();
-            logLine("[PROFILE] path=" + profilePath.string());
+            logLine("[PROFILE] path=" + profilePath);
             auto profile = loadProfile(profilePath);
             if (profile.architecture != "x86")
                 throw std::runtime_error("profile architecture is not x86");
