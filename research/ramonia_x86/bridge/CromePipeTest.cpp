@@ -5,6 +5,7 @@
 #include <tlhelp32.h>
 
 #include <cstdint>
+#include <cwctype>
 #include <iostream>
 #include <string>
 
