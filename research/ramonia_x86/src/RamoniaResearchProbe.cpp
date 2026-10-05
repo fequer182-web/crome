@@ -8671,6 +8671,8 @@ bool V33LooksVector3(const V33MemSnap& s,uint32_t& begin,uint32_t& end,uint32_t&
 }
 
 
+int V33ExpectedArgs(const std::string& token);
+
 bool V34CreatureFamily(const std::string& cls) {
     return cls=="LocalPlayer" || cls=="Player" || cls=="Monster" || cls=="Npc";
 }
