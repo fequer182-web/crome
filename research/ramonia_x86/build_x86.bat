@@ -7,9 +7,9 @@ set "BUILD_DIR=%~dp0build"
 set "PKG_DIR=%BUILD_DIR%\Ramonia_x86_Test"
 set "PROFILE_SRC=%~dp0profiles\ramonia_x86\6AB03F94_E281E9CA5BA0AF2.json"
 set "PROFILE_DIR=%PKG_DIR%\profiles\ramonia_x86"
-set "INJECTOR_SRC=%~dp0tools\injector\PID_Injector_x86.exe"
-set "PTHREAD_SRC=%~dp0tools\injector\libwinpthread-1.dll"
+set "INJECTOR_CPP=%~dp0..\..\tools\injector\PID_Injector.cpp"
 set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V33_1.dll"
+set "OUT_INJECTOR=%PKG_DIR%\PID_Injector_x86.exe"
 
 echo ============================================================
 echo          Crome - Ramonia x86 Research Probe V33.1
@@ -120,13 +120,46 @@ if errorlevel 1 (
     goto :fail
 )
 
-if exist "%INJECTOR_SRC%" (
-    copy /Y "%INJECTOR_SRC%" "%PKG_DIR%\PID_Injector_x86.exe" >nul
-) else (
-    echo [AVISO] PID_Injector_x86.exe nao encontrado; DLL ainda foi gerada.
+if not exist "%INJECTOR_CPP%" (
+    echo [ERRO] Source canonico do injector nao encontrado:
+    echo        %INJECTOR_CPP%
+    goto :fail
 )
 
-rem A DLL nova e compilada com runtime estatico. libwinpthread nao deve ser necessario.
+echo.
+echo [BUILD] Compilando PID_Injector_x86.exe a partir do source canonico...
+"%CXX%" ^
+    -std=c++20 ^
+    -O2 ^
+    -static ^
+    -static-libgcc ^
+    -static-libstdc++ ^
+    "%INJECTOR_CPP%" ^
+    -o "%OUT_INJECTOR%"
+
+if errorlevel 1 (
+    echo.
+    echo [ERRO] A compilacao do injector x86 falhou.
+    goto :fail
+)
+
+if not exist "%OUT_INJECTOR%" (
+    echo [ERRO] O linker terminou sem gerar:
+    echo        %OUT_INJECTOR%
+    goto :fail
+)
+
+echo.
+echo [DEPENDENCIAS] Injector x86:
+if exist "%CXX_DIR%objdump.exe" (
+    "%CXX_DIR%objdump.exe" -p "%OUT_INJECTOR%" | findstr /I /C:"DLL Name"
+    "%CXX_DIR%objdump.exe" -p "%OUT_INJECTOR%" | findstr /I /C:"libwinpthread-1.dll" /C:"libgcc_s_dw2-1.dll" /C:"libstdc++-6.dll" >nul
+    if not errorlevel 1 (
+        echo.
+        echo [ERRO] O injector ainda depende de runtime MinGW dinamico.
+        goto :fail
+    )
+)
 (
     echo Ramonia x86 Research Probe V33.1
     echo.
@@ -138,7 +171,7 @@ rem A DLL nova e compilada com runtime estatico. libwinpthread nao deve ser nece
     echo.
     echo Teste:
     echo   1. Abra o cliente Ramonia.
-    echo   2. Execute PID_Injector_x86.exe.
+    echo   2. Execute PID_Injector_x86.exe ^(compilado neste mesmo build^).
     echo   3. Quando pedir a DLL, selecione RamoniaResearchProbe_V33_1.dll.
     echo   4. No probe V33.1, comece pelo autoWalk.
     echo.
