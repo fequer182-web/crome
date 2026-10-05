@@ -245,6 +245,160 @@ bool readNumber(std::uintptr_t address, const std::string& type, double& out) {
     return false;
 }
 
+bool isExecutableAddress(std::uintptr_t address) {
+    if (!address) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        return false;
+    const DWORD p = mbi.Protect & 0xFFu;
+    return p == PAGE_EXECUTE || p == PAGE_EXECUTE_READ ||
+           p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool readCurrentImageFingerprint() {
+    const auto* base = reinterpret_cast<const std::uint8_t*>(g_base);
+    if (!base) return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    g_imageTimestamp = nt->FileHeader.TimeDateStamp;
+    g_imageSize = nt->OptionalHeader.SizeOfImage;
+    return true;
+}
+
+HWND findCurrentProcessWindow() {
+    struct Search { DWORD pid; HWND hwnd; } data{GetCurrentProcessId(), nullptr};
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* d = reinterpret_cast<Search*>(lp);
+        DWORD pid{};
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != d->pid || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr)
+            return TRUE;
+        d->hwnd = hwnd;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&data));
+    return data.hwnd;
+}
+
+#if defined(__GNUC__)
+typedef void (__attribute__((thiscall)) *GameAttackFn)(void*, void*);
+#else
+typedef void (__thiscall *GameAttackFn)(void*, void*);
+#endif
+
+bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
+    id = 0;
+    if (!g_profile || !target) return false;
+    std::uintptr_t vtable{};
+    if (!safeRead(target, vtable) || vtable != g_base + g_profile->monsterVtableRva)
+        return false;
+    return safeRead(target + g_profile->creatureIdOffset, id) && id != 0;
+}
+
+bool executeAttackSelectedOnGameThread() {
+    InterlockedExchange(&g_lastActionCode, 0);
+    g_lastActionTargetId = 0;
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode, 5);
+        return false;
+    }
+
+    const auto& p = *g_profile;
+    const auto game = g_base + p.gameRva;
+
+    std::uintptr_t followTarget{};
+    std::uintptr_t attackTarget{};
+    safeRead(game + p.followTargetOffset, followTarget);
+    safeRead(game + p.attackTargetOffset, attackTarget);
+
+    // For the first active proof, the user selects a Monster with Follow.
+    // If Follow is empty, reuse the current AttackTarget only as a fallback.
+    const auto target = followTarget ? followTarget : attackTarget;
+    if (!target) {
+        InterlockedExchange(&g_lastActionCode, 2);
+        return false;
+    }
+
+    std::uint32_t id{};
+    if (!targetSnapshot(target, id)) {
+        InterlockedExchange(&g_lastActionCode, 3);
+        return false;
+    }
+
+    const auto functionAddress = g_base + p.attackMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode, 4);
+        return false;
+    }
+
+    g_lastActionTargetId = id;
+    const auto fn = reinterpret_cast<GameAttackFn>(functionAddress);
+
+    logLine("[ACTION] ATTACK_SELECTED game-thread id=" + std::to_string(id));
+    fn(reinterpret_cast<void*>(game), reinterpret_cast<void*>(target));
+
+    std::uintptr_t after{};
+    safeRead(game + p.attackTargetOffset, after);
+    if (after == target) {
+        InterlockedExchange(&g_lastActionCode, 1);
+        logLine("[ACTION] ATTACK_SELECTED success id=" + std::to_string(id));
+        return true;
+    }
+
+    InterlockedExchange(&g_lastActionCode, 6);
+    logLine("[ACTION] ATTACK_SELECTED returned but AttackTarget did not match");
+    return false;
+}
+
+LRESULT CALLBACK bridgeWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == kAttackSelectedMessage) {
+        return executeAttackSelectedOnGameThread() ? 1 : 0;
+    }
+    return g_originalWndProc
+        ? CallWindowProc(g_originalWndProc, hwnd, message, wParam, lParam)
+        : DefWindowProc(hwnd, message, wParam, lParam);
+}
+
+bool installGameThreadDispatcher() {
+    if (g_gameWindow && g_originalWndProc) return true;
+    g_gameWindow = findCurrentProcessWindow();
+    if (!g_gameWindow) {
+        logLine("[DISPATCH] main game window not found");
+        return false;
+    }
+
+    SetLastError(0);
+    const LONG_PTR previous = SetWindowLongPtr(
+        g_gameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&bridgeWndProc));
+    if (!previous) {
+        const auto error = GetLastError();
+        logLine("[DISPATCH] SetWindowLongPtr failed Win32=" + std::to_string(error));
+        g_gameWindow = nullptr;
+        return false;
+    }
+
+    g_originalWndProc = reinterpret_cast<WNDPROC>(previous);
+    logLine("[DISPATCH] game-thread dispatcher installed");
+    return true;
+}
+
+std::string actionCodeText(LONG code) {
+    switch (code) {
+        case 1: return "success";
+        case 2: return "no_selected_target";
+        case 3: return "selected_target_is_not_confirmed_monster";
+        case 4: return "attack_function_not_executable";
+        case 5: return "build_not_validated";
+        case 6: return "attack_target_not_updated";
+        case 7: return "dispatcher_not_ready";
+        case 8: return "dispatcher_timeout";
+        default: return "unknown_action_result";
+    }
+}
+
 std::string jsonEscape(const std::string& s) {
     std::ostringstream o;
     for (unsigned char c : s) {
