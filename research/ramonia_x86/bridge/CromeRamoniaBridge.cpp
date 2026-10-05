@@ -485,6 +485,44 @@ std::string combatTargetsResponse(const Profile& p) {
     return o.str();
 }
 
+std::string attackSelectedResponse() {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"build_not_validated"})";
+
+    if (!g_gameWindow || !g_originalWndProc)
+        return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"dispatcher_not_ready"})";
+
+    InterlockedExchange(&g_lastActionCode, 0);
+    g_lastActionTargetId = 0;
+
+    DWORD_PTR dispatchResult{};
+    SetLastError(0);
+    const auto sent = SendMessageTimeout(
+        g_gameWindow,
+        kAttackSelectedMessage,
+        0,
+        0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        3000,
+        &dispatchResult);
+
+    if (!sent) {
+        InterlockedExchange(&g_lastActionCode, 8);
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"ATTACK_SELECTED\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << GetLastError() << "}";
+        return o.str();
+    }
+
+    const LONG code = InterlockedCompareExchange(&g_lastActionCode, 0, 0);
+    std::ostringstream o;
+    o << "{\"ok\":" << (code == 1 ? "true" : "false")
+      << ",\"cmd\":\"ATTACK_SELECTED\",\"result\":\"" << actionCodeText(code)
+      << "\",\"targetId\":" << g_lastActionTargetId
+      << ",\"gameThreadResult\":" << static_cast<unsigned long long>(dispatchResult) << "}";
+    return o.str();
+}
+
 std::string handleRequest(const std::string& request) {
     const auto cmd = commandFromRequest(request);
     if (cmd == "HELLO") {
