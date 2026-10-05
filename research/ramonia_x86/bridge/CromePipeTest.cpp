@@ -5,6 +5,7 @@
 #include <tlhelp32.h>
 
 #include <cstdint>
+#include <cctype>
 #include <cwctype>
 #include <iostream>
 #include <string>
@@ -83,10 +84,25 @@ bool request(DWORD pid, const std::string& json) {
 
 int main(int argc, char** argv) {
     DWORD pid = 0;
+    std::string mode = "baseline";
+
     if (argc >= 2) {
-        try { pid = static_cast<DWORD>(std::stoul(argv[1])); }
+        const std::string first = argv[1];
+        try {
+            std::size_t used{};
+            const auto parsed = std::stoul(first, &used, 10);
+            if (used == first.size()) pid = static_cast<DWORD>(parsed);
+            else mode = first;
+        } catch (...) {
+            mode = first;
+        }
+    }
+    if (argc >= 3 && !pid) {
+        try { pid = static_cast<DWORD>(std::stoul(argv[2])); }
         catch (...) {}
     }
+
+    for (auto& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (!pid) pid = findRamoniaPid();
 
     if (!pid) {
@@ -101,6 +117,31 @@ int main(int argc, char** argv) {
               << "PIPE : \\\\.\\pipe\\Crome.Ramonia." << pid << "\n\n";
 
     bool ok = true;
+
+    if (mode == "targets") {
+        std::cout << "[GET_COMBAT_TARGETS]\n";
+        ok &= request(pid, R"({"cmd":"GET_COMBAT_TARGETS"})");
+        std::cout << "\n" << (ok ? "[OK] Combat targets lidos.\n"
+                                   : "[FALHOU] Nao foi possivel ler combat targets.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "attack") {
+        std::cout << "[GET_COMBAT_TARGETS - BEFORE]\n";
+        ok &= request(pid, R"({"cmd":"GET_COMBAT_TARGETS"})");
+        if (!ok) return 2;
+
+        std::cout << "\n[ATTACK_SELECTED]\n";
+        ok &= request(pid, R"({"cmd":"ATTACK_SELECTED"})");
+
+        std::cout << "\n[GET_COMBAT_TARGETS - AFTER]\n";
+        ok &= request(pid, R"({"cmd":"GET_COMBAT_TARGETS"})");
+
+        std::cout << "\n" << (ok ? "[OK] ATTACK_SELECTED executado no game thread.\n"
+                                   : "[FALHOU] ATTACK_SELECTED nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
     std::cout << "[HELLO]\n";
     ok &= request(pid, R"({"cmd":"HELLO"})");
 
