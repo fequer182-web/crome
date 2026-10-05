@@ -21,7 +21,7 @@
 #include <vector>
 
 // ============================================================================
-// OTCLab Ramonia x86 Research Probe V33.1
+// OTCLab Ramonia x86 Research Probe V34
 // DISCOVERY READ-ONLY + ONE-SHOT RUNTIME ABI CAPTURE
 // No internal game action is called by the probe. V33 temporarily replaces one
 // selected action entry byte with INT3, captures the natural game call made by
@@ -1778,6 +1778,25 @@ double AskDouble(const std::string& label) {
     }
 }
 
+struct ActionAbiArgV34 {
+    int index = 0;
+    std::string semantic;
+    std::string abiType;
+    std::string status;
+    std::string rtti;
+};
+
+struct ActionAbiV34 {
+    std::string name;
+    uint32_t methodRva = 0;
+    uint32_t ownerRva = 0;
+    std::string callingConvention = "x86_thiscall_like";
+    std::string thisSemantic = "Game";
+    std::string thisLocation = "ecx";
+    std::string status = "pending";
+    std::vector<ActionAbiArgV34> args;
+};
+
 struct Report {
     ModuleView module;
     DiskFingerprint fp;
@@ -1811,6 +1830,8 @@ struct Report {
     bool profileLoaded = false;
     bool profileImportedLegacy = false;
     std::vector<std::string> profileSources;
+    std::map<std::string,ActionAbiV34> actionAbi;
+    std::map<std::string,std::string> actionAbiRaw;
 };
 
 std::string ProbeDirectory() {
@@ -1840,6 +1861,7 @@ struct ProfileCache {
     std::map<std::string,SelectedField> fields;
     CreatureLayout creatureLayout;
     WorldLightLayout worldLight;
+    std::map<std::string,std::string> actionAbiRaw;
     std::vector<std::string> sources;
 };
 
@@ -2006,6 +2028,12 @@ ProfileCache ParseProfileFile(const std::string& path, const Report& r) {
     const std::string owners = FindJsonObject(json, "owners");
     p.gameOwnerRva = HexU32Value(JsonStringValue(owners, "gameRva"));
     p.mapOwnerRva = HexU32Value(JsonStringValue(owners, "mapRva"));
+
+    const std::string actions = FindJsonObject(json, "actions");
+    for (const char* tok : {"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
+        const std::string obj = FindJsonObject(actions, tok);
+        if (!obj.empty()) p.actionAbiRaw[tok] = obj;
+    }
 
     const std::string gl = FindJsonObject(json, "gameLayout");
     p.localPlayer = HexOffsetValue(JsonStringValue(gl, "localPlayerOffset"));
@@ -2238,6 +2266,9 @@ void MergeProfile(ProfileCache& dst, const ProfileCache& src) {
             dst.fields[kv.first] = kv.second;
         }
     }
+    for (const auto& kv : src.actionAbiRaw) {
+        if (!dst.actionAbiRaw.count(kv.first)) dst.actionAbiRaw[kv.first] = kv.second;
+    }
 }
 
 ProfileCache LoadProfileForBuild(const Report& r) {
@@ -2354,6 +2385,7 @@ void ApplyLoadedProfile(Report& r, const ProfileCache& p) {
     for (const auto& kv : p.fields) {
         if (kv.second.offset >= 0 && EvidenceScore(kv.second.status) > 0) r.selectedFields[kv.first] = kv.second;
     }
+    r.actionAbiRaw = p.actionAbiRaw;
 }
 
 bool QuickCheckPosition(uintptr_t lp, const RuntimePositionValidation& p,
@@ -4457,6 +4489,46 @@ std::string SaveJson(const Report& r) {
 
     o << "  \"owners\": {\"gameRva\": \"" << HexU32(r.gameOwnerRva)
       << "\", \"mapRva\": \"" << HexU32(r.mapOwnerRva) << "\"},\n";
+
+    o << "  \"actions\": {\n";
+    const std::vector<std::string> actionOrder = {
+        "autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"
+    };
+    std::vector<std::string> actionPresent;
+    for (const auto& name : actionOrder) {
+        if (r.actionAbi.count(name) || r.actionAbiRaw.count(name)) actionPresent.push_back(name);
+    }
+    for (size_t ai=0; ai<actionPresent.size(); ++ai) {
+        const std::string& name = actionPresent[ai];
+        auto it = r.actionAbi.find(name);
+        if (it == r.actionAbi.end()) {
+            o << "    \"" << JsonEscape(name) << "\": " << r.actionAbiRaw.at(name)
+              << (ai+1<actionPresent.size()?",":"") << "\n";
+            continue;
+        }
+        const ActionAbiV34& a = it->second;
+        o << "    \"" << JsonEscape(name) << "\": {\n"
+          << "      \"methodRva\": \"" << HexU32(a.methodRva) << "\",\n"
+          << "      \"ownerRva\": \"" << HexU32(a.ownerRva) << "\",\n"
+          << "      \"callingConvention\": \"" << JsonEscape(a.callingConvention) << "\",\n"
+          << "      \"this\": {\"semantic\": \"" << JsonEscape(a.thisSemantic)
+          << "\", \"location\": \"" << JsonEscape(a.thisLocation) << "\"},\n"
+          << "      \"status\": \"" << JsonEscape(a.status) << "\",\n"
+          << "      \"args\": [";
+        for (size_t i=0;i<a.args.size();++i) {
+            const ActionAbiArgV34& arg=a.args[i];
+            if (i) o << ", ";
+            o << "{\"index\":" << arg.index
+              << ",\"semantic\":\"" << JsonEscape(arg.semantic)
+              << "\",\"abiType\":\"" << JsonEscape(arg.abiType)
+              << "\",\"status\":\"" << JsonEscape(arg.status) << "\"";
+            if (!arg.rtti.empty()) o << ",\"rtti\":\"" << JsonEscape(arg.rtti) << "\"";
+            o << "}";
+        }
+        o << "]\n"
+          << "    }" << (ai+1<actionPresent.size()?",":"") << "\n";
+    }
+    o << "  },\n";
     o << "  \"gameLayout\": {\n";
     auto joff=[&](int v){ return v>=0 ? HexU32(static_cast<uint32_t>(v)) : std::string("0x0"); };
     o << "    \"localPlayerOffset\": \"" << joff(r.gameLayout.localPlayer) << "\",\n";
@@ -4567,7 +4639,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V33.1\n"
+        << "        OTCLab Ramonia x86 Research Probe V34\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4585,7 +4657,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V33.1 - RUNTIME ABI CAPTURE");
+    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V34 - RUNTIME ABI CAPTURE");
 }
 
 
@@ -8598,6 +8670,138 @@ bool V33LooksVector3(const V33MemSnap& s,uint32_t& begin,uint32_t& end,uint32_t&
     return true;
 }
 
+
+bool V34CreatureFamily(const std::string& cls) {
+    return cls=="LocalPlayer" || cls=="Player" || cls=="Monster" || cls=="Npc";
+}
+
+bool V34LooksPosition(const V33MemSnap& s,uint32_t& x,uint32_t& y,uint32_t& z) {
+    if(s.valid<12) return false;
+    x=V33SnapDword(s,0); y=V33SnapDword(s,4); z=V33SnapDword(s,8);
+    return x>0 && x<=65535 && y>0 && y<=65535 && z<=15;
+}
+
+bool V34LooksMsvcString(const V33MemSnap& s,const V33MemSnap& nested0) {
+    if(s.valid<24) return false;
+    const uint32_t sz=V33SnapDword(s,0x10), cp=V33SnapDword(s,0x14);
+    if(sz>0x400 || cp<sz || cp>0x100000) return false;
+    if(cp<16) return true;
+    return nested0.valid>0;
+}
+
+ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,const V33Capture& c) {
+    ActionAbiArgV34 out;
+    out.index=idx;
+    out.semantic="Unknown";
+    out.abiType="unknown";
+    out.status="runtime_observed";
+
+    if(idx<0 || idx>=6) return out;
+    const V33MemSnap& snap=c.argSnap[idx];
+    const V33MemSnap& n0s=c.argNested0[idx];
+    const uint32_t raw=c.stack[idx+1];
+    const std::string direct=V33ClassFromSnap(r,snap);
+    const std::string n0=V33ClassFromSnap(r,n0s);
+
+    if(token=="talkChannel") {
+        if(idx==0) { out.semantic="MessageMode"; out.abiType="u32"; out.status="runtime_confirmed"; return out; }
+        if(idx==1) { out.semantic="Channel"; out.abiType="u32"; out.status="runtime_confirmed"; return out; }
+        if(idx==2 && V34LooksMsvcString(snap,n0s)) {
+            out.semantic="Message"; out.abiType="msvc_string_ref"; out.status="runtime_confirmed"; return out;
+        }
+    }
+
+    if((token=="attack" || token=="follow") && idx==0 && V34CreatureFamily(direct)) {
+        out.semantic="Creature"; out.abiType="raw_ptr"; out.status="runtime_confirmed"; out.rtti=direct; return out;
+    }
+
+    uint32_t vb=0,ve=0,vc=0;
+    if(token=="autoWalk" && idx==0 && V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
+        out.semantic="Directions"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
+    }
+
+    if(token=="move" && idx==2) {
+        out.semantic="Count"; out.abiType="u32"; out.status="runtime_observed"; return out;
+    }
+
+    uint32_t px=0,py=0,pz=0;
+    if(V34LooksPosition(snap,px,py,pz)) {
+        out.semantic="Position"; out.abiType="position_ref"; out.status="runtime_observed"; return out;
+    }
+
+    if(!n0.empty()) {
+        out.semantic = V34CreatureFamily(n0) ? "Creature" : n0;
+        out.abiType="object_holder_ref";
+        out.status="runtime_observed";
+        out.rtti=n0;
+        return out;
+    }
+
+    if(!direct.empty()) {
+        out.semantic = V34CreatureFamily(direct) ? "Creature" : direct;
+        out.abiType="raw_ptr";
+        out.status="runtime_observed";
+        out.rtti=direct;
+        return out;
+    }
+
+    if(V34LooksMsvcString(snap,n0s)) {
+        out.semantic="String"; out.abiType="msvc_string_ref"; out.status="runtime_observed"; return out;
+    }
+
+    if(V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
+        out.semantic="Vector"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
+    }
+
+    if(!raw) {
+        out.semantic="Scalar"; out.abiType="u32"; out.status="runtime_observed"; return out;
+    }
+
+    out.semantic="Scalar";
+    out.abiType="u32";
+    return out;
+}
+
+void V34PromoteCapture(Report& r,const std::string& token) {
+    auto bit=r.binds.find(token);
+    if(bit==r.binds.end() || !bit->second.selectedOk) return;
+
+    ActionAbiV34 a;
+    a.name=token;
+    a.methodRva=bit->second.selected.methodRva;
+    a.ownerRva=bit->second.selected.ownerRva;
+    const bool thisOk = r.gameOwnerRva &&
+        g_v33Capture.ecx==static_cast<uint32_t>(r.module.base+r.gameOwnerRva);
+
+    const int argc=V33ExpectedArgs(token);
+    for(int i=0;i<argc && i<6;++i) a.args.push_back(V34ClassifyArg(r,token,i,g_v33Capture));
+
+    a.status = thisOk ? "runtime_observed" : "runtime_this_mismatch";
+    if(thisOk && (token=="attack" || token=="follow") &&
+       !a.args.empty() && a.args[0].status=="runtime_confirmed")
+        a.status="runtime_confirmed";
+    if(thisOk && token=="talkChannel" && a.args.size()==3 &&
+       a.args[0].status=="runtime_confirmed" &&
+       a.args[1].status=="runtime_confirmed" &&
+       a.args[2].status=="runtime_confirmed")
+        a.status="runtime_confirmed";
+
+    r.actionAbi[token]=a;
+    r.actionAbiRaw.erase(token);
+
+    std::cout << "    [V34 ABI] " << token
+              << " status=" << a.status
+              << " cc=" << a.callingConvention << "\n";
+    for(const auto& arg:a.args) {
+        std::cout << "      arg" << (arg.index+1)
+                  << " semantic=" << arg.semantic
+                  << " abiType=" << arg.abiType
+                  << " status=" << arg.status;
+        if(!arg.rtti.empty()) std::cout << " rtti=" << arg.rtti;
+        std::cout << "\n";
+    }
+}
+
 std::string V33AsciiPreview(const uint8_t* p,size_t n) {
     std::string out;
     for(size_t i=0;i<n && i<40;++i) {
@@ -8715,6 +8919,8 @@ void V33CaptureAction(Report& r,const std::string& token) {
         V33Disarm();
         if(InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0) {
             V33PrintCapture(r,token);
+            V34PromoteCapture(r,token);
+            SaveCheckpoint(r,std::string("action_abi_")+token);
             return;
         }
         std::cout << "[V33.1 MISS] o metodo nao foi atingido nesta tentativa.\n";
@@ -8730,14 +8936,14 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] ainda NAO promove assinatura ativa; primeiro classificamos raw pointer/ref/smart holder/string/vector.\n";
+              << "[RULE] V34 classifica a ABI observada e grava actions no profile; ainda NAO executa chamadas internas.\n";
 
     for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"})
         V33CaptureAction(r,tok);
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V33.1 COMPLETE] envie o bloco GAME ACTION ABI RUNTIME CAPTURE V33.1 inteiro.\n";
+    std::cout << "\n[V34 COMPLETE] ABI observada classificada e persistida no bloco actions do profile.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
