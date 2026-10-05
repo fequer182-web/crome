@@ -2,7 +2,7 @@
 
 ## Probe
 
-Version: **V33.1**
+Version: **V34**
 
 Canonical source:
 
@@ -40,7 +40,7 @@ Tile::things:
 - stride `4`
 - Tile vtable RVA `0x774208`
 
-## V33.1 runtime capture safety changes present in source
+## V33.1 runtime capture safety + V34 ABI classifier
 
 - target page protection is changed before arming;
 - VEH does not call `VirtualProtect`;
@@ -53,4 +53,4 @@ Tile::things:
 ## Rule
 
 The profile is the source of truth for already-confirmed offsets/RVAs.
-Runtime ABI captures are evidence only until argument semantics are unambiguous.
+V34 promotes only classified runtime evidence into the portable `actions` profile block; active calls remain disabled.
