@@ -6,7 +6,7 @@ Esta pasta concentra a pesquisa da build Ramonia x86 e é a base oficial para as
 
 `src/RamoniaResearchProbe.cpp`
 
-Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V34**.
+Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V35**.
 
 ## Build rápido no Windows
 
@@ -20,13 +20,13 @@ O script:
 2. recusa compiladores x64;
 3. compila `src/RamoniaResearchProbe.cpp`;
 4. gera uma pasta limpa em `build/Ramonia_x86_Test/`;
-5. copia o profile canônico para `profiles/ramonia_x86/`;
-6. copia o injector x86 e `libwinpthread-1.dll` quando disponíveis;
+5. copia o profile canônico para o pacote de teste;
+6. compila o injector x86 canônico de forma estática;
 7. abre a pasta de teste ao concluir.
 
 Saída esperada:
 
-`build/Ramonia_x86_Test/RamoniaResearchProbe_V34.dll`
+`build/Ramonia_x86_Test/RamoniaResearchProbe_V35.dll`
 
 > A pasta `build/` é gerada localmente e não é versionada pelo Git.
 
@@ -78,3 +78,17 @@ Não alterar esse metadado junto com mudanças funcionais. A migração de schem
 ## Próximo passo
 
 Usar este source como baseline e capturar as ações reais no V34 para classificar automaticamente os argumentos e persistir o bloco `actions` no profile. O probe continua sem executar chamadas internas.
+
+
+## V35 — fechamento da ABI x86
+
+O V35 mantém o breakpoint one-shot reversível da V33.1 e não chama ações internas por conta própria.
+
+Ele fecha as ações que ainda estavam apenas `runtime_observed` usando evidência estrutural da própria chamada real:
+
+- `autoWalk`: valida o vector de direções e seus elementos;
+- `look/use/move/useWith`: reconhece referências a `shared_object_ptr` por stack-local holder + RTTI;
+- `move`: reconhece `Position` OTC em layout compacto e o count escalar;
+- ações já `runtime_confirmed` no profile são puladas automaticamente.
+
+Quando executado dentro de `build/Ramonia_x86_Test`, cada save também espelha o profile para o caminho canônico `profiles/ramonia_x86/`. Assim o GitHub Desktop passa a mostrar o JSON atualizado sem cópia manual.
