@@ -20,6 +20,10 @@ namespace {
 HMODULE g_module{};
 volatile LONG g_running = 1;
 
+std::string g_status = "starting";
+std::string g_profileError;
+std::uintptr_t g_base{};
+
 struct Profile {
     std::string schema;
     int profileVersion{};
@@ -39,6 +43,32 @@ struct Profile {
     Field health, maxHealth, mana, maxMana;
 };
 
+std::optional<Profile> g_profile;
+
+std::filesystem::path bridgeLogPath() {
+    return std::filesystem::path(moduleDirectory()) / "CromeRamoniaBridge.log";
+}
+
+void logLine(const std::string& line) {
+    try {
+        std::ofstream o(bridgeLogPath(), std::ios::app | std::ios::binary);
+        if (o) o << line << "\r\n";
+    } catch (...) {}
+}
+
+void writeStatusFile() {
+    try {
+        const auto path = std::filesystem::path(moduleDirectory()) / "CromeRamoniaBridge.status.txt";
+        std::ofstream o(path, std::ios::trunc | std::ios::binary);
+        if (!o) return;
+        o << "status=" << g_status << "\r\n"
+          << "pid=" << GetCurrentProcessId() << "\r\n"
+          << "pipe=" << "\\\\.\\pipe\\Crome.Ramonia." << GetCurrentProcessId() << "\r\n"
+          << "profileReady=" << (g_profile.has_value() ? "true" : "false") << "\r\n";
+        if (!g_profileError.empty()) o << "profileError=" << g_profileError << "\r\n";
+    } catch (...) {}
+}
+
 std::string readText(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open profile: " + path.string());
@@ -46,6 +76,8 @@ std::string readText(const std::filesystem::path& path) {
     ss << f.rdbuf();
     return ss.str();
 }
+
+std::string moduleDirectory();
 
 std::string moduleDirectory() {
     char path[MAX_PATH]{};
@@ -224,15 +256,28 @@ std::string playerResponse(const Profile& p, std::uintptr_t base) {
     return o.str();
 }
 
-std::string handleRequest(const std::string& request, const Profile& p, std::uintptr_t base) {
+std::string handleRequest(const std::string& request) {
     const auto cmd = commandFromRequest(request);
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"protocol\":1,\"pid\":" << GetCurrentProcessId()
-          << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\"}";
+          << "\"bridgeVersion\":2,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
+          << "\"status\":\"" << jsonEscape(g_status) << "\","
+          << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false");
+        if (!g_profileError.empty())
+            o << ",\"profileError\":\"" << jsonEscape(g_profileError) << "\"";
+        o << "}";
         return o.str();
     }
+
+    if (!g_profile) {
+        return "{\"ok\":false,\"cmd\":\"" + jsonEscape(cmd) +
+               "\",\"error\":\"profile_not_ready\",\"detail\":\"" +
+               jsonEscape(g_profileError) + "\"}";
+    }
+
+    const auto& p = *g_profile;
     if (cmd == "BUILD_INFO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"BUILD_INFO\",\"schema\":\"" << jsonEscape(p.schema)
@@ -243,11 +288,11 @@ std::string handleRequest(const std::string& request, const Profile& p, std::uin
           << "\",\"textHash\":\"" << jsonEscape(p.textHash) << "\"}";
         return o.str();
     }
-    if (cmd == "GET_PLAYER") return playerResponse(p, base);
+    if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
     return "{\"ok\":false,\"error\":\"unknown_command\",\"cmd\":\"" + jsonEscape(cmd) + "\"}";
 }
 
-void serveOne(const Profile& profile, std::uintptr_t base) {
+void serveOne() {
     const auto name = pipeName();
     HANDLE pipe = CreateNamedPipeA(
         name.c_str(),
@@ -255,8 +300,18 @@ void serveOne(const Profile& profile, std::uintptr_t base) {
         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
         1, 8192, 8192, 1000, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) {
+        const auto err = GetLastError();
+        g_status = "pipe_create_failed";
+        logLine("[PIPE] CreateNamedPipe failed Win32=" + std::to_string(err) + " name=" + name);
+        writeStatusFile();
         Sleep(500);
         return;
+    }
+
+    if (g_status != "listening") {
+        g_status = "listening";
+        logLine("[PIPE] listening name=" + name);
+        writeStatusFile();
     }
 
     const BOOL connected = ConnectNamedPipe(pipe, nullptr) ? TRUE :
@@ -267,7 +322,7 @@ void serveOne(const Profile& profile, std::uintptr_t base) {
         DWORD read{};
         if (ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr) && read) {
             std::string request(buffer, buffer + read);
-            const auto response = handleRequest(request, profile, base);
+            const auto response = handleRequest(request);
             DWORD written{};
             WriteFile(pipe, response.data(), static_cast<DWORD>(response.size()), &written, nullptr);
             FlushFileBuffers(pipe);
@@ -280,16 +335,59 @@ void serveOne(const Profile& profile, std::uintptr_t base) {
 
 DWORD WINAPI bridgeThread(LPVOID) {
     try {
-        const auto profilePath = findProfilePath();
-        const auto profile = loadProfile(profilePath);
-        if (profile.architecture != "x86")
-            throw std::runtime_error("profile architecture is not x86");
+        // Reset diagnostics on every fresh DLL load.
+        try {
+            std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
+            if (clear) clear << "CromeRamoniaBridge V2 startup\r\n";
+        } catch (...) {}
 
-        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        logLine("[START] pid=" + std::to_string(GetCurrentProcessId()));
+        {
+            std::ostringstream o;
+            o << "[START] moduleBase=0x" << std::hex << std::uppercase << g_base;
+            logLine(o.str());
+        }
+
+        try {
+            const auto profilePath = findProfilePath();
+            logLine("[PROFILE] path=" + profilePath.string());
+            auto profile = loadProfile(profilePath);
+            if (profile.architecture != "x86")
+                throw std::runtime_error("profile architecture is not x86");
+            logLine("[PROFILE] loaded schema=" + profile.schema +
+                    " version=" + std::to_string(profile.profileVersion));
+            g_profile = std::move(profile);
+            g_profileError.clear();
+            g_status = "profile_ready";
+        } catch (const std::exception& e) {
+            g_profile.reset();
+            g_profileError = e.what();
+            g_status = "profile_error";
+            logLine("[PROFILE ERROR] " + g_profileError);
+        } catch (...) {
+            g_profile.reset();
+            g_profileError = "unknown profile initialization error";
+            g_status = "profile_error";
+            logLine("[PROFILE ERROR] unknown exception");
+        }
+
+        writeStatusFile();
+
+        // Critical V2 change: always expose the pipe, even if profile loading failed.
         while (InterlockedCompareExchange(&g_running, 1, 1))
-            serveOne(profile, base);
+            serveOne();
+
+    } catch (const std::exception& e) {
+        g_status = "bridge_thread_error";
+        g_profileError = e.what();
+        logLine("[FATAL] " + g_profileError);
+        writeStatusFile();
     } catch (...) {
-        // Keep DllMain-safe behavior: failure simply leaves no pipe endpoint.
+        g_status = "bridge_thread_error";
+        g_profileError = "unknown bridge thread error";
+        logLine("[FATAL] unknown exception");
+        writeStatusFile();
     }
     return 0;
 }
@@ -301,8 +399,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         g_module = instance;
         DisableThreadLibraryCalls(instance);
         InterlockedExchange(&g_running, 1);
-        if (HANDLE h = CreateThread(nullptr, 0, bridgeThread, nullptr, 0, nullptr))
+        if (HANDLE h = CreateThread(nullptr, 0, bridgeThread, nullptr, 0, nullptr)) {
             CloseHandle(h);
+        } else {
+            g_status = "thread_create_failed";
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
         InterlockedExchange(&g_running, 0);
     }
