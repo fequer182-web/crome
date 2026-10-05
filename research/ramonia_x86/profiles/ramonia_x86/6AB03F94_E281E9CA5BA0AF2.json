@@ -1,8 +1,8 @@
 {
-  "schema": "otclab-ramonia-x86-research-v35",
+  "schema": "otclab-ramonia-x86-research-v36",
   "mode": "read_only_no_hooks_no_internal_calls",
   "policy": "discovery_rules_only_no_cross_build_rva_oracle",
-  "persistence": {"profileVersion": 35, "checkpoint": "complete", "resumeEnabled": true},
+  "persistence": {"profileVersion": 36, "checkpoint": "complete", "resumeEnabled": true},
   "build": {
     "exe": "C:\\Users\\alex1\\AppData\\Roaming\\Ramonia\\RamoniaSummer26\\ramonia_gl-1790824009.exe",
     "architecture": "x86",
@@ -179,7 +179,7 @@
     "status": "runtime_or_static_consistent"
   },
   "runtime": {
-    "localPlayerPtr": "0x13753810",
+    "localPlayerPtr": "0x2023E018",
     "localPlayerVtableRva": "0x76E158",
     "localPlayerVtableMatch": true,
     "position": {"x": "0xC", "y": "0x10", "z": "0x14", "direction": "0x4C"},
