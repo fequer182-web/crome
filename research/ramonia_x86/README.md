@@ -1,12 +1,34 @@
 # Ramonia x86 Research
 
-Esta pasta concentra a pesquisa da build Ramonia x86 e passa a ser a base oficial para as próximas versões do probe.
+Esta pasta concentra a pesquisa da build Ramonia x86 e é a base oficial para as próximas versões do probe.
 
 ## Fonte canônico
 
 `src/RamoniaResearchProbe.cpp`
 
-Apesar do arquivo histórico ter o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual já corresponde ao **Research Probe V33.1**. O cabeçalho do próprio fonte, o static ABI probe V32 e o runtime ABI capture V33.1 confirmam isso.
+Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V33.1**.
+
+## Build rápido no Windows
+
+Execute:
+
+`build_x86.bat`
+
+O script:
+
+1. procura um compilador MinGW **x86/i686**;
+2. recusa compiladores x64;
+3. compila `src/RamoniaResearchProbe.cpp`;
+4. gera uma pasta limpa em `build/Ramonia_x86_Test/`;
+5. copia o profile canônico para `profiles/ramonia_x86/`;
+6. copia o injector x86 e `libwinpthread-1.dll` quando disponíveis;
+7. abre a pasta de teste ao concluir.
+
+Saída esperada:
+
+`build/Ramonia_x86_Test/RamoniaResearchProbe_V33_1.dll`
+
+> A pasta `build/` é gerada localmente e não é versionada pelo Git.
 
 ## Estrutura
 
