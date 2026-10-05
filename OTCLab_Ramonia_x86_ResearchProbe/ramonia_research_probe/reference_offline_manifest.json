@@ -1,0 +1,91 @@
+{
+  "schema": "otclab-offline-comparison-v1",
+  "source": "RamoniaSummer2026.zip",
+  "warning": "Uploaded GL/DX executables differ from latest runtime fingerprint; do not copy RVAs to that runtime build.",
+  "builds": {
+    "gl": {
+      "architecture": "x86",
+      "timestamp": "0x6A7F2858",
+      "sizeOfImage": "0xA9D000",
+      "entryPointRva": "0x47C750",
+      "textHashFNV1A64": "0xE826F0EA23468CEF",
+      "rendererImports": ["OPENGL32.dll"],
+      "owners": {"gameRva": "0xA28950", "mapRva": "0xA28A80"},
+      "functions": {
+        "Game::autoWalk": "0x76880",
+        "Game::attack": "0x79050",
+        "Game::follow": "0x791C0",
+        "Game::look": "0x77660",
+        "Game::move": "0x77940",
+        "Game::use": "0x77F90",
+        "Game::useWith": "0x783B0",
+        "Game::talk": "0x795B0",
+        "Game::talkChannel": "0x79610",
+        "Map::getTile": "0x146A50",
+        "Map::getCreatureById": "0x1472C0",
+        "Map::getCreatureByName": "0x68B90",
+        "Tile::getTopUseThingCandidate": "0x194DA0",
+        "LocalPlayer::autoWalkCandidate": "0x8E6E0"
+      },
+      "vtables": {
+        "LocalPlayer": "0x76B0BC",
+        "Player": "0x76AFB4",
+        "Monster": "0x770E38",
+        "Npc": "0x770EEC",
+        "Item": "0x76AF28",
+        "Tile": "0x7710FC",
+        "Container": "0x76AB48"
+      }
+    },
+    "dx": {
+      "architecture": "x86",
+      "timestamp": "0x6A7F281B",
+      "sizeOfImage": "0xA69000",
+      "entryPointRva": "0x47C300",
+      "textHashFNV1A64": "0x7966225B18C8E0EE",
+      "rendererImports": ["libGLESv2.dll", "libEGL.dll"],
+      "owners": {"gameRva": "0x9F9770", "mapRva": "0x9F9920"},
+      "functions": {
+        "Game::autoWalk": "0x76880",
+        "Game::attack": "0x79050",
+        "Game::follow": "0x791C0",
+        "Game::look": "0x77660",
+        "Game::move": "0x77940",
+        "Game::use": "0x77F90",
+        "Game::useWith": "0x783B0",
+        "Game::talk": "0x795B0",
+        "Game::talkChannel": "0x79610",
+        "Map::getTile": "0x147BA0",
+        "Map::getCreatureById": "0x148410",
+        "Map::getCreatureByName": "0x68B90",
+        "Tile::getTopUseThingCandidate": "0x195D70",
+        "LocalPlayer::autoWalkCandidate": "0x8FA60"
+      },
+      "vtables": {
+        "LocalPlayer": "0x740C84",
+        "Player": "0x740B7C",
+        "Monster": "0x746A00",
+        "Npc": "0x746AB4",
+        "Item": "0x740AF0",
+        "Tile": "0x746CC4",
+        "Container": "0x740708"
+      }
+    }
+  },
+  "inferredGameLayout": {
+    "localPlayerOffset": "0x0",
+    "attackTargetOffset": "0x4",
+    "followTargetOffset": "0x8",
+    "protocolCandidateOffset": "0xC",
+    "status": "static_candidate_runtime_validation_required"
+  },
+  "resolverRules": [
+    "RTTI TypeDescriptor -> COL -> vtable first",
+    "exact token\\0 -> x86 immediate xref",
+    "nearby push/mov immediate into .text -> bound method",
+    "shared class token/owner cluster distinguishes Game autoWalk from LocalPlayer autoWalk",
+    "owner singleton immediate from registration is a candidate Game/Map object",
+    "runtime validation before profile promotion",
+    "blind pointer scan only as fallback"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "poll_ms": 100,
+  "rules": [
+    {"name":"light_heal","enabled":false,"trigger":"health_percent","below_or_equal":93,"min_mana":25,"action":"spell","spell":"exura","cooldown_ms":850,"priority":600},
+    {"name":"mid_heal","enabled":false,"trigger":"health_percent","below_or_equal":70,"min_mana":40,"action":"spell","spell":"exura gran","cooldown_ms":850,"priority":700},
+    {"name":"high_heal","enabled":false,"trigger":"health_percent","below_or_equal":40,"min_mana":80,"action":"spell","spell":"exura vita","cooldown_ms":850,"priority":800},
+    {"name":"uh","enabled":false,"trigger":"health_percent","below_or_equal":50,"min_mana":0,"action":"item_on_self","item_id":2273,"cooldown_ms":650,"priority":1000},
+    {"name":"life_fluid","enabled":false,"trigger":"health_percent","below_or_equal":50,"min_mana":0,"action":"item_on_self","item_id":0,"cooldown_ms":650,"priority":900},
+    {"name":"mana_fluid","enabled":false,"trigger":"mana_percent","below_or_equal":50,"min_mana":0,"action":"item_on_self","item_id":0,"cooldown_ms":650,"priority":500}
+  ]
+}

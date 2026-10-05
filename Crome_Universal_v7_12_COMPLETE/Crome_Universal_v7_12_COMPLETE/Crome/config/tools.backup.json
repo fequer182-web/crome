@@ -1,0 +1,47 @@
+{
+  "food": {
+    "enabled": false,
+    "interval_ms": 60000,
+    "item_ids": []
+  },
+  "anti_idle": {
+    "enabled": false,
+    "min_interval_ms": 45000,
+    "max_interval_ms": 90000,
+    "mode": "turn_only",
+    "status": "runtime_turn_action_pending"
+  },
+  "mana_shield": {
+    "enabled": false,
+    "spell": "utamo vita",
+    "fallback_interval_ms": 170000,
+    "prefer_condition_state": true
+  },
+  "anti_paralyze": {
+    "enabled": false,
+    "spell": "exura",
+    "prefer_condition_state": true,
+    "speed_baseline_mode": "unhasted_base"
+  },
+  "auto_haste": {
+    "enabled": false,
+    "spell": "utani hur",
+    "fallback_interval_ms": 30000,
+    "prefer_condition_state": true
+  },
+  "light": {
+    "enabled": false,
+    "profile_gated": true
+  },
+  "spear_pickup": {
+    "enabled": false,
+    "item_ids": [],
+    "status": "requires_move_equip_backend"
+  },
+  "reammo": {
+    "enabled": false,
+    "item_ids": [],
+    "min_count": 1,
+    "status": "requires_move_equip_backend"
+  }
+}

@@ -1,0 +1,1196 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <tlhelp32.h>
+#include <dwmapi.h>
+#include <commdlg.h>
+#include <gl/GL.h>
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cmath>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <memory>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <nlohmann/json.hpp>
+
+#include "core/runtime/ClientSession.hpp"
+#include "core/readers/ProfileBackedPlayerReader.hpp"
+#include "core/profile/Capabilities.hpp"
+
+#include "imgui.h"
+#include "backends/imgui_impl_win32.h"
+#include "backends/imgui_impl_opengl3.h"
+
+#pragma comment(lib, "opengl32.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+static HWND g_hWnd = nullptr;
+static HDC g_hDC = nullptr;
+static HGLRC g_hRC = nullptr;
+static bool g_running = true;
+static bool g_dark = true;
+static ImFont* g_font = nullptr;
+static ImFont* g_fontBold = nullptr;
+static ImFont* g_fontTitle = nullptr;
+
+static std::unique_ptr<crome::ClientSession> g_session;
+static std::unique_ptr<crome::ProfileBackedPlayerReader> g_playerReader;
+static crome::PlayerSnapshot g_livePlayer;
+static uint64_t g_lastPlayerRead = 0;
+static std::filesystem::path g_baseDir;
+static DWORD FindProcessByName(const wchar_t* exeName);
+
+static bool g_nativeRuntimeLoaded = false;
+static std::string g_nativeRuntimeStatus = "waiting";
+static uint64_t g_lastNativeInjectAttempt = 0;
+static DWORD g_nativeAttemptPid = 0;
+static bool g_nativeAttemptedForPid = false;
+static std::unordered_map<std::string,std::string> g_lastWrittenJson;
+
+static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    MODULEENTRY32W me{}; me.dwSize = sizeof(me);
+    bool found = false;
+    if (Module32FirstW(snap, &me)) {
+        do { if (_wcsicmp(me.szModule, moduleName) == 0) { found = true; break; } }
+        while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+static bool InjectRuntimeDll(DWORD pid, const std::filesystem::path& dllPath, std::string& error) {
+    if (!std::filesystem::exists(dllPath)) { error = "CromeRuntime.dll missing"; return false; }
+    HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
+                                 PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
+    if (!process) { error = "OpenProcess=" + std::to_string(GetLastError()); return false; }
+    const std::wstring wide = std::filesystem::absolute(dllPath).wstring();
+    const SIZE_T bytes = (wide.size() + 1) * sizeof(wchar_t);
+    void* remote = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote) { error = "VirtualAllocEx=" + std::to_string(GetLastError()); CloseHandle(process); return false; }
+    SIZE_T written{};
+    if (!WriteProcessMemory(process, remote, wide.c_str(), bytes, &written) || written != bytes) {
+        error = "WriteProcessMemory=" + std::to_string(GetLastError());
+        VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process); return false;
+    }
+    auto k32 = GetModuleHandleW(L"kernel32.dll");
+    auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(k32, "LoadLibraryW"));
+    HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remote, 0, nullptr);
+    if (!thread) { error = "CreateRemoteThread=" + std::to_string(GetLastError()); VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process); return false; }
+    WaitForSingleObject(thread, 5000);
+    DWORD code = 0; GetExitCodeThread(thread, &code);
+    CloseHandle(thread); VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process);
+    if (!code) { error = "LoadLibraryW returned 0"; return false; }
+    return true;
+}
+
+static void RefreshNativeRuntime() {
+    const DWORD pid = FindProcessByName(L"Olders_OpenGL.exe");
+    if (!pid) {
+        g_nativeRuntimeLoaded = false; g_nativeRuntimeStatus = "Olders not running";
+        g_nativeAttemptPid = 0; g_nativeAttemptedForPid = false; return;
+    }
+    if (pid != g_nativeAttemptPid) { g_nativeAttemptPid = pid; g_nativeAttemptedForPid = false; }
+    if (IsModuleLoaded(pid, L"CromeRuntime.dll")) {
+        g_nativeRuntimeLoaded = true; g_nativeRuntimeStatus = "CONNECTED"; return;
+    }
+    g_nativeRuntimeLoaded = false;
+    if (g_nativeAttemptedForPid) { g_nativeRuntimeStatus = "runtime not loaded - use Retry"; return; }
+    g_nativeAttemptedForPid = true;
+    g_lastNativeInjectAttempt = GetTickCount64();
+    std::string err;
+    if (InjectRuntimeDll(pid, g_baseDir / "CromeRuntime.dll", err)) g_nativeRuntimeStatus = "injected, waiting runtime";
+    else g_nativeRuntimeStatus = "inject failed: " + err;
+}
+
+static void RetryNativeRuntime() { g_nativeAttemptedForPid = false; g_nativeRuntimeStatus = "retry requested"; }
+
+static void WriteJsonIfChanged(const std::string& fileName, const nlohmann::json& j) {
+    if (g_baseDir.empty()) return;
+    const std::string text = j.dump(2) + "\n";
+    auto& old = g_lastWrittenJson[fileName];
+    if (old == text) return;
+    const auto dir = g_baseDir / "config";
+    std::error_code ec; std::filesystem::create_directories(dir, ec);
+    const auto dst = dir / fileName;
+    const auto tmp = dir / (fileName + ".tmp");
+    { std::ofstream f(tmp, std::ios::binary | std::ios::trunc); if (!f) return; f << text; }
+    std::filesystem::remove(dst, ec); ec.clear();
+    std::filesystem::rename(tmp, dst, ec);
+    if (!ec) old = text;
+}
+
+
+static bool ReadJsonFile(const std::filesystem::path& path, nlohmann::json& out) {
+    try { std::ifstream f(path, std::ios::binary); if (!f) return false; f >> out; return true; } catch(...) { return false; }
+}
+static bool WriteJsonFileAtomic(const std::filesystem::path& path, const nlohmann::json& j) {
+    std::error_code ec; std::filesystem::create_directories(path.parent_path(), ec);
+    const auto tmp = path.string() + ".tmp";
+    { std::ofstream f(tmp, std::ios::binary | std::ios::trunc); if(!f) return false; f << j.dump(2) << "\n"; }
+    std::filesystem::remove(path, ec); ec.clear(); std::filesystem::rename(tmp, path, ec); return !ec;
+}
+static std::uint64_t g_profileLoadGeneration = 0;
+
+static std::filesystem::path DefaultUserProfilesDir() {
+    const auto dir = g_baseDir / "profiles" / "user";
+    std::error_code ec; std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+static bool PickProfilePath(bool saveDialog, std::filesystem::path& outPath) {
+    char fileBuf[MAX_PATH]{};
+    const auto initial = DefaultUserProfilesDir().string();
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hWnd;
+    ofn.lpstrFilter = "Crome Profile (*.json)\0*.json\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileBuf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrInitialDir = initial.c_str();
+    ofn.lpstrDefExt = "json";
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | (saveDialog ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    const BOOL ok = saveDialog ? GetSaveFileNameA(&ofn) : GetOpenFileNameA(&ofn);
+    if (!ok || !fileBuf[0]) return false;
+    outPath = std::filesystem::path(fileBuf);
+    if (saveDialog && outPath.extension().empty()) outPath += ".json";
+    return true;
+}
+
+static bool SaveCromeProfileBundle(const std::filesystem::path& path) {
+    nlohmann::json p={{"schema","crome-user-profile-v2"},{"version","7.12"},{"files",nlohmann::json::object()}};
+    const char* files[]={"bot.json","healing.json","targeting.json","loot.json","waypoints.json","walker_ids.json","fishing.json","tools.json"};
+    for(auto* fn:files){ nlohmann::json j; if(ReadJsonFile(g_baseDir/"config"/fn,j)) p["files"][fn]=j; }
+    p["meta"]={{"includesCavebot",true},{"includesLoot",true},{"includesTools",true},{"includesFishing",true}};
+    return WriteJsonFileAtomic(path,p);
+}
+static bool LoadCromeProfileBundle(const std::filesystem::path& path) {
+    nlohmann::json p; if(!ReadJsonFile(path,p)) return false;
+    if(!p.contains("files")||!p["files"].is_object()) return false;
+    for(auto it=p["files"].begin();it!=p["files"].end();++it) if(it.value().is_object()||it.value().is_array()) WriteJsonFileAtomic(g_baseDir/"config"/it.key(),it.value());
+    g_lastWrittenJson.clear(); ++g_profileLoadGeneration; return true;
+}
+
+struct InspectResultUi {
+    bool valid=false; int x=0,y=0,z=0; std::vector<int> ids; uint64_t lastRead=0;
+};
+static InspectResultUi g_inspect;
+static uint32_t g_inspectSeq=1;
+
+struct LookResultUi {
+    bool valid=false; bool onGround=false; int id=0,x=0,y=0,z=0; uint64_t lastRead=0;
+};
+static LookResultUi g_lastLook;
+static void RefreshLookResult() {
+    const auto now=GetTickCount64(); if(now-g_lastLook.lastRead<150) return; g_lastLook.lastRead=now;
+    try {
+        std::ifstream f(g_baseDir / "config" / "look_result.json"); if(!f) return;
+        nlohmann::json j; f>>j;
+        g_lastLook.valid=j.value("valid",false); g_lastLook.id=j.value("id",0); g_lastLook.onGround=j.value("onGround",false);
+        g_lastLook.x=j.value("x",0); g_lastLook.y=j.value("y",0); g_lastLook.z=j.value("z",0);
+    } catch(...) {}
+}
+
+static void RefreshInspectResult() {
+    const auto now=GetTickCount64(); if(now-g_inspect.lastRead<200) return; g_inspect.lastRead=now;
+    try {
+        std::ifstream f(g_baseDir / "config" / "inspect_result.json"); if(!f) return;
+        nlohmann::json j; f>>j; g_inspect.valid=j.value("valid",false); g_inspect.x=j.value("x",0); g_inspect.y=j.value("y",0); g_inspect.z=j.value("z",0); g_inspect.ids.clear();
+        if(j.contains("ids")&&j["ids"].is_array()) for(auto& v:j["ids"]) if(v.is_number_integer()) g_inspect.ids.push_back(v.get<int>());
+    } catch(...) {}
+}
+static void RequestInspect(int x,int y,int z) {
+    nlohmann::json j={{"seq",++g_inspectSeq},{"x",x},{"y",y},{"z",z}}; WriteJsonIfChanged("inspect_request.json",j);
+}
+struct WalkerIdCatalog {
+    nlohmann::json data = nlohmann::json::object();
+    bool loaded = false;
+};
+static WalkerIdCatalog g_walkerIds;
+
+static std::filesystem::path WalkerIdsPath() { return g_baseDir / "config" / "walker_ids.json"; }
+static void EnsureWalkerIdCatalog() {
+    if (g_walkerIds.loaded) return;
+    g_walkerIds.loaded = true;
+    try { std::ifstream f(WalkerIdsPath()); if (f) f >> g_walkerIds.data; } catch(...) {}
+    if (!g_walkerIds.data.is_object()) g_walkerIds.data = nlohmann::json::object();
+    const char* keys[] = {"ladder","rope","shovel","pick","minePick","machete","pathable","nonPathable","openHoles","clearBeforeUse","counter","depot","food","rock","corpseBag","fishingRod","fishingWater"};
+    for (auto k: keys) if (!g_walkerIds.data.contains(k) || !g_walkerIds.data[k].is_array()) g_walkerIds.data[k] = nlohmann::json::array();
+}
+static void SaveWalkerIdCatalog() {
+    EnsureWalkerIdCatalog();
+    std::error_code ec; std::filesystem::create_directories(g_baseDir / "config", ec);
+    std::ofstream o(WalkerIdsPath(), std::ios::trunc); if (o) o << g_walkerIds.data.dump(2) << "\n";
+}
+static bool CatalogHas(const char* key, int id) {
+    EnsureWalkerIdCatalog(); if (id<=0 || !g_walkerIds.data.contains(key)) return false;
+    for (auto& v: g_walkerIds.data[key]) if (v.is_number_integer() && v.get<int>()==id) return true;
+    return false;
+}
+static int CatalogFirst(const char* key, int fallback=0) {
+    EnsureWalkerIdCatalog(); if (!g_walkerIds.data.contains(key)) return fallback;
+    for (auto& v: g_walkerIds.data[key]) if (v.is_number_integer()) return v.get<int>();
+    return fallback;
+}
+static void SaveItemClass(const char* key,int id) {
+    if(id<=0) return; EnsureWalkerIdCatalog();
+    if(!g_walkerIds.data.contains(key)||!g_walkerIds.data[key].is_array()) g_walkerIds.data[key]=nlohmann::json::array();
+    for(auto& v:g_walkerIds.data[key]) if(v.is_number_integer()&&v.get<int>()==id) return;
+    g_walkerIds.data[key].push_back(id); SaveWalkerIdCatalog();
+}
+static std::string CatalogCsv(const char* key) {
+    EnsureWalkerIdCatalog(); std::string out;
+    if (!g_walkerIds.data.contains(key)) return out;
+    for (auto& v: g_walkerIds.data[key]) if (v.is_number_integer()) { if(!out.empty()) out += ","; out += std::to_string(v.get<int>()); }
+    return out;
+}
+static void SetCatalogCsv(const char* key, const char* text) {
+    EnsureWalkerIdCatalog(); nlohmann::json a=nlohmann::json::array();
+    std::istringstream ss(text?text:""); std::string p;
+    while(std::getline(ss,p,',')) { try { int id=std::stoi(p); if(id>0 && std::find(a.begin(),a.end(),id)==a.end()) a.push_back(id); } catch(...) {} }
+    g_walkerIds.data[key]=a; SaveWalkerIdCatalog();
+}
+
+static std::vector<std::string> SplitCsv(const char* text) {
+    std::vector<std::string> out; std::string cur;
+    std::istringstream ss(text ? text : "");
+    while (std::getline(ss, cur, ',')) {
+        auto b = cur.find_first_not_of(" \t\r\n"), e = cur.find_last_not_of(" \t\r\n");
+        if (b != std::string::npos) out.push_back(cur.substr(b, e - b + 1));
+    }
+    return out;
+}
+
+static void RefreshRuntime() {
+    if (!g_session) return;
+    g_session->refresh();
+    const auto now = GetTickCount64();
+    if (g_session->runtime().localPlayer) {
+        if (!g_playerReader) g_playerReader = std::make_unique<crome::ProfileBackedPlayerReader>(g_session->memory(), g_session->runtime());
+        if (now - g_lastPlayerRead >= 100) {
+            g_livePlayer = g_playerReader->read();
+            g_lastPlayerRead = now;
+        }
+    } else {
+        g_playerReader.reset();
+        g_livePlayer = {};
+    }
+}
+
+struct DetectedClient {
+    DWORD pid = 0;
+    std::string exe;
+    std::string profile;
+};
+
+static DWORD FindProcessByName(const wchar_t* exeName) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, exeName) == 0) {
+                pid = pe.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return pid;
+}
+
+static DetectedClient DetectKnownClient() {
+    struct Known { const wchar_t* exeW; const char* exeA; const char* profile; };
+    static const Known known[] = {
+        {L"Olders_OpenGL.exe", "Olders_OpenGL.exe", "6AA9FA57_89D3D35243890EA2"},
+        {L"TibiaScape.exe", "TibiaScape.exe", "6A82C258_15F49CEEE51C6AD"},
+        {L"Classico-1790708814.exe", "Classico-1790708814.exe", "6AA3019A_602E746BAE706D6C"},
+    };
+    for (const auto& k : known) {
+        DWORD pid = FindProcessByName(k.exeW);
+        if (pid) return {pid, k.exeA, k.profile};
+    }
+    return {};
+}
+
+struct Theme {
+    ImVec4 bg;
+    ImVec4 panel;
+    ImVec4 panel2;
+    ImVec4 header;
+    ImVec4 border;
+    ImVec4 text;
+    ImVec4 muted;
+    ImVec4 input;
+    ImVec4 blue;
+    ImVec4 green;
+};
+
+static Theme DarkTheme() {
+    return {
+        {0.035f,0.055f,0.075f,1}, {0.055f,0.090f,0.120f,1}, {0.065f,0.105f,0.140f,1},
+        {0.075f,0.115f,0.155f,1}, {0.16f,0.25f,0.32f,1}, {0.92f,0.95f,0.98f,1},
+        {0.62f,0.70f,0.78f,1}, {0.035f,0.075f,0.105f,1}, {0.08f,0.50f,0.95f,1}, {0.18f,0.85f,0.38f,1}
+    };
+}
+
+static Theme LightTheme() {
+    return {
+        {0.94f,0.96f,0.98f,1}, {1.0f,1.0f,1.0f,1}, {0.97f,0.98f,0.995f,1},
+        {0.92f,0.95f,0.98f,1}, {0.76f,0.82f,0.88f,1}, {0.08f,0.12f,0.17f,1},
+        {0.36f,0.43f,0.50f,1}, {0.93f,0.96f,0.985f,1}, {0.05f,0.44f,0.90f,1}, {0.10f,0.68f,0.28f,1}
+    };
+}
+
+static ImU32 Col(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }
+
+static void ApplyTheme(const Theme& t) {
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowPadding = ImVec2(8, 6);
+    s.FramePadding = ImVec2(5, 1);
+    s.ItemSpacing = ImVec2(5, 2);
+    s.ItemInnerSpacing = ImVec2(4, 2);
+    s.WindowRounding = 0;
+    s.ChildRounding = 7;
+    s.FrameRounding = 4;
+    s.PopupRounding = 5;
+    s.ScrollbarRounding = 5;
+    s.GrabRounding = 4;
+    s.WindowBorderSize = 0;
+    s.ChildBorderSize = 1;
+    s.FrameBorderSize = 1;
+    s.ScrollbarSize = 8;
+
+    s.Colors[ImGuiCol_Text] = t.text;
+    s.Colors[ImGuiCol_TextDisabled] = t.muted;
+    s.Colors[ImGuiCol_WindowBg] = t.bg;
+    s.Colors[ImGuiCol_ChildBg] = t.panel;
+    s.Colors[ImGuiCol_PopupBg] = t.panel;
+    s.Colors[ImGuiCol_Border] = t.border;
+    s.Colors[ImGuiCol_FrameBg] = t.input;
+    s.Colors[ImGuiCol_FrameBgHovered] = ImVec4(t.input.x+0.025f,t.input.y+0.025f,t.input.z+0.025f,1);
+    s.Colors[ImGuiCol_FrameBgActive] = ImVec4(t.input.x+0.05f,t.input.y+0.05f,t.input.z+0.05f,1);
+    s.Colors[ImGuiCol_CheckMark] = ImVec4(1,1,1,1);
+    s.Colors[ImGuiCol_Button] = t.blue;
+    s.Colors[ImGuiCol_ButtonHovered] = ImVec4(std::min(1.f,t.blue.x+0.08f),std::min(1.f,t.blue.y+0.08f),std::min(1.f,t.blue.z+0.08f),1);
+    s.Colors[ImGuiCol_ButtonActive] = ImVec4(std::max(0.f,t.blue.x-0.05f),std::max(0.f,t.blue.y-0.05f),std::max(0.f,t.blue.z-0.05f),1);
+    s.Colors[ImGuiCol_Header] = t.header;
+    s.Colors[ImGuiCol_HeaderHovered] = t.panel2;
+    s.Colors[ImGuiCol_HeaderActive] = t.panel2;
+    s.Colors[ImGuiCol_ScrollbarBg] = ImVec4(0,0,0,0.08f);
+    s.Colors[ImGuiCol_ScrollbarGrab] = t.border;
+    s.Colors[ImGuiCol_TableHeaderBg] = t.header;
+    s.Colors[ImGuiCol_TableBorderStrong] = t.border;
+    s.Colors[ImGuiCol_TableBorderLight] = t.border;
+    s.Colors[ImGuiCol_TableRowBg] = ImVec4(0,0,0,0);
+    s.Colors[ImGuiCol_TableRowBgAlt] = ImVec4(t.panel2.x,t.panel2.y,t.panel2.z,0.18f);
+    s.Colors[ImGuiCol_Separator] = t.border;
+    s.Colors[ImGuiCol_SeparatorHovered] = t.blue;
+    s.Colors[ImGuiCol_SeparatorActive] = t.blue;
+    s.Colors[ImGuiCol_SliderGrab] = t.blue;
+    s.Colors[ImGuiCol_SliderGrabActive] = t.blue;
+}
+
+static bool Toggle(const char* id, bool* value, const Theme& t) {
+    ImGui::PushID(id);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = 18.0f;
+    const float w = 34.0f;
+    ImGui::InvisibleButton("##toggle", ImVec2(w,h));
+    if (ImGui::IsItemClicked()) *value = !*value;
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    ImU32 bg = *value ? Col(t.blue) : Col(ImVec4(t.muted.x,t.muted.y,t.muted.z,0.45f));
+    d->AddRectFilled(p, ImVec2(p.x+w,p.y+h), bg, h*0.5f);
+    float cx = *value ? p.x+w-h*0.5f : p.x+h*0.5f;
+    d->AddCircleFilled(ImVec2(cx,p.y+h*0.5f), h*0.34f, IM_COL32(245,248,252,255));
+    ImGui::PopID();
+    return *value;
+}
+
+enum class CardIcon { Heart, Users, Rune, Pin, Gear, Coins, Bell, Keyboard, Info };
+
+static void DrawCardIcon(ImDrawList* d, CardIcon icon, ImVec2 c, ImU32 color) {
+    const float s = 7.0f;
+    switch (icon) {
+        case CardIcon::Heart: {
+            d->AddCircleFilled(ImVec2(c.x-3.2f,c.y-2.0f),3.7f,color);
+            d->AddCircleFilled(ImVec2(c.x+3.2f,c.y-2.0f),3.7f,color);
+            ImVec2 pts[3]={{c.x-6.3f,c.y-0.7f},{c.x+6.3f,c.y-0.7f},{c.x,c.y+7.2f}};
+            d->AddConvexPolyFilled(pts,3,color);
+            break;
+        }
+        case CardIcon::Users: {
+            d->AddCircleFilled(ImVec2(c.x-3.5f,c.y-3.0f),3.0f,color);
+            d->AddCircleFilled(ImVec2(c.x+3.8f,c.y-2.2f),2.6f,color);
+            d->AddRectFilled(ImVec2(c.x-8.0f,c.y+1.0f),ImVec2(c.x+1.0f,c.y+6.3f),color,3.0f);
+            d->AddRectFilled(ImVec2(c.x+0.5f,c.y+1.3f),ImVec2(c.x+8.0f,c.y+5.8f),color,2.6f);
+            break;
+        }
+        case CardIcon::Rune: {
+            ImVec2 p[8];
+            for(int i=0;i<8;i++) { float a=3.1415926f*0.25f*i; float r=(i%2)?3.2f:7.0f; p[i]=ImVec2(c.x+cosf(a)*r,c.y+sinf(a)*r); }
+            d->AddConvexPolyFilled(p,8,color);
+            d->AddCircleFilled(c,1.7f,IM_COL32(255,255,255,220));
+            break;
+        }
+        case CardIcon::Pin: {
+            d->AddCircleFilled(ImVec2(c.x,c.y-2.5f),6.0f,color);
+            ImVec2 pts[3]={{c.x-4.4f,c.y+1.5f},{c.x+4.4f,c.y+1.5f},{c.x,c.y+8.0f}};
+            d->AddConvexPolyFilled(pts,3,color);
+            d->AddCircleFilled(ImVec2(c.x,c.y-2.5f),2.0f,IM_COL32(235,245,255,255));
+            break;
+        }
+        case CardIcon::Gear: {
+            d->AddCircle(c,5.0f,color,16,2.2f); d->AddCircleFilled(c,1.9f,color);
+            for(int i=0;i<8;i++){ float a=3.1415926f*0.25f*i; ImVec2 a0(c.x+cosf(a)*5.3f,c.y+sinf(a)*5.3f), a1(c.x+cosf(a)*8.0f,c.y+sinf(a)*8.0f); d->AddLine(a0,a1,color,2.5f); }
+            break;
+        }
+        case CardIcon::Coins: {
+            d->AddEllipseFilled(ImVec2(c.x,c.y-4.0f),ImVec2(7.0f,3.0f),color);
+            d->AddRectFilled(ImVec2(c.x-7.0f,c.y-4.0f),ImVec2(c.x+7.0f,c.y+4.0f),color);
+            d->AddEllipseFilled(ImVec2(c.x,c.y+4.0f),ImVec2(7.0f,3.0f),color);
+            d->AddLine(ImVec2(c.x-6.5f,c.y),ImVec2(c.x+6.5f,c.y),IM_COL32(255,255,255,120),1.0f);
+            break;
+        }
+        case CardIcon::Bell: {
+            d->AddCircleFilled(ImVec2(c.x,c.y+5.5f),1.8f,color);
+            d->AddRectFilled(ImVec2(c.x-5.0f,c.y-1.0f),ImVec2(c.x+5.0f,c.y+4.3f),color,2.0f);
+            d->AddCircleFilled(ImVec2(c.x,c.y-1.0f),5.0f,color);
+            d->AddRectFilled(ImVec2(c.x-6.5f,c.y+3.0f),ImVec2(c.x+6.5f,c.y+5.0f),color,1.0f);
+            break;
+        }
+        case CardIcon::Keyboard: {
+            d->AddRect(ImVec2(c.x-8.0f,c.y-5.0f),ImVec2(c.x+8.0f,c.y+5.0f),color,2.0f,0,1.7f);
+            for(int y=-2;y<=2;y+=4) for(int x=-5;x<=5;x+=4) d->AddRectFilled(ImVec2(c.x+x-1,c.y+y-1),ImVec2(c.x+x+1,c.y+y+1),color,0.5f);
+            break;
+        }
+        case CardIcon::Info: {
+            d->AddCircle(c,7.0f,color,18,2.0f);
+            d->AddCircleFilled(ImVec2(c.x,c.y-3.7f),1.2f,color);
+            d->AddRectFilled(ImVec2(c.x-1.0f,c.y-0.5f),ImVec2(c.x+1.0f,c.y+4.8f),color,1.0f);
+            break;
+        }
+    }
+}
+
+static void CardBegin(const char* id, const char* title, CardIcon icon, ImVec4 accent, float height, const Theme& t) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, t.panel);
+    ImGui::PushStyleColor(ImGuiCol_Border, t.border);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 7.0f);
+    ImGui::BeginChild(id, ImVec2(0,height), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    ImVec2 wp = ImGui::GetWindowPos();
+    ImVec2 ws = ImGui::GetWindowSize();
+    float hh = 23.0f;
+    ImVec4 hb = t.header;
+    hb.x = std::min(1.0f, hb.x + accent.x*0.035f);
+    hb.y = std::min(1.0f, hb.y + accent.y*0.035f);
+    hb.z = std::min(1.0f, hb.z + accent.z*0.035f);
+    d->AddRectFilled(wp, ImVec2(wp.x+ws.x,wp.y+hh), Col(hb), 8.0f, ImDrawFlags_RoundCornersTop);
+    DrawCardIcon(d, icon, ImVec2(wp.x+15, wp.y+hh*0.5f), Col(accent));
+    ImGui::SetCursorPos(ImVec2(28, 3));
+    ImGui::PushFont(g_fontBold ? g_fontBold : g_font);
+    ImGui::TextUnformatted(title);
+    ImGui::PopFont();
+    ImGui::SetCursorPos(ImVec2(ws.x-20, 3));
+    ImGui::TextColored(t.muted, "?");
+    ImGui::SetCursorPos(ImVec2(8, hh+4));
+}
+
+static void CardEnd() {
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+}
+
+static void SmallInput(const char* id, char* buf, size_t cap, float width) {
+    ImGui::SetNextItemWidth(width);
+    ImGui::InputText(id, buf, cap);
+}
+
+static void SmallInt(const char* id, int* v, float width) {
+    ImGui::SetNextItemWidth(width);
+    ImGui::InputInt(id, v, 0, 0);
+}
+
+static void DrawHealing(const Theme& t) {
+    static bool healingMaster = false;
+    static char spells[3][32] = {"exura", "exura gran", "exura vita"};
+    static int hp[3] = {90, 70, 40};
+    static int mana[3] = {25, 40, 80}; // absolute mana, like Rifbot
+    static bool enabled[3] = {false, false, false};
+
+    static bool uhEnabled = false;
+    static int uhHp = 50;
+    static int uhId = 2273;
+    static bool manaFluidEnabled = false;
+    static int manaFluidMp = 50;
+    static int manaFluidId = 0;
+    static bool lifeFluidEnabled = false;
+    static int lifeFluidHp = 50;
+    static int lifeFluidId = 0;
+    static std::uint64_t seenProfileLoadGeneration=0;
+    if(seenProfileLoadGeneration!=g_profileLoadGeneration){
+        seenProfileLoadGeneration=g_profileLoadGeneration;
+        nlohmann::json hj;
+        if(ReadJsonFile(g_baseDir/"config"/"healing.json",hj)){
+            healingMaster=hj.value("enabled",false);
+            if(hj.contains("rules")&&hj["rules"].is_array()){
+                for(auto& r:hj["rules"]){
+                    if(!r.is_object()) continue; const auto name=r.value("name",std::string());
+                    if(name=="light_heal"||name=="mid_heal"||name=="high_heal"){
+                        const int i=name=="light_heal"?0:(name=="mid_heal"?1:2);
+                        enabled[i]=r.value("enabled",false); hp[i]=r.value("below_or_equal",hp[i]); mana[i]=r.value("min_mana",mana[i]);
+                        const auto sp=r.value("spell",std::string(spells[i])); std::snprintf(spells[i],sizeof(spells[i]),"%s",sp.c_str());
+                    } else if(name=="uh"){ uhEnabled=r.value("enabled",false); uhHp=r.value("below_or_equal",uhHp); uhId=r.value("item_id",uhId); }
+                    else if(name=="mana_fluid"){ manaFluidEnabled=r.value("enabled",false); manaFluidMp=r.value("below_or_equal",manaFluidMp); manaFluidId=r.value("item_id",manaFluidId); }
+                    else if(name=="life_fluid"){ lifeFluidEnabled=r.value("enabled",false); lifeFluidHp=r.value("below_or_equal",lifeFluidHp); lifeFluidId=r.value("item_id",lifeFluidId); }
+                }
+            }
+        }
+    }
+
+    CardBegin("healing", "Healing", CardIcon::Heart, ImVec4(1.0f,0.20f,0.36f,1), 140, t);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+
+    ImGui::Checkbox("##healing_master", &healingMaster);
+    ImGui::SameLine(); ImGui::TextUnformatted("Healing");
+    ImGui::SameLine(92);
+    if (g_livePlayer.valid) {
+        ImGui::TextDisabled("HP %.0f%%  Mana %.0f", g_livePlayer.healthPercent(), g_livePlayer.mana);
+    } else ImGui::TextDisabled("aguardando player");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x > 80 ? ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x-48 : ImGui::GetCursorPosX());
+    if (ImGui::SmallButton("IDs")) ImGui::OpenPopup("heal_ids");
+    if (ImGui::BeginPopup("heal_ids")) {
+        ImGui::TextUnformatted("Item IDs"); ImGui::Separator();
+        ImGui::TextUnformatted("UH"); ImGui::SameLine(90); SmallInt("##uh_id_popup", &uhId, 90);
+        ImGui::TextUnformatted("Mana Fluid"); ImGui::SameLine(90); SmallInt("##mf_id_popup", &manaFluidId, 90);
+        ImGui::TextUnformatted("Life Fluid"); ImGui::SameLine(90); SmallInt("##lf_id_popup", &lifeFluidId, 90);
+        ImGui::EndPopup();
+    }
+
+    const char* names[3] = {"Light", "Mid", "High"};
+    if (ImGui::BeginTable("heal_compact", 5, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("##name", 0, 0.62f);
+        ImGui::TableSetupColumn("##hp", 0, 0.62f);
+        ImGui::TableSetupColumn("##mana", 0, 0.86f);
+        ImGui::TableSetupColumn("##spell", 0, 2.10f);
+        ImGui::TableSetupColumn("##on", 0, 0.35f);
+        for (int i=0;i<3;++i) {
+            ImGui::TableNextRow(); ImGui::PushID(i);
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(names[i]);
+            ImGui::TableSetColumnIndex(1); SmallInt("##hpv", &hp[i], -1); ImGui::SameLine(0,2); ImGui::TextDisabled("%%");
+            ImGui::TableSetColumnIndex(2); SmallInt("##manav", &mana[i], -1); ImGui::SameLine(0,2); ImGui::TextDisabled("Mana");
+            ImGui::TableSetColumnIndex(3); SmallInput("##spellv", spells[i], 32, -1);
+            ImGui::TableSetColumnIndex(4); ImGui::Checkbox("##onv", &enabled[i]);
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Separator();
+    ImGui::Checkbox("UH", &uhEnabled); ImGui::SameLine(); SmallInt("##uh_hp", &uhHp, 42); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::SameLine(128); ImGui::Checkbox("MF", &manaFluidEnabled); ImGui::SameLine(); SmallInt("##mf_mp", &manaFluidMp, 42); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::SameLine(250); ImGui::Checkbox("LF", &lifeFluidEnabled); ImGui::SameLine(); SmallInt("##lf_hp", &lifeFluidHp, 42); ImGui::SameLine(); ImGui::TextDisabled("%%");
+
+    // Trigger preview uses the same semantics as the engine. It helps validate rules independently from the action bridge.
+    if (healingMaster && g_livePlayer.valid) {
+        const double php=g_livePlayer.healthPercent(), pmana=g_livePlayer.mana, pmp=g_livePlayer.manaPercent();
+        const char* trigger="none";
+        if (uhEnabled && uhId>0 && php<=uhHp) trigger="UH";
+        else if (manaFluidEnabled && manaFluidId>0 && pmp<=manaFluidMp) trigger="MF";
+        else if (lifeFluidEnabled && lifeFluidId>0 && php<=lifeFluidHp) trigger="LF";
+        else for(int i=0;i<3;++i) if(enabled[i] && php<=hp[i] && pmana>=mana[i]) { trigger=names[i]; break; }
+        ImGui::TextDisabled("Rule trigger: %s", trigger);
+    }
+
+    nlohmann::json hcfg;
+    hcfg["enabled"] = g_nativeRuntimeLoaded && healingMaster;
+    hcfg["poll_ms"] = 100;
+    hcfg["rules"] = nlohmann::json::array();
+    const int spellPriority[3] = {600,700,800};
+    const char* ruleNames[3] = {"light_heal","mid_heal","high_heal"};
+    for (int i=0;i<3;++i) hcfg["rules"].push_back({
+        {"name",ruleNames[i]},{"enabled",enabled[i]},{"trigger","health_percent"},
+        {"below_or_equal",hp[i]},{"min_mana",mana[i]},{"action","spell"},{"spell",spells[i]},
+        {"cooldown_ms",850},{"priority",spellPriority[i]}
+    });
+    hcfg["rules"].push_back({{"name","uh"},{"enabled",uhEnabled},{"trigger","health_percent"},{"below_or_equal",uhHp},{"min_mana",0},{"action","item_on_self"},{"item_id",uhId},{"cooldown_ms",650},{"priority",1000}});
+    hcfg["rules"].push_back({{"name","life_fluid"},{"enabled",lifeFluidEnabled},{"trigger","health_percent"},{"below_or_equal",lifeFluidHp},{"min_mana",0},{"action","item_on_self"},{"item_id",lifeFluidId},{"cooldown_ms",650},{"priority",900}});
+    hcfg["rules"].push_back({{"name","mana_fluid"},{"enabled",manaFluidEnabled},{"trigger","mana_percent"},{"below_or_equal",manaFluidMp},{"min_mana",0},{"action","item_on_self"},{"item_id",manaFluidId},{"cooldown_ms",650},{"priority",500}});
+    WriteJsonIfChanged("healing.json", hcfg);
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    CardEnd();
+}
+
+static void DrawFriends(const Theme& t) {
+    static int friendHp=70, myHp=80; static bool follow=false, uh=false, party=false;
+    static char list[128]="Friend1, Friend2, Friend3";
+    CardBegin("friends","Friends / Party",CardIcon::Users,ImVec4(0.12f,0.62f,1.0f,1),84,t);
+    ImGui::TextUnformatted("Friend HP:"); ImGui::SameLine(); SmallInt("##fhp",&friendHp,58); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::SameLine(190); ImGui::TextUnformatted("Your HP:"); ImGui::SameLine(); SmallInt("##mhp",&myHp,58); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::Checkbox("Follow Friends",&follow); ImGui::SameLine(145); ImGui::Checkbox("UH Friends",&uh); ImGui::SameLine(270); ImGui::Checkbox("Party Mode",&party);
+    ImGui::TextDisabled("Friends:"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1); ImGui::InputText("##flist",list,sizeof(list));
+    CardEnd();
+}
+
+static void DrawRune(const Theme& t) {
+    static bool en=false, relog=false, logout=false, noblank=false;
+    static int mana=70,soul=5,relogMin=6; static char spell[32]="exura"; static int mode=0;
+    const char* modes[]={"Logout","Stay Online","Pause"};
+    CardBegin("rune","Rune Maker / Trainer",CardIcon::Rune,ImVec4(0.72f,0.35f,1.0f,1),90,t);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("Enabled",&en); ImGui::SameLine(165); ImGui::TextUnformatted("Spell:"); ImGui::SameLine(); SmallInput("##rspell",spell,sizeof(spell),170);
+    ImGui::TextUnformatted("Mana:"); ImGui::SameLine(); SmallInt("##rmana",&mana,60); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::SameLine(210); ImGui::TextUnformatted("Soul:"); ImGui::SameLine(); SmallInt("##soul",&soul,60);
+    ImGui::Checkbox("Re-Login After",&relog); ImGui::SameLine(); SmallInt("##relogin",&relogMin,55); ImGui::SameLine(); ImGui::TextDisabled("min");
+    ImGui::Checkbox("Player Logout",&logout); ImGui::SameLine(135); ImGui::Checkbox("No Blank Runes",&noblank);
+    ImGui::SameLine(270); ImGui::SetNextItemWidth(105); ImGui::Combo("##mode",&mode,modes,3);
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    CardEnd();
+}
+
+static bool ParseWaypointLine(const std::string& line, int& type, int& x, int& y, int& z, int& item, int& delay, std::string& text) {
+    x=y=z=item=0; delay=1000; text.clear();
+    if (std::sscanf(line.c_str(),"Walk %d, %d, %d",&x,&y,&z)==3) { type=0; return true; }
+    if (std::sscanf(line.c_str(),"Stand %d, %d, %d",&x,&y,&z)==3) { type=1; return true; }
+    if (std::sscanf(line.c_str(),"Use %d @ %d, %d, %d",&item,&x,&y,&z)==4) { type=2; return true; }
+    if (std::sscanf(line.c_str(),"Rope %d @ %d, %d, %d",&item,&x,&y,&z)==4) { type=3; return true; }
+    if (std::sscanf(line.c_str(),"Shovel %d @ %d, %d, %d",&item,&x,&y,&z)==4) { type=4; return true; }
+    if (std::sscanf(line.c_str(),"Ladder %d @ %d, %d, %d",&item,&x,&y,&z)==4) { type=5; return true; }
+    if (std::sscanf(line.c_str(),"Hole %d @ %d, %d, %d",&item,&x,&y,&z)==4) { type=6; return true; }
+    if (line.rfind("Say ",0)==0) { type=7; text=line.substr(4); return true; }
+    if (std::sscanf(line.c_str(),"Wait %d ms",&delay)==1) { type=8; return true; }
+    if (std::sscanf(line.c_str(),"FloorChange %d, %d, %d",&x,&y,&z)==3) { type=0; return true; }
+    return false;
+}
+
+static std::string BuildWaypointLine(int type,int x,int y,int z,int item,int delay,const char* text) {
+    const char* names[]={"Walk","Stand","Use","Rope","Shovel","Ladder","Hole","Say","Wait"};
+    char b[224]{};
+    if(type==7) std::snprintf(b,sizeof(b),"Say %s",text?text:"");
+    else if(type==8) std::snprintf(b,sizeof(b),"Wait %d ms",delay);
+    else if(type>=2 && type<=6) std::snprintf(b,sizeof(b),"%s %d @ %d, %d, %d",names[type],item,x,y,z);
+    else std::snprintf(b,sizeof(b),"%s %d, %d, %d",names[type],x,y,z);
+    return b;
+}
+
+static void DrawCavebot(const Theme& t) {
+    static bool enabled=false,targeting=false,keep=false,attackAny=false,shouldAttack=false;
+    static bool recording=false,recordInitialized=false;
+    static int hpMin=0,hpMax=100,range=7,mode=0; static int selected=-1;
+    static std::vector<std::string> wps;
+    static crome::Position recordLast{};
+    static char monsters[160]="";
+    static int editType=0,editItemId=0,editDelay=1000,editX=0,editY=0,editZ=0;
+    static char editText[96]="";
+    static int addType=0,addItemId=0,addDelay=1000,addX=0,addY=0,addZ=0;
+    static char addText[96]="";
+    const char* addTypes[]={"Walk","Stand","Use","Rope","Shovel","Ladder","Hole","Say","Wait"};
+    const char* modes[]={"follow","none","stand near","2sqm","3sqm","4sqm","diagonal","diagonal 3sqm"};
+    static std::uint64_t seenProfileLoadGeneration=0;
+    if(seenProfileLoadGeneration!=g_profileLoadGeneration){
+        seenProfileLoadGeneration=g_profileLoadGeneration;
+        nlohmann::json wj;
+        if(ReadJsonFile(g_baseDir/"config"/"waypoints.json",wj)){
+            enabled=wj.value("enabled",false); wps.clear();
+            if(wj.contains("waypoints")&&wj["waypoints"].is_array()){
+                for(auto& n:wj["waypoints"]){
+                    if(!n.is_object()) continue;
+                    const auto type=n.value("type",std::string("walk"));
+                    const int x=n.value("x",0), y=n.value("y",0), z=n.value("z",0), item=n.value("item_id",0), ms=n.value("ms",1000);
+                    std::string line;
+                    if(type=="walk") line=BuildWaypointLine(0,x,y,z,0,0,"");
+                    else if(type=="use") line=BuildWaypointLine(2,x,y,z,item,0,"");
+                    else if(type=="rope") line=BuildWaypointLine(3,x,y,z,item,0,"");
+                    else if(type=="shovel") line=BuildWaypointLine(4,x,y,z,item,0,"");
+                    else if(type=="ladder") line=BuildWaypointLine(5,x,y,z,item,0,"");
+                    else if(type=="use_with_ground") line=BuildWaypointLine(6,x,y,z,item,0,"");
+                    else if(type=="say") { const auto s=n.value("text",std::string()); line=BuildWaypointLine(7,0,0,0,0,0,s.c_str()); }
+                    else if(type=="wait") line=BuildWaypointLine(8,0,0,0,0,ms,"");
+                    if(!line.empty()) wps.push_back(std::move(line));
+                }
+            }
+            selected=-1;
+        }
+        nlohmann::json tj;
+        if(ReadJsonFile(g_baseDir/"config"/"targeting.json",tj)){
+            targeting=tj.value("enabled",false); attackAny=tj.value("attack_any_monster",false);
+            hpMin=tj.value("hp_min",0); hpMax=tj.value("hp_max",100); range=tj.value("max_range",7);
+            keep=tj.value("chase_enabled",false);
+            std::string csv;
+            if(tj.contains("targets")&&tj["targets"].is_array()) for(auto& v:tj["targets"]){
+                if(!v.is_object()) continue; const auto nm=v.value("name",std::string()); if(nm.empty()) continue;
+                if(!csv.empty()) csv += ", "; csv += nm;
+            }
+            std::snprintf(monsters,sizeof(monsters),"%s",csv.c_str());
+        }
+        g_walkerIds.loaded=false;
+    }
+
+    RefreshInspectResult();
+
+    if(recording && g_livePlayer.valid) {
+        const auto p=g_livePlayer.position;
+        if(!recordInitialized) { recordLast=p; recordInitialized=true; }
+        else if(!(p==recordLast)) {
+            char b[160];
+            if(p.z!=recordLast.z) {
+                int knownId=0; const char* knownType=nullptr;
+                if(g_inspect.valid && !g_inspect.ids.empty() && std::abs(g_inspect.x-recordLast.x)<=1 && std::abs(g_inspect.y-recordLast.y)<=1) {
+                    for(int id:g_inspect.ids){
+                        if(CatalogHas("ladder",id)){knownId=id;knownType="Ladder";break;}
+                        if(CatalogHas("rope",id)){knownId=id;knownType="Rope";break;}
+                        if(CatalogHas("shovel",id)){knownId=id;knownType="Shovel";break;}
+                        if(CatalogHas("openHoles",id)){knownId=id;knownType="Hole";break;}
+                    }
+                }
+                if(knownType) std::snprintf(b,sizeof(b),"%s %d @ %d, %d, %d",knownType,knownId,recordLast.x,recordLast.y,(int)recordLast.z);
+                else std::snprintf(b,sizeof(b),"FloorChange %d, %d, %d  [from z=%d]",p.x,p.y,(int)p.z,(int)recordLast.z);
+            } else std::snprintf(b,sizeof(b),"Walk %d, %d, %d",p.x,p.y,(int)p.z);
+            if(wps.empty()||wps.back()!=b) wps.push_back(b);
+            recordLast=p;
+        }
+    } else if(!recording) recordInitialized=false;
+
+    CardBegin("cave","Cavebot",CardIcon::Pin,ImVec4(0.12f,0.62f,1.0f,1),245,t);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("Enabled",&enabled);
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    ImGui::SameLine(); ImGui::TextColored(t.blue,"Waypoints");
+    ImGui::SameLine(210); if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("Walker IDs");
+    ImGui::SameLine(255); ImGui::TextColored(recording?t.green:t.muted,recording?"REC ON":"REC OFF");
+    if(!g_nativeRuntimeLoaded){ ImGui::SameLine(315); ImGui::TextColored(ImVec4(1.0f,0.55f,0.25f,1),"WAITING RUNTIME"); enabled=false; targeting=false; }
+
+    ImVec2 listSize(ImGui::GetContentRegionAvail().x-100,92);
+    ImGui::BeginChild("##wps",listSize,ImGuiChildFlags_Borders);
+    if(wps.empty()) ImGui::TextDisabled("Nenhum waypoint carregado");
+    for(int i=0;i<(int)wps.size();++i) if(ImGui::Selectable(wps[i].c_str(),selected==i)) selected=i;
+    ImGui::EndChild(); ImGui::SameLine(); ImGui::BeginGroup();
+    if(ImGui::Button("Add",ImVec2(84,18))){ if(g_livePlayer.valid){addX=g_livePlayer.position.x;addY=g_livePlayer.position.y;addZ=(int)g_livePlayer.position.z;} ImGui::OpenPopup("Add waypoint"); }
+    if(ImGui::Button("Edit",ImVec2(84,18)) && selected>=0 && selected<(int)wps.size()){
+        std::string txt; if(ParseWaypointLine(wps[selected],editType,editX,editY,editZ,editItemId,editDelay,txt)){ std::snprintf(editText,sizeof(editText),"%s",txt.c_str()); ImGui::OpenPopup("Edit waypoint"); }
+    }
+    if(ImGui::Button("Remove",ImVec2(84,18))&&selected>=0){wps.erase(wps.begin()+selected);selected=-1;}
+    if(ImGui::Button(recording?"Stop Rec":"Record",ImVec2(84,18))){recording=!recording;recordInitialized=false;}
+    ImGui::EndGroup();
+
+    if(ImGui::BeginPopupModal("Walker IDs",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
+        EnsureWalkerIdCatalog();
+        struct Row{const char* label;const char* key;} rows[]={
+            {"Ladder IDs","ladder"},{"Rope IDs","rope"},{"Shovel IDs","shovel"},{"Pick IDs","pick"},{"Mine Pick IDs","minePick"},
+            {"Machete IDs","machete"},{"Open Holes IDs","openHoles"},{"Pathable IDs","pathable"},{"Non Pathable IDs","nonPathable"},
+            {"Clear Before Use","clearBeforeUse"},{"Counter IDs","counter"},{"Depot IDs","depot"},{"Food IDs","food"},{"Rock IDs","rock"},
+            {"Corpse Bag IDs","corpseBag"},{"Fishing Rod IDs","fishingRod"},{"Fishing Water IDs","fishingWater"}
+        };
+        static std::unordered_map<std::string,std::array<char,512>> buffers; static bool loaded=false;
+        if(!loaded){for(auto&r:rows){auto csv=CatalogCsv(r.key);auto&b=buffers[r.key];std::snprintf(b.data(),b.size(),"%s",csv.c_str());}loaded=true;}
+        ImGui::TextDisabled("Catalogo global. Edite manualmente os IDs separados por virgula.");
+        ImGui::Separator();
+        if(ImGui::BeginTable("idtable",2,ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg)){
+            ImGui::TableSetupColumn("Categoria",0,0.8f);ImGui::TableSetupColumn("IDs",0,2.2f);
+            for(auto&r:rows){ImGui::TableNextRow();ImGui::TableSetColumnIndex(0);ImGui::TextUnformatted(r.label);ImGui::TableSetColumnIndex(1);ImGui::SetNextItemWidth(390);ImGui::PushID(r.key);ImGui::InputText("##ids",buffers[r.key].data(),buffers[r.key].size());ImGui::PopID();}
+            ImGui::EndTable();
+        }
+        if(ImGui::Button("Salvar",ImVec2(100,22))){for(auto&r:rows)SetCatalogCsv(r.key,buffers[r.key].data());loaded=false;ImGui::CloseCurrentPopup();}
+        ImGui::SameLine(); if(ImGui::Button("Recarregar",ImVec2(100,22))){g_walkerIds.loaded=false;EnsureWalkerIdCatalog();loaded=false;}
+        ImGui::SameLine(); if(ImGui::Button("Fechar",ImVec2(80,22))){loaded=false;ImGui::CloseCurrentPopup();}
+        ImGui::EndPopup();
+    }
+
+    if(ImGui::BeginPopupModal("Add waypoint",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
+        ImGui::SetNextItemWidth(150);ImGui::Combo("Type",&addType,addTypes,IM_ARRAYSIZE(addTypes));
+        SmallInt("X",&addX,90);ImGui::SameLine();SmallInt("Y",&addY,90);ImGui::SameLine();SmallInt("Z",&addZ,60);
+        if(addType>=2&&addType<=6){if(addItemId==0){if(addType==3)addItemId=CatalogFirst("rope",3003);else if(addType==4)addItemId=CatalogFirst("shovel",3457);else if(addType==5)addItemId=CatalogFirst("ladder",0);}SmallInt("Item ID",&addItemId,110);}
+        if(addType==7){ImGui::SetNextItemWidth(260);ImGui::InputText("Text",addText,sizeof(addText));}
+        if(addType==8)SmallInt("Delay ms",&addDelay,110);
+        if(ImGui::Button("Add node",ImVec2(100,22))){wps.push_back(BuildWaypointLine(addType,addX,addY,addZ,addItemId,addDelay,addText));ImGui::CloseCurrentPopup();}
+        ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(80,22)))ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    if(ImGui::BeginPopupModal("Edit waypoint",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
+        ImGui::SetNextItemWidth(150);ImGui::Combo("Type",&editType,addTypes,IM_ARRAYSIZE(addTypes));
+        SmallInt("X",&editX,90);ImGui::SameLine();SmallInt("Y",&editY,90);ImGui::SameLine();SmallInt("Z",&editZ,60);
+        if(editType>=2&&editType<=6)SmallInt("Item ID",&editItemId,110);
+        if(editType==7){ImGui::SetNextItemWidth(260);ImGui::InputText("Text",editText,sizeof(editText));}
+        if(editType==8)SmallInt("Delay ms",&editDelay,110);
+        if(ImGui::Button("Salvar",ImVec2(100,22))&&selected>=0&&selected<(int)wps.size()){wps[selected]=BuildWaypointLine(editType,editX,editY,editZ,editItemId,editDelay,editText);ImGui::CloseCurrentPopup();}
+        ImGui::SameLine();if(ImGui::Button("Cancelar",ImVec2(80,22)))ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Profile:"); ImGui::SameLine(); ImGui::TextDisabled("salva toda a configuracao, inclusive Cavebot/Loot/Tools");
+    ImGui::SameLine(); if(ImGui::SmallButton("Save Profile...")) { std::filesystem::path p; if(PickProfilePath(true,p)) SaveCromeProfileBundle(p); }
+    ImGui::SameLine(); if(ImGui::SmallButton("Load Profile...")) { std::filesystem::path p; if(PickProfilePath(false,p) && LoadCromeProfileBundle(p)) g_walkerIds.loaded=false; }
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("Targeting",&targeting);ImGui::SameLine(140);ImGui::TextUnformatted("HP Range:");ImGui::SameLine();SmallInt("##hpmin",&hpMin,44);ImGui::SameLine();ImGui::TextUnformatted("-");ImGui::SameLine();SmallInt("##hpmax",&hpMax,44);
+    ImGui::TextUnformatted("Monsters:");ImGui::SameLine();ImGui::SetNextItemWidth(-1);ImGui::InputText("##monsters",monsters,sizeof(monsters));
+    ImGui::Checkbox("Keep Follow",&keep);ImGui::SameLine(120);ImGui::Checkbox("Attack Any Monster",&attackAny);ImGui::SameLine(285);ImGui::TextUnformatted("Range:");ImGui::SameLine();SmallInt("##range",&range,44);
+    if(keep) ImGui::TextDisabled("Follow/chase pode disputar movimento com o Cavebot; use apenas quando quiser perseguir o alvo.");
+    ImGui::Checkbox("Should Attack Me",&shouldAttack);ImGui::SameLine(160);ImGui::TextUnformatted("Mode:");ImGui::SameLine();ImGui::SetNextItemWidth(120);ImGui::Combo("##targetmode",&mode,modes,IM_ARRAYSIZE(modes));
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    if(!attackAny&&monsters[0]=='\0')ImGui::TextDisabled("Targeting: informe os monstros, ex.: rat, rotworm");
+
+    nlohmann::json tcfg={{"enabled",g_nativeRuntimeLoaded&&targeting},{"poll_ms",300},{"attack_any_monster",attackAny},{"pause_walker",true},{"chase_enabled",keep},{"chase_distance",1},{"chase_scan_range",15},{"chase_interval_ms",350},{"hp_min",hpMin},{"hp_max",hpMax},{"max_range",range},{"chase_repath_ms",900},{"chase_force_refresh_ms",1800},{"manual_input_pause_ms",1500},{"targets",nlohmann::json::array()}};
+    int pr=0;for(const auto&name:SplitCsv(monsters))tcfg["targets"].push_back({{"name",name},{"priority",pr++}});WriteJsonIfChanged("targeting.json",tcfg);
+
+    nlohmann::json rcfg={{"enabled",g_nativeRuntimeLoaded&&enabled},{"loop",true},{"reach_distance",0},{"timeout_ms",15000},{"stuck_ms",3500},{"retry_delay_ms",650},{"max_retries",2},{"action_wait_ms",450},{"tool_ids",{{"rope",CatalogFirst("rope",3003)},{"shovel",CatalogFirst("shovel",3457)},{"fishing_rod",CatalogFirst("fishingRod",3483)}}},{"waypoints",nlohmann::json::array()}};
+    for(const auto&line:wps){int x=0,y=0,z=0,item=0,ms=0;if(std::sscanf(line.c_str(),"Walk %d, %d, %d",&x,&y,&z)==3||std::sscanf(line.c_str(),"Stand %d, %d, %d",&x,&y,&z)==3||std::sscanf(line.c_str(),"FloorChange %d, %d, %d",&x,&y,&z)==3)rcfg["waypoints"].push_back({{"type","walk"},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Wait %d ms",&ms)==1)rcfg["waypoints"].push_back({{"type","wait"},{"ms",ms}});else if(line.rfind("Say ",0)==0)rcfg["waypoints"].push_back({{"type","say"},{"text",line.substr(4)}});else if(std::sscanf(line.c_str(),"Use %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","use"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Rope %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","rope"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Shovel %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","shovel"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Ladder %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","ladder"},{"item_id",item},{"x",x},{"y",y},{"z",z},{"after_ms",500}});else if(std::sscanf(line.c_str(),"Hole %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","use_with_ground"},{"item_id",item},{"x",x},{"y",y},{"z",z}});}
+    WriteJsonIfChanged("waypoints.json",rcfg);CardEnd();
+}
+
+static void DrawTools(const Theme& t) {
+    static bool mana=false,light=false,antiIdle=false,fish=false,food=false;
+    static bool para=false,haste=false,advert=false,spear=false,reAmmo=false;
+    static char paraSpell[32]="exura",hasteSpell[32]="utani hur",manaSpell[32]="utamo vita",ad[64]="Set Message...",spears[64]="";
+    static int ammo=3447, foodInterval=60000, manaInterval=170000, hasteInterval=30000, idleMin=45000, idleMax=90000;
+    static int fishMinDelay=850, fishMaxDelay=1450, fishRange=7;
+    static std::uint64_t seenProfileLoadGeneration=~0ull;
+    if(seenProfileLoadGeneration!=g_profileLoadGeneration){
+        seenProfileLoadGeneration=g_profileLoadGeneration;
+        nlohmann::json fj;
+        if(ReadJsonFile(g_baseDir/"config"/"fishing.json",fj)){
+            fish=fj.value("enabled",false); fishRange=fj.value("range",7);
+            fishMinDelay=fj.value("min_delay_ms",850); fishMaxDelay=fj.value("max_delay_ms",1450);
+        }
+        nlohmann::json tj;
+        if(ReadJsonFile(g_baseDir/"config"/"tools.json",tj)){
+            auto loadSpell=[&](const char* key,bool& en,char* buf,size_t cap,int& interval,const char* def){ if(tj.contains(key)&&tj[key].is_object()){ const auto& o=tj[key]; en=o.value("enabled",false); const auto sp=o.value("spell",std::string(def)); std::snprintf(buf,cap,"%s",sp.c_str()); interval=o.value("fallback_interval_ms",interval);} };
+            loadSpell("mana_shield",mana,manaSpell,sizeof(manaSpell),manaInterval,"utamo vita");
+            loadSpell("anti_paralyze",para,paraSpell,sizeof(paraSpell),hasteInterval,"exura");
+            loadSpell("auto_haste",haste,hasteSpell,sizeof(hasteSpell),hasteInterval,"utani hur");
+            if(tj.contains("food")){ food=tj["food"].value("enabled",false); foodInterval=tj["food"].value("interval_ms",foodInterval); }
+            if(tj.contains("anti_idle")){ antiIdle=tj["anti_idle"].value("enabled",false); idleMin=tj["anti_idle"].value("min_interval_ms",idleMin); idleMax=tj["anti_idle"].value("max_interval_ms",idleMax); }
+            if(tj.contains("light")) light=tj["light"].value("enabled",false);
+            if(tj.contains("spear_pickup")) spear=tj["spear_pickup"].value("enabled",false);
+            if(tj.contains("reammo")){ reAmmo=tj["reammo"].value("enabled",false); if(tj["reammo"].contains("item_ids")&&tj["reammo"]["item_ids"].is_array()&&!tj["reammo"]["item_ids"].empty()) ammo=tj["reammo"]["item_ids"][0].get<int>(); }
+        }
+    }
+    CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),214,t);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("left",0,1.05f); ImGui::TableSetupColumn("right",0,1.05f); ImGui::TableSetupColumn("value",0,1.25f);
+        auto row=[&](const char* lid,bool* lv,const char* rid,bool* rv,const char* iid,char* buf,size_t cap){ ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox(lid,lv); ImGui::TableSetColumnIndex(1); ImGui::Checkbox(rid,rv); ImGui::TableSetColumnIndex(2); SmallInput(iid,buf,cap,-1); };
+        row("Mana Shield",&mana,"Anti-Paralyze",&para,"##para",paraSpell,sizeof(paraSpell));
+        row("Light Hack",&light,"Auto-Haste",&haste,"##haste",hasteSpell,sizeof(hasteSpell));
+        row("Anti-Idle",&antiIdle,"Advertise",&advert,"##advert",ad,sizeof(ad));
+        row("Auto Fishing",&fish,"Pick Up Spear",&spear,"##spear",spears,sizeof(spears));
+        ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox("Food Eater",&food); ImGui::TableSetColumnIndex(1); ImGui::Checkbox("Re-Ammo",&reAmmo); ImGui::TableSetColumnIndex(2); SmallInt("##ammo",&ammo,-1);
+        ImGui::EndTable();
+    }
+    if(fish){ ImGui::TextDisabled("Fishing usa Game::useWith(rod, waterThing), recarrega config em runtime e sorteia o tile."); ImGui::TextUnformatted("Delay:"); ImGui::SameLine(); SmallInt("##fmin",&fishMinDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("-"); ImGui::SameLine(); SmallInt("##fmax",&fishMaxDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("ms  Range:"); ImGui::SameLine(); SmallInt("##frange",&fishRange,45); }
+    ImGui::TextDisabled("Timers ms: Food"); ImGui::SameLine(); SmallInt("##foodms",&foodInterval,70); ImGui::SameLine(); ImGui::TextDisabled("ManaShield"); ImGui::SameLine(); SmallInt("##manams",&manaInterval,70); ImGui::SameLine(); ImGui::TextDisabled("Haste"); ImGui::SameLine(); SmallInt("##hastems",&hasteInterval,70);
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    EnsureWalkerIdCatalog();
+    nlohmann::json waters=nlohmann::json::array(); for(auto&v:g_walkerIds.data["fishingWater"]) if(v.is_number_integer()) waters.push_back(v);
+    nlohmann::json foodIds=nlohmann::json::array(); for(auto&v:g_walkerIds.data["food"]) if(v.is_number_integer()) foodIds.push_back(v);
+    nlohmann::json fcfg={{"enabled",g_nativeRuntimeLoaded&&fish},{"rod_id",CatalogFirst("fishingRod",3483)},{"water_ids",waters},{"range",fishRange},{"min_delay_ms",fishMinDelay},{"max_delay_ms",fishMaxDelay},{"random_target",true},{"pause_while_walker",true},{"pause_while_targeting",true}};
+    WriteJsonIfChanged("fishing.json",fcfg);
+    nlohmann::json tcfg={
+      {"food",{{"enabled",g_nativeRuntimeLoaded&&food},{"interval_ms",foodInterval},{"item_ids",foodIds}}},
+      {"anti_idle",{{"enabled",g_nativeRuntimeLoaded&&antiIdle},{"min_interval_ms",idleMin},{"max_interval_ms",idleMax},{"mode","turn_only"},{"status","runtime_turn_action_pending"}}},
+      {"mana_shield",{{"enabled",g_nativeRuntimeLoaded&&mana},{"spell",manaSpell},{"fallback_interval_ms",manaInterval},{"prefer_condition_state",true}}},
+      {"anti_paralyze",{{"enabled",g_nativeRuntimeLoaded&&para},{"spell",paraSpell},{"prefer_condition_state",true},{"speed_baseline_mode","unhasted_base"}}},
+      {"auto_haste",{{"enabled",g_nativeRuntimeLoaded&&haste},{"spell",hasteSpell},{"fallback_interval_ms",hasteInterval},{"prefer_condition_state",true}}},
+      {"light",{{"enabled",light},{"profile_gated",true}}},
+      {"spear_pickup",{{"enabled",g_nativeRuntimeLoaded&&spear},{"item_ids",nlohmann::json::array()},{"status","requires_move_equip_backend"}}},
+      {"reammo",{{"enabled",g_nativeRuntimeLoaded&&reAmmo},{"item_ids",nlohmann::json::array({ammo})},{"min_count",1},{"status","requires_move_equip_backend"}}}
+    };
+    WriteJsonIfChanged("tools.json",tcfg);
+    CardEnd();
+}
+
+static void DrawLoot(const Theme& t) {
+    static bool items=false,onScreen=false,only=false,dropEnabled=false; static int radius=3,maxWeight=3155;
+    static char lootIds[256]="3031,3035"; static char dropIds[256]="";
+    static std::uint64_t seenProfileLoadGeneration=0;
+    if(seenProfileLoadGeneration!=g_profileLoadGeneration){
+        seenProfileLoadGeneration=g_profileLoadGeneration;
+        nlohmann::json lj;
+        if(ReadJsonFile(g_baseDir/"config"/"loot.json",lj)){
+            items=lj.value("enabled",false); onScreen=lj.value("loot_on_screen",false); only=lj.value("only_list",false);
+            radius=lj.value("radius",3); maxWeight=lj.value("max_weight",3155);
+            auto toCsv=[](const nlohmann::json& a){ std::string s; if(a.is_array()) for(auto&v:a) if(v.is_number_integer()){ if(!s.empty()) s += ","; s += std::to_string(v.get<int>()); } return s; };
+            const auto li=toCsv(lj.value("item_ids",nlohmann::json::array())); std::snprintf(lootIds,sizeof(lootIds),"%s",li.c_str());
+            if(lj.contains("drop_item")&&lj["drop_item"].is_object()){
+                dropEnabled=lj["drop_item"].value("enabled",false);
+                const auto di=toCsv(lj["drop_item"].value("item_ids",nlohmann::json::array())); std::snprintf(dropIds,sizeof(dropIds),"%s",di.c_str());
+            }
+        }
+    }
+    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),125,t);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("Loot Items",&items); ImGui::SameLine(135); ImGui::Checkbox("Loot on Screen",&onScreen); ImGui::SameLine(285); ImGui::TextUnformatted("Radius:"); ImGui::SameLine(); SmallInt("##radius",&radius,55);
+    ImGui::Checkbox("Loot Only List",&only); ImGui::SameLine(210); ImGui::Checkbox("DropItem -> Ground",&dropEnabled); ImGui::SameLine(390); ImGui::TextUnformatted("Max Weight:"); ImGui::SameLine(); SmallInt("##weight",&maxWeight,70);
+    ImGui::TextDisabled("Loot IDs (comma separated)"); ImGui::SetNextItemWidth(-1); ImGui::InputText("##lootids",lootIds,sizeof(lootIds));
+    ImGui::TextDisabled("DropItem IDs: itens retirados do corpse e jogados no chao para lootbag"); ImGui::SetNextItemWidth(-1); ImGui::InputText("##dropids",dropIds,sizeof(dropIds));
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    auto csvIds=[](const char*s){ nlohmann::json a=nlohmann::json::array(); std::istringstream ss(s?s:""); std::string p; while(std::getline(ss,p,',')){ try{int id=std::stoi(p);if(id>0)a.push_back(id);}catch(...){}} return a; };
+    nlohmann::json lcfg={{"enabled",g_nativeRuntimeLoaded&&items},{"loot_on_screen",onScreen},{"only_list",only},{"radius",radius},{"max_weight",maxWeight},{"item_ids",csvIds(lootIds)},{"drop_item",{{"enabled",dropEnabled},{"item_ids",csvIds(dropIds)},{"destination","ground_near_corpse"}}}};
+    WriteJsonIfChanged("loot.json",lcfg);
+    CardEnd();
+}
+
+static void DrawAlarms(const Theme& t) {
+    static bool stuck=false,pm=false,blank=false,mana=false,screen=false,low=false,disc=false,attack=false,macro=false;
+    static int lowhp=50; static char vip[96]="Vip1, Vip2";
+    CardBegin("alarms","Alarms",CardIcon::Bell,ImVec4(1.0f,0.72f,0.05f,1),111,t);
+    ImGui::Checkbox("Walker Stuck",&stuck); ImGui::SameLine(220); ImGui::Checkbox("Low Health",&low); ImGui::SameLine(); SmallInt("##lowhp",&lowhp,50); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::Checkbox("Private Message",&pm); ImGui::SameLine(220); ImGui::Checkbox("Disconnected",&disc);
+    ImGui::Checkbox("Out of Blank Runes",&blank); ImGui::SameLine(220); ImGui::Checkbox("Player Attack",&attack);
+    ImGui::Checkbox("No Mana Region",&mana); ImGui::SameLine(220); ImGui::Checkbox("Macro Test",&macro);
+    ImGui::Checkbox("Player on Screen",&screen); ImGui::SameLine(220); ImGui::TextUnformatted("VIP:"); ImGui::SameLine(); SmallInput("##vip",vip,sizeof(vip),150);
+    CardEnd();
+}
+
+static void DrawHotkeys(const Theme& t) {
+    static const char* leftK[]={"F1","F2","F3","F4","F5","F6","F7","F8"};
+    static const char* leftA[]={"Mana Shield","Anti-Paralyze","Heal Friend","Haste","Logout","SSA","UH","Auto Loot"};
+    static const char* rightK[]={"F9","F10","F11","F12","N+","N-","N*","N/"};
+    static const char* rightA[]={"Food","Fishing","Re-Ammo","Rune Maker","Exevo","Exura Vita","Utani Hur","Exori"};
+    static char leftV[8][32]={{"exiva"},{"eRing"},{"exura"},{"utani hur"},{"/logout"},{"exori san"},{"uh"},{"loot all"}};
+    static char rightV[8][32]={{"use food"},{"fish"},{"reammo"},{"make rune"},{"exevo gran mas"},{"exura vita"},{"utani hur"},{"exori"}};
+    CardBegin("hotkeys","Hotkeys",CardIcon::Keyboard,ImVec4(0.12f,0.62f,1.0f,1),192,t);
+    if(ImGui::BeginTable("hk",6,ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Key",0,0.45f); ImGui::TableSetupColumn("Action",0,1.2f); ImGui::TableSetupColumn("Value",0,1.25f);
+        ImGui::TableSetupColumn("Key2",0,0.45f); ImGui::TableSetupColumn("Action2",0,1.15f); ImGui::TableSetupColumn("Value2",0,1.25f);
+        for(int i=0;i<8;i++) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(leftK[i]);
+            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(leftA[i]);
+            ImGui::TableSetColumnIndex(2); ImGui::PushID(i); SmallInput("##lv",leftV[i],32,-1); ImGui::PopID();
+            ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(rightK[i]);
+            ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(rightA[i]);
+            ImGui::TableSetColumnIndex(5); ImGui::PushID(i+20); SmallInput("##rv",rightV[i],32,-1); ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    CardEnd();
+}
+
+static void DrawFooter(const Theme& t) {
+    RefreshLookResult();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,t.panel); ImGui::PushStyleColor(ImGuiCol_Border,t.border); ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,7);
+    ImGui::BeginChild("footer",ImVec2(0,92),ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+    ImDrawList* d=ImGui::GetWindowDrawList(); ImVec2 wp=ImGui::GetWindowPos(); DrawCardIcon(d,CardIcon::Info,ImVec2(wp.x+17,wp.y+15),Col(t.blue));
+    ImGui::SetCursorPosX(30); ImGui::PushFont(g_fontBold?g_fontBold:g_font); ImGui::TextUnformatted("Runtime / Build"); ImGui::PopFont();
+    const auto* st=g_session?&g_session->status():nullptr; const bool connected=st&&st->localPlayerResolved&&g_livePlayer.valid;
+    ImGui::SameLine(150); ImGui::TextColored(connected?t.green:t.muted,connected?"● LIVE":"○ WAIT"); ImGui::SameLine(225); ImGui::Text("PID: %lu",st?(unsigned long)st->pid:0ul); ImGui::SameLine(325); ImGui::Text("Client: %s",(st&&!st->exe.empty())?st->exe.c_str():"-");
+    ImGui::Separator();
+    ImGui::Text("Profile: %s",(st&&st->profileMatched)?st->profileName.c_str():"-"); ImGui::SameLine(325);
+    if(g_livePlayer.valid) ImGui::TextColored(t.green,"HP %.0f/%.0f (%.0f%%) Mana %.0f/%.0f (%.0f%%) Pos %d,%d,%d",g_livePlayer.health,g_livePlayer.maxHealth,g_livePlayer.healthPercent(),g_livePlayer.mana,g_livePlayer.maxMana,g_livePlayer.manaPercent(),g_livePlayer.position.x,g_livePlayer.position.y,(int)g_livePlayer.position.z);
+    else ImGui::TextDisabled("Player snapshot aguardando runtime...");
+    ImGui::Separator();
+    const auto* p=g_session?g_session->profile():nullptr;
+    if(p){ auto caps=crome::Capabilities::from(*p); ImGui::Text("Read: Player %s | Map %s | Containers %s",caps.playerRead?"READY":"MISS",caps.mapRead?"READY":"MISS",caps.containerRead?"READY":"MISS"); ImGui::SameLine(420); ImGui::TextColored(g_nativeRuntimeLoaded?t.green:ImVec4(1.0f,0.58f,0.25f,1.0f),"Native: %s",g_nativeRuntimeStatus.c_str()); }
+    if(g_lastLook.valid && g_lastLook.id>0){
+        if(g_lastLook.onGround) ImGui::Text("Look ID: %d   Pos: %d,%d,%d",g_lastLook.id,g_lastLook.x,g_lastLook.y,g_lastLook.z);
+        else ImGui::Text("Look ID: %d",g_lastLook.id);
+    } else ImGui::TextDisabled("Look ID: -");
+    ImGui::EndChild(); ImGui::PopStyleVar(); ImGui::PopStyleColor(2);
+}
+
+static void DrawRuntimeGuard(const Theme& t) {
+    const auto* sessionStatus = g_session ? &g_session->status() : nullptr;
+    const bool nonOldersProfile = sessionStatus && sessionStatus->profileMatched && sessionStatus->exe.find("Olders") == std::string::npos && sessionStatus->exe.find("olders") == std::string::npos;
+    if (nonOldersProfile) return; // permite validar builds como Classico em modo leitura sem exigir o runtime Olders.
+    const DWORD pid = FindProcessByName(L"Olders_OpenGL.exe");
+    if (g_nativeRuntimeLoaded) return;
+    ImGui::OpenPopup("Native runtime required");
+    ImGui::SetNextWindowSize(ImVec2(440,0), ImGuiCond_Always);
+    if (ImGui::BeginPopupModal("Native runtime required", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::PushFont(g_fontBold?g_fontBold:g_font);
+        ImGui::TextColored(ImVec4(1.0f,0.42f,0.32f,1.0f),"Native runtime nao foi carregado");
+        ImGui::PopFont();
+        ImGui::Spacing();
+        if (!pid) {
+            ImGui::TextWrapped("Abra o Olders_OpenGL.exe. O Crome libera os modulos somente depois que o runtime nativo estiver conectado.");
+        } else {
+            ImGui::TextWrapped("Healing, Cavebot, Targeting, Loot e Tools permanecem bloqueados ate o runtime conectar.");
+            ImGui::TextDisabled("Status: %s", g_nativeRuntimeStatus.c_str());
+        }
+        ImGui::Spacing();
+        if (pid) {
+            if (ImGui::Button("Retry Runtime", ImVec2(150,28))) RetryNativeRuntime();
+        } else {
+            ImGui::BeginDisabled(); ImGui::Button("Retry Runtime", ImVec2(150,28)); ImGui::EndDisabled();
+        }
+        ImGui::SameLine(); ImGui::TextDisabled("Sem reinjecao automatica em loop.");
+        ImGui::EndPopup();
+    }
+}
+
+static void DrawTopBar(const Theme& t) {
+    ImVec2 wp = ImGui::GetWindowPos(); ImVec2 ws = ImGui::GetWindowSize();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    d->AddRectFilled(wp,ImVec2(wp.x+ws.x,wp.y+38),Col(t.panel),0);
+    d->AddLine(ImVec2(wp.x+14,wp.y+27),ImVec2(wp.x+27,wp.y+14),Col(t.blue),2.8f);
+    d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
+    ImGui::SetCursorPos(ImVec2(35,8));
+    ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.7.9 x64 Features");
+    ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
+    ImGui::SetCursorPos(ImVec2(ws.x-72,7));
+    if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
+    ImGui::SameLine(); if(ImGui::Button("X",ImVec2(26,24))) g_running=false;
+
+    ImGui::SetCursorPos(ImVec2(0,0));
+    ImGui::InvisibleButton("##drag",ImVec2(ws.x-250,40));
+    if(ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        ReleaseCapture(); SendMessage(g_hWnd,WM_NCLBUTTONDOWN,HTCAPTION,0);
+    }
+    ImGui::SetCursorPosY(43);
+}
+
+static void DrawUI() {
+    RefreshRuntime();
+    RefreshNativeRuntime();
+    Theme t = g_dark ? DarkTheme() : LightTheme();
+    ApplyTheme(t);
+    ImGui::SetNextWindowPos(ImVec2(0,0));
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("##root",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoScrollWithMouse|ImGuiWindowFlags_NoScrollbar);
+    DrawTopBar(t);
+    DrawRuntimeGuard(t);
+
+    // Layout fechado: as colunas possuem exatamente a altura dos cards.
+    // Assim nao existe area morta nem scroll escondido no painel principal.
+    const float gap = 5.0f;
+    const float rowGap = 1.0f;
+    const float columnsH = 565.0f;
+    float avail = ImGui::GetContentRegionAvail().x;
+    float colW = (avail-gap)*0.5f;
+
+    ImGuiWindowFlags columnFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::BeginChild("left",ImVec2(colW,columnsH),false,columnFlags);
+    DrawHealing(t); ImGui::Dummy(ImVec2(0,rowGap));
+    DrawFriends(t); ImGui::Dummy(ImVec2(0,rowGap));
+    DrawRune(t); ImGui::Dummy(ImVec2(0,rowGap));
+    DrawCavebot(t);
+    ImGui::EndChild();
+
+    ImGui::SameLine(0,gap);
+    ImGui::BeginChild("right",ImVec2(colW,columnsH),false,columnFlags);
+    DrawTools(t); ImGui::Dummy(ImVec2(0,rowGap));
+    DrawLoot(t); ImGui::Dummy(ImVec2(0,rowGap));
+    DrawAlarms(t); ImGui::Dummy(ImVec2(0,rowGap));
+    DrawHotkeys(t);
+    ImGui::EndChild();
+
+    ImGui::Dummy(ImVec2(0,2));
+    DrawFooter(t);
+    ImGui::End();
+}
+
+static bool CreateOpenGLContext(HWND hwnd) {
+    g_hDC = GetDC(hwnd);
+    PIXELFORMATDESCRIPTOR pfd{};
+    pfd.nSize = sizeof(pfd); pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA; pfd.cColorBits = 32; pfd.cAlphaBits = 8; pfd.cDepthBits = 24; pfd.iLayerType = PFD_MAIN_PLANE;
+    int pf = ChoosePixelFormat(g_hDC,&pfd); if(!pf) return false;
+    if(!SetPixelFormat(g_hDC,pf,&pfd)) return false;
+    g_hRC = wglCreateContext(g_hDC); if(!g_hRC) return false;
+    return wglMakeCurrent(g_hDC,g_hRC)==TRUE;
+}
+
+static void DestroyOpenGLContext() {
+    if(g_hRC){wglMakeCurrent(nullptr,nullptr);wglDeleteContext(g_hRC);g_hRC=nullptr;}
+    if(g_hDC&&g_hWnd){ReleaseDC(g_hWnd,g_hDC);g_hDC=nullptr;}
+}
+
+LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if(ImGui_ImplWin32_WndProcHandler(hWnd,msg,wParam,lParam)) return true;
+    switch(msg) {
+        case WM_CLOSE: g_running=false; return 0;
+        case WM_DESTROY: PostQuitMessage(0); return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_MOVING: {
+            // Mantem a janela inteira dentro da area util (nao entra atras da taskbar).
+            RECT work{};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            RECT* r = reinterpret_cast<RECT*>(lParam);
+            const LONG w = r->right - r->left;
+            const LONG h = r->bottom - r->top;
+            if (r->left < work.left) { r->left = work.left; r->right = r->left + w; }
+            if (r->top < work.top) { r->top = work.top; r->bottom = r->top + h; }
+            if (r->right > work.right) { r->right = work.right; r->left = r->right - w; }
+            if (r->bottom > work.bottom) { r->bottom = work.bottom; r->top = r->bottom - h; }
+            return TRUE;
+        }
+    }
+    return DefWindowProcW(hWnd,msg,wParam,lParam);
+}
+
+int WINAPI WinMain(HINSTANCE hInst,HINSTANCE, LPSTR,int) {
+    SetProcessDPIAware();
+    WNDCLASSEXW wc{sizeof(wc),CS_OWNDC,WndProc,0,0,hInst,nullptr,LoadCursor(nullptr,IDC_ARROW),nullptr,nullptr,L"CromeImGuiClass",nullptr};
+    RegisterClassExW(&wc);
+
+    // Usa a area util do Windows (exclui taskbar) para que toda a UI fique sempre visivel.
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int workW = work.right - work.left;
+    const int workH = work.bottom - work.top;
+
+    const int W = std::min(860, std::max(760, workW - 20));
+    const int H = std::min(710, std::max(680, workH - 12));
+    int sx = work.left + (workW - W) / 2;
+    int sy = work.top + (workH - H) / 2;
+    g_hWnd=CreateWindowExW(WS_EX_APPWINDOW,wc.lpszClassName,L"Crome",WS_POPUP,sx,sy,W,H,nullptr,nullptr,hInst,nullptr);
+    if(!g_hWnd) return 1;
+    int corner=2; DwmSetWindowAttribute(g_hWnd,33,&corner,sizeof(corner));
+    if(!CreateOpenGLContext(g_hWnd)) return 2;
+    ShowWindow(g_hWnd,SW_SHOWDEFAULT); UpdateWindow(g_hWnd);
+
+    // Runtime/profile connection. The UI stays open even when no client is running.
+    {
+        wchar_t exePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+        g_baseDir=std::filesystem::path(exePath).parent_path();
+        g_session=std::make_unique<crome::ClientSession>();
+        g_session->loadProfiles(g_baseDir / "profiles");
+        g_session->refresh(true);
+    }
+
+    IMGUI_CHECKVERSION(); ImGui::CreateContext();
+    ImGuiIO& io=ImGui::GetIO(); io.IniFilename=nullptr; io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
+    if(GetFileAttributesA("C:\\Windows\\Fonts\\segoeui.ttf")!=INVALID_FILE_ATTRIBUTES) {
+        g_font=io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf",12.0f);
+        g_fontBold=io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf",13.0f);
+        g_fontTitle=io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf",17.0f);
+    } else { g_font=io.Fonts->AddFontDefault(); g_fontBold=g_font; g_fontTitle=g_font; }
+
+    ImGui_ImplWin32_InitForOpenGL(g_hWnd);
+    ImGui_ImplOpenGL3_Init("#version 130");
+
+    MSG msg{};
+    while(g_running) {
+        while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); if(msg.message==WM_QUIT) g_running=false; }
+        if(!g_running) break;
+        ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+        DrawUI();
+        ImGui::Render();
+        Theme t=g_dark?DarkTheme():LightTheme();
+        glViewport(0,0,(GLsizei)io.DisplaySize.x,(GLsizei)io.DisplaySize.y);
+        glClearColor(t.bg.x,t.bg.y,t.bg.z,1.0f); glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        SwapBuffers(g_hDC);
+        Sleep(8);
+    }
+
+    ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
+    DestroyOpenGLContext(); DestroyWindow(g_hWnd); UnregisterClassW(wc.lpszClassName,hInst);
+    return 0;
+}

@@ -1,0 +1,7 @@
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/CMakeFiles/crome_core.dir
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/CMakeFiles/Crome.dir
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/CMakeFiles/CromeRuntime.dir
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/CMakeFiles/edit_cache.dir
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/CMakeFiles/rebuild_cache.dir
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/_deps/nlohmann_json-build/CMakeFiles/edit_cache.dir
+C:/Users/alex1/Downloads/Crome_Universal_v7_12_COMPLETE/Crome_Universal_v7_12_COMPLETE/Developer/build/_deps/nlohmann_json-build/CMakeFiles/rebuild_cache.dir

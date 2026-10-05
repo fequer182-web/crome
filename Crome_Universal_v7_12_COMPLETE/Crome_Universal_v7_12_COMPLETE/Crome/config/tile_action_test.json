@@ -1,0 +1,14 @@
+{
+  "shovel_target": { "x": 32865, "y": 32034, "z": 7 },
+  "rope_target": { "x": 32865, "y": 32034, "z": "current" },
+
+  "shovel_item_id": 3457,
+  "rope_item_id": 3003,
+  "fishing_rod_item_id": 3483,
+
+  "fishing_range": 7,
+  "fishable_water_ids": [4597, 4598, 4599, 4600, 4601, 4602],
+
+  "magic_rope_spell": "exani tera",
+  "magic_rope_enabled": false
+}

@@ -1,0 +1,48 @@
+{
+  "clearBeforeUse": [],
+  "corpseBag": [],
+  "counter": [],
+  "depot": [],
+  "evidence": {
+    "1948": "capturado no teste do usuario via Inspect/Look no Olders",
+    "3003": "Crome SDK v21.6 / tile_action_test rope_item_id",
+    "3457": "Crome SDK v21.6 / tile_action_test shovel_item_id",
+    "3483": "Crome SDK v21.6 / fishing rod test",
+    "4597-4602": "IDs de agua usados no fishing.json de teste do Crome; edite no catalogo se o OT usar outros IDs"
+  },
+  "fishingRod": [
+    3483
+  ],
+  "fishingWater": [
+    4597,
+    4598,
+    4599,
+    4600,
+    4601,
+    4602
+  ],
+  "food": [
+    3578
+  ],
+  "global": true,
+  "ladder": [
+    1948
+  ],
+  "machete": [],
+  "minePick": [],
+  "nonPathable": [],
+  "notes": "Categorias do Rifbot recuperadas: Pathable, Rope, Shovel, Pick, Mine Pick, Machete, Counter, Depot, Ladder, Food, Rock, Open Holes, Non Pathable, Corpse Bag. Numeros nao encontrados nas fontes ficam vazios para nao inventar IDs.",
+  "openHoles": [],
+  "pathable": [
+    3504
+  ],
+  "pick": [],
+  "rock": [],
+  "rope": [
+    3003
+  ],
+  "schema": "crome-walker-ids-v1",
+  "shovel": [
+    3457
+  ]
+}

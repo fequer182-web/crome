@@ -1,0 +1,41 @@
+{
+  "action_wait_ms": 450,
+  "enabled": false,
+  "loop": true,
+  "max_retries": 2,
+  "reach_distance": 0,
+  "retry_delay_ms": 650,
+  "stuck_ms": 3500,
+  "timeout_ms": 15000,
+  "tool_ids": {
+    "fishing_rod": 3483,
+    "rope": 3003,
+    "shovel": 3457
+  },
+  "waypoints": [
+    {
+      "type": "walk",
+      "x": 32921,
+      "y": 32076,
+      "z": 7
+    },
+    {
+      "type": "walk",
+      "x": 32921,
+      "y": 32072,
+      "z": 7
+    },
+    {
+      "type": "walk",
+      "x": 32916,
+      "y": 32072,
+      "z": 7
+    },
+    {
+      "type": "walk",
+      "x": 32916,
+      "y": 32077,
+      "z": 7
+    }
+  ]
+}

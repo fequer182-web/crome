@@ -1,0 +1,1 @@
+ libcrome_core.a -lopengl32 -lgdi32 -limm32 -ldwmapi -luser32 -lpsapi -lcomdlg32 -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 

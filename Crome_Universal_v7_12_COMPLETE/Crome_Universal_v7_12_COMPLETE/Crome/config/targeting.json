@@ -1,0 +1,22 @@
+{
+  "attack_any_monster": false,
+  "chase_distance": 1,
+  "chase_enabled": true,
+  "chase_force_refresh_ms": 1800,
+  "chase_interval_ms": 350,
+  "chase_repath_ms": 900,
+  "chase_scan_range": 15,
+  "enabled": false,
+  "hp_max": 100,
+  "hp_min": 0,
+  "manual_input_pause_ms": 1500,
+  "max_range": 7,
+  "pause_walker": true,
+  "poll_ms": 300,
+  "targets": [
+    {
+      "name": "Snake",
+      "priority": 0
+    }
+  ]
+}

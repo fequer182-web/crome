@@ -1,0 +1,66 @@
+{
+  "schema": "otclab-ramonia-x86-research-v2",
+  "mode": "read_only_no_hooks_no_internal_calls",
+  "policy": "discovery_rules_only_no_cross_build_rva_oracle",
+  "build": {
+    "exe": "C:\\Users\\alex1\\AppData\\Roaming\\Ramonia\\RamoniaSummer26\\ramonia_gl-1790824009.exe",
+    "architecture": "x86",
+    "timestamp": "0x6AB03F94",
+    "sizeOfImage": "0xAA2000",
+    "entryPointRva": "0x47F460",
+    "textHashFNV1A64": "0xE281E9CA5BA0AF2",
+    "textHashMethod": "disk_raw_text",
+    "mappedTextHashDiagnostic": "0xA1AAE8D3A3A4925D",
+    "rendererHint": "opengl"
+  },
+  "rtti": {
+    "Container": {"typeDescriptorRva": "0x8BAC0C", "vtables": ["0x76DBC8"]},
+    "Item": {"typeDescriptorRva": "0x8BB7B0", "vtables": ["0x76DFC4"]},
+    "LocalPlayer": {"typeDescriptorRva": "0x8BBA68", "vtables": ["0x76E158"]},
+    "Monster": {"typeDescriptorRva": "0x865F14", "vtables": ["0x773F44"]},
+    "Npc": {"typeDescriptorRva": "0x857FFC", "vtables": ["0x773FF8"]},
+    "Player": {"typeDescriptorRva": "0x8BB9A4", "vtables": ["0x76E050"]},
+    "Tile": {"typeDescriptorRva": "0x8737BC", "vtables": ["0x774208"]}
+  },
+  "semanticBinds": {
+    "attack": {"methodRva": "0x79190", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "autoWalk": {"methodRva": "0x76860", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "follow": {"methodRva": "0x79300", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "getCreatureById": {"methodRva": "0x1487F0", "ownerRva": "0xA2D600", "ownerSection": ".data", "status": "offline_semantic"},
+    "getCreatureByName": {"methodRva": "0x68A60", "ownerRva": "0xA2D490", "ownerSection": ".data", "status": "offline_semantic"},
+    "getTile": {"methodRva": "0x147F80", "ownerRva": "0xA2D600", "ownerSection": ".data", "status": "offline_semantic"},
+    "getTopUseThing": {"methodRva": "0x0", "ownerRva": "0x0", "status": "not_found"},
+    "look": {"methodRva": "0x77640", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "move": {"methodRva": "0x77920", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "talk": {"methodRva": "0x796F0", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "talkChannel": {"methodRva": "0x79750", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "use": {"methodRva": "0x780D0", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"},
+    "useWith": {"methodRva": "0x784F0", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"}
+  },
+  "owners": {"gameRva": "0xA2D4D0", "mapRva": "0xA2D600"},
+  "gameLayout": {
+    "localPlayerOffset": "0x0",
+    "attackTargetOffset": "0x4",
+    "followTargetOffset": "0x8",
+    "protocolCandidateOffset": "0xC",
+    "attackTargetSource": "runtime_transition",
+    "followTargetSource": "runtime_transition",
+    "status": "runtime_or_static_consistent"
+  },
+  "runtime": {
+    "localPlayerPtr": "0x20100048",
+    "localPlayerVtableRva": "0x76E158",
+    "localPlayerVtableMatch": true,
+    "position": {"x": "0xC", "y": "0x10", "z": "0x14", "direction": "0x4C"},
+    "mapCenterCandidates": ["0x1AC"],
+    "positionSource": "runtime_transition_plus_xyz_adjacency",
+    "selectedFields": {
+      "capacity": {"type": "u32", "offset": "0x158", "status": "unique_typed_value"},
+      "experience": {"type": "double", "offset": "0x4B0", "status": "unique_typed_value"},
+      "health": {"type": "double", "offset": "0x490", "status": "unique_typed_value"},
+      "level": {"type": "double", "offset": "0x4B8", "status": "unique_typed_value"},
+      "mana": {"type": "", "offset": "0x0", "status": "pending"},
+      "maxHealth": {"type": "double", "offset": "0x498", "status": "unique_typed_value"}
+    }
+  }
+}

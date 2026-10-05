@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "loop": true,
+  "reach_distance": 0,
+  "timeout_ms": 15000,
+  "stuck_ms": 3500,
+  "retry_delay_ms": 650,
+  "max_retries": 2,
+  "action_wait_ms": 450,
+  "tool_ids": {"rope":3003,"shovel":3457,"fishing_rod":3483},
+  "waypoints": []
+}

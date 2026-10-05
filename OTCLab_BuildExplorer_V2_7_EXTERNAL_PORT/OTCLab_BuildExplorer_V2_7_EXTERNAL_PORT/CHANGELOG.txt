@@ -1,0 +1,11 @@
+V2.7 EXTERNAL PORT
+==================
+
+- Port externo baseado no V2.8 READ-ONLY que ja funcionou sem injecao.
+- Mantem fingerprint + LocalPlayer + Position + Light externos.
+- Adiciona pointer path indireto (module -> owner -> LocalPlayer).
+- Adiciona Game owner + AttackTarget/FollowTarget discovery guiado quando possivel.
+- Adiciona Map Center externo por transicoes quando a copia esta no modulo.
+- Adiciona scanner estatico de 14 funcoes usando os profiles de referencia da V2.7.
+- Look salva candidato estatico de Game::detailedLook/Game::look quando assinatura unica bater.
+- Nenhum hook/write/breakpoint no processo alvo.

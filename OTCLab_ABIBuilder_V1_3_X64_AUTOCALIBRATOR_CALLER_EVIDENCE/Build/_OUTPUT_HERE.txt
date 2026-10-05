@@ -1,0 +1,5 @@
+Depois de rodar build.bat, esta pasta recebe:
+OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE.dll
+
+Os BuildProfiles ficam em ..\profiles\.
+Nao copie profiles duplicados para Build; a V1.3 procura automaticamente na pasta profiles do projeto.

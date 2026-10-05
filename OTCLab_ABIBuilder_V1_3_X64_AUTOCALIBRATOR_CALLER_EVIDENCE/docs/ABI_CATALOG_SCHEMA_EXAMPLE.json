@@ -1,0 +1,68 @@
+{
+  "abiCatalog": {
+    "schema": "otclab-abi-catalog-v4",
+    "schemaVersion": 4,
+    "builder": "OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE",
+    "policy": "guided_runtime_autocalibration_with_natural_caller_resolution",
+    "functions": {
+      "gameAttack": {
+        "name": "Game::attack",
+        "rva": "0x147E00",
+        "status": "confirmed_runtime_shared_ptr_abi",
+        "runtimeRvaObserved": true,
+        "confirmedMappings": [
+          {"semantic": "Game* this", "path": "RCX"},
+          {"semantic": "CreaturePtr argument wrapper", "path": "RDX"},
+          {"semantic": "Creature* pointee", "path": "*(RDX+0x0)"},
+          {"semantic": "shared_ptr control evidence", "path": "*(RDX+0x8)"}
+        ],
+        "machineAbiValidated": true,
+        "naturalThreadObserved": true,
+        "naturalThreadId": 1234,
+        "threadValidated": false,
+        "naturalCallerObserved": true,
+        "callerSiteValidated": true,
+        "callerSamples": 2,
+        "naturalCallKind": "call_rel32",
+        "naturalCallSiteRva": "0x180EE2",
+        "naturalReturnRva": "0x180EE7",
+        "naturalCallerFunctionRva": "0x180E10",
+        "naturalCallerFunctionEndRva": "0x180F40",
+        "callSiteWindow": "48 8B ... E8 ?? ?? ?? ?? ...",
+        "callerProloguePrefix": "48 89 ...",
+        "callerCandidateReady": true,
+        "callable": false,
+        "capturesA": [
+          {
+            "threadId": 1234,
+            "RDX": "0x0000012345678000",
+            "returnRva": "0x180EE7",
+            "callSiteRva": "0x180EE2",
+            "callerFunctionRva": "0x180E10",
+            "callKind": "call_rel32",
+            "argSnapshots": {
+              "RDX": {
+                "base": "0x0000012345678000",
+                "validBytes": 64,
+                "q0": "0x0000012300001000",
+                "q1": "0x0000012300002000"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "lastEvidenceSession": {},
+    "evidencePolicy": {
+      "neverDowngradeStrongerExistingEvidence": true,
+      "userRole": "generate_runtime_transition_only",
+      "profileFactsAreReused": true
+    },
+    "callabilityPolicy": {
+      "requiresMachineAbiValidated": true,
+      "requiresNaturalThreadEvidence": true,
+      "requiresCallerSiteValidated": true,
+      "requiresActiveCallValidation": true
+    }
+  }
+}

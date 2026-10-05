@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "loot_on_screen": false,
+  "only_list": true,
+  "radius": 3,
+  "max_weight": 3155,
+  "item_ids": [],
+  "drop_item": {
+    "enabled": false,
+    "item_ids": [],
+    "destination": "ground_near_corpse",
+    "status": "requires_native_move_backend"
+  }
+}

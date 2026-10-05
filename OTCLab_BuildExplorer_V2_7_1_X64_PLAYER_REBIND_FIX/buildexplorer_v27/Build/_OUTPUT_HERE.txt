@@ -1,0 +1,4 @@
+Execute ..\build.bat
+
+Saida esperada:
+OTCLab_BuildExplorer_V2_7_X64_LOOK_AUTO.dll

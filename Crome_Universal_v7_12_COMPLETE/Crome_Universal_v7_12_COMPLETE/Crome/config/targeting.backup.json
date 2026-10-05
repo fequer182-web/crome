@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "attackAny": false,
+  "keepFollow": false,
+  "shouldAttackMe": false,
+  "mode": "follow",
+  "hpMin": 0,
+  "hpMax": 100,
+  "maxRange": 7,
+  "monsters": [],
+  "rules": []
+}

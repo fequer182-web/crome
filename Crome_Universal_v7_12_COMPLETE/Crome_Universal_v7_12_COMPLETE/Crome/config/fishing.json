@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "max_delay_ms": 1450,
+  "min_delay_ms": 850,
+  "pause_while_targeting": true,
+  "pause_while_walker": true,
+  "random_target": true,
+  "range": 7,
+  "rod_id": 3483,
+  "water_ids": [
+    4597,
+    4598,
+    4599,
+    4600,
+    4601,
+    4602
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "otclab-external-v27-port-v1",
+  "mode": "external_read_only",
+  "pid": 21968,
+  "process": "C:\\Users\\alex1\\AppData\\Roaming\\ot-launcher\\otclient\\otclient_dx.exe",
+  "build": {"timestamp": "0x6ABEF17D", "sizeOfImage": "0x119A000", "entryPointRva": "0x6D6190", "textRva": "0x1000", "textSize": "0xAEEA00", "textHashFNV1A64": "0x84FBD939685FF9FB"},
+  "localPlayer": {
+    "runtimeAddressDiagnostic": "0x1780A7004B0",
+    "vtableRva": "0xCBFCD8",
+    "directGlobalRva": "0x10E6B30",
+    "indirectGlobalRva": "0x10E6B48",
+    "indirectOwnerOffset": "0x1C0",
+    "position": {"x": "0x18", "y": "0x1C", "z": "0x20", "direction": "0x64"},
+    "fields": {
+      "health": {"status": "strong_candidate", "offsets": ["0x5B0"]},
+      "maxHealth": {"status": "strong_candidate", "offsets": ["0x5B8"]},
+      "mana": {"status": "ambiguous", "offsets": ["0x5E8", "0x5F0"]},
+      "maxMana": {"status": "ambiguous", "offsets": ["0x5E8", "0x5F0"]},
+      "experience": {"status": "strong_candidate", "offsets": ["0x5D0"]},
+      "level": {"status": "ambiguous", "offsets": ["0x5D8", "0x610"]},
+      "capacity": {"status": "pending", "offsets": []}
+    }
+  },
+  "game": {"status": "external_owner_resolved", "globalRva": "0x10E6B30", "localPlayerOffset": "0x0", "attackTargetOffset": "0x8", "followTargetOffset": "0x10", "source": "module_direct_field"},
+  "map": {"status": "confirmed_external_center_transition", "centerRva": "0x10E7060", "candidateMapRva": "0x10E6D20"},
+  "functions": {
+    "Game::autoWalk": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "LocalPlayer::autoWalk": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::attack": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::follow": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::look": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::detailedLook": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::move": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::use": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::useWith": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Game::talk": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Map::getTile": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Map::getCreatureById": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Map::getCreatureByName": {"rva": "0x0", "status": "pending", "candidates": 0},
+    "Container::getItem": {"rva": "0x0", "status": "pending", "candidates": 0}
+  },
+  "light": {"status": "confirmed_read_transition", "writeValidated": false, "bestOffset": "0xD9", "baseline": 0, "active": 7, "alsoLux": false},
+  "look": {"status": "pending", "hookFunction": "pending", "hookRva": "0x0", "runtimeAbi": "pending_external_read_only", "referenceItemDefaults": [3031,3552], "note": "No injection/hook: ABI remains pending; static candidate comes only from remote .text signature evidence."}
+}

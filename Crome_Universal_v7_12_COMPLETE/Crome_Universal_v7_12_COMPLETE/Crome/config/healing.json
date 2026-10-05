@@ -1,0 +1,72 @@
+{
+  "enabled": false,
+  "poll_ms": 100,
+  "rules": [
+    {
+      "action": "spell",
+      "below_or_equal": 90,
+      "cooldown_ms": 850,
+      "enabled": false,
+      "min_mana": 25,
+      "name": "light_heal",
+      "priority": 600,
+      "spell": "exura",
+      "trigger": "health_percent"
+    },
+    {
+      "action": "spell",
+      "below_or_equal": 70,
+      "cooldown_ms": 850,
+      "enabled": false,
+      "min_mana": 40,
+      "name": "mid_heal",
+      "priority": 700,
+      "spell": "exura gran",
+      "trigger": "health_percent"
+    },
+    {
+      "action": "spell",
+      "below_or_equal": 40,
+      "cooldown_ms": 850,
+      "enabled": false,
+      "min_mana": 80,
+      "name": "high_heal",
+      "priority": 800,
+      "spell": "exura vita",
+      "trigger": "health_percent"
+    },
+    {
+      "action": "item_on_self",
+      "below_or_equal": 50,
+      "cooldown_ms": 650,
+      "enabled": false,
+      "item_id": 2273,
+      "min_mana": 0,
+      "name": "uh",
+      "priority": 1000,
+      "trigger": "health_percent"
+    },
+    {
+      "action": "item_on_self",
+      "below_or_equal": 50,
+      "cooldown_ms": 650,
+      "enabled": false,
+      "item_id": 0,
+      "min_mana": 0,
+      "name": "life_fluid",
+      "priority": 900,
+      "trigger": "health_percent"
+    },
+    {
+      "action": "item_on_self",
+      "below_or_equal": 50,
+      "cooldown_ms": 650,
+      "enabled": false,
+      "item_id": 0,
+      "min_mana": 0,
+      "name": "mana_fluid",
+      "priority": 500,
+      "trigger": "mana_percent"
+    }
+  ]
+}

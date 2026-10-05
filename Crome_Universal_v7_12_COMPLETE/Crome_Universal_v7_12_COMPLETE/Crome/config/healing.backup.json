@@ -1,0 +1,48 @@
+{
+  "enabled": false,
+  "pollMs": 100,
+  "spells": [
+    {
+      "name": "Light",
+      "enabled": false,
+      "hpPercent": 90,
+      "minMana": 25,
+      "spell": "exura",
+      "priority": 90
+    },
+    {
+      "name": "Mid",
+      "enabled": false,
+      "hpPercent": 70,
+      "minMana": 40,
+      "spell": "exura gran",
+      "priority": 95
+    },
+    {
+      "name": "High",
+      "enabled": false,
+      "hpPercent": 40,
+      "minMana": 80,
+      "spell": "exura vita",
+      "priority": 100
+    }
+  ],
+  "items": {
+    "uh": {
+      "enabled": false,
+      "hpPercent": 50,
+      "itemId": 2273
+    },
+    "manaFluid": {
+      "enabled": false,
+      "manaPercent": 50,
+      "itemId": 0
+    },
+    "lifeFluid": {
+      "enabled": false,
+      "hpPercent": 50,
+      "itemId": 0
+    }
+  },
+  "notes": "Spell mana is ABSOLUTE mana, not percent. Item IDs are server configurable."
+}

@@ -1,0 +1,16 @@
+{
+  "drop_item": {
+    "destination": "ground_near_corpse",
+    "enabled": false,
+    "item_ids": []
+  },
+  "enabled": false,
+  "item_ids": [
+    3031,
+    3035
+  ],
+  "loot_on_screen": false,
+  "max_weight": 3155,
+  "only_list": false,
+  "radius": 3
+}

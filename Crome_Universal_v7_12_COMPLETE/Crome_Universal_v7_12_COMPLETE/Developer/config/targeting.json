@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "poll_ms": 300,
+  "attack_any_monster": false,
+  "pause_walker": true,
+  "chase_enabled": false,
+  "chase_distance": 1,
+  "chase_scan_range": 15,
+  "chase_interval_ms": 350,
+  "hp_min": 0,
+  "hp_max": 100,
+  "max_range": 7,
+  "targets": [],
+  "chase_repath_ms": 900,
+  "chase_force_refresh_ms": 1800,
+  "manual_input_pause_ms": 1500
+}
