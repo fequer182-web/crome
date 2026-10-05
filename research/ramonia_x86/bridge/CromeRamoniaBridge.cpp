@@ -45,6 +45,8 @@ struct Profile {
 
 std::optional<Profile> g_profile;
 
+std::string moduleDirectory();
+
 std::filesystem::path bridgeLogPath() {
     return std::filesystem::path(moduleDirectory()) / "CromeRamoniaBridge.log";
 }
