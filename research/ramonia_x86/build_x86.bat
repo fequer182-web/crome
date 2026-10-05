@@ -10,6 +10,11 @@ set "PROFILE_DIR=%PKG_DIR%\profiles\ramonia_x86"
 set "INJECTOR_CPP=%~dp0..\..\tools\injector\PID_Injector.cpp"
 set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V37.dll"
 set "OUT_INJECTOR=%PKG_DIR%\PID_Injector_x86.exe"
+set "BRIDGE_SRC=%~dp0bridge\CromeRamoniaBridge.cpp"
+set "PIPE_TEST_SRC=%~dp0bridge\CromePipeTest.cpp"
+set "MINIJSON_DIR=%~dp0..\..\Crome\Developer\native_runtime\profiles"
+set "OUT_BRIDGE=%PKG_DIR%\CromeRamoniaBridge_x86.dll"
+set "OUT_PIPE_TEST=%PKG_DIR%\CromePipeTest_x64.exe"
 
 echo ============================================================
 echo          Crome - Ramonia x86 Research Probe V37
@@ -120,6 +125,51 @@ if errorlevel 1 (
     goto :fail
 )
 
+if not exist "%BRIDGE_SRC%" (
+    echo [ERRO] Source da bridge nao encontrado:
+    echo        %BRIDGE_SRC%
+    goto :fail
+)
+
+echo.
+echo [BUILD] Compilando CromeRamoniaBridge_x86.dll...
+"%CXX%" ^
+    -std=c++20 ^
+    -O2 ^
+    -shared ^
+    -static ^
+    -static-libgcc ^
+    -static-libstdc++ ^
+    -I"%MINIJSON_DIR%" ^
+    "%BRIDGE_SRC%" ^
+    -o "%OUT_BRIDGE%"
+
+if errorlevel 1 (
+    echo.
+    echo [ERRO] A compilacao da bridge x86 falhou.
+    goto :fail
+)
+
+if not exist "%OUT_BRIDGE%" (
+    echo [ERRO] O linker terminou sem gerar:
+    echo        %OUT_BRIDGE%
+    goto :fail
+)
+
+echo.
+echo [AUDITORIA] Bridge x86...
+"%CXX_DIR%objdump.exe" -f "%OUT_BRIDGE%" | findstr /I /C:"pei-i386" >nul
+if errorlevel 1 (
+    echo [ERRO] CromeRamoniaBridge_x86.dll nao e PE32/i386.
+    goto :fail
+)
+"%CXX_DIR%objdump.exe" -p "%OUT_BRIDGE%" | findstr /I /C:"libwinpthread-1.dll" /C:"libgcc_s_dw2-1.dll" /C:"libstdc++-6.dll" >nul
+if not errorlevel 1 (
+    echo [ERRO] A bridge x86 depende de runtime MinGW dinamico.
+    goto :fail
+)
+echo [ARCH] Bridge PE32/i386: OK
+
 if not exist "%INJECTOR_CPP%" (
     echo [ERRO] Source canonico do injector nao encontrado:
     echo        %INJECTOR_CPP%
@@ -202,23 +252,79 @@ if exist "%CXX_DIR%objdump.exe" (
     echo        %CXX_DIR%
     goto :fail
 )
+
+echo.
+echo [BUILD] Compilando cliente externo CromePipeTest_x64.exe...
+set "CXX64="
+if exist "C:\msys64\ucrt64\bin\g++.exe" set "CXX64=C:\msys64\ucrt64\bin\g++.exe"
+if not defined CXX64 if exist "C:\msys64\mingw64\bin\g++.exe" set "CXX64=C:\msys64\mingw64\bin\g++.exe"
+
+if not defined CXX64 (
+    echo [ERRO] Compilador x64 nao encontrado.
+    echo        Esperado: C:\msys64\ucrt64\bin\g++.exe
+    goto :fail
+)
+
+for %%I in ("%CXX64%") do set "CXX64_DIR=%%~dpI"
+set "PATH=%CXX64_DIR%;%PATH%"
+for /f "delims=" %%T in ('"%CXX64%" -dumpmachine 2^>nul') do set "TARGET64=%%T"
+echo [CXX64]  %CXX64%
+echo [TARGET] %TARGET64%
+
+echo %TARGET64% | findstr /I /C:"x86_64" >nul
+if errorlevel 1 (
+    echo [ERRO] O compilador do cliente de pipe nao e x64.
+    goto :fail
+)
+
+"%CXX64%" ^
+    -std=c++20 ^
+    -O2 ^
+    -static ^
+    -static-libgcc ^
+    -static-libstdc++ ^
+    "%PIPE_TEST_SRC%" ^
+    -o "%OUT_PIPE_TEST%"
+
+if errorlevel 1 (
+    echo [ERRO] Falha ao compilar CromePipeTest_x64.exe.
+    goto :fail
+)
+
+if not exist "%OUT_PIPE_TEST%" (
+    echo [ERRO] Cliente de pipe nao foi gerado.
+    goto :fail
+)
+
+if exist "%CXX64_DIR%objdump.exe" (
+    "%CXX64_DIR%objdump.exe" -f "%OUT_PIPE_TEST%" | findstr /I /C:"pei-x86-64" >nul
+    if errorlevel 1 (
+        echo [ERRO] CromePipeTest_x64.exe nao e PE32+ x86-64.
+        goto :fail
+    )
+)
+echo [ARCH] Pipe client PE32+ x86-64: OK
+
 (
-    echo Ramonia x86 Research Probe V37
+    echo Crome Ramonia x86 - Pipe Bridge V1
     echo.
-    echo DLL:
-    echo   RamoniaResearchProbe_V37.dll
+    echo Bridge x86:
+    echo   CromeRamoniaBridge_x86.dll
+    echo.
+    echo Cliente externo x64:
+    echo   CromePipeTest_x64.exe
     echo.
     echo Profile:
     echo   profiles\ramonia_x86\6AB03F94_E281E9CA5BA0AF2.json
     echo.
-    echo Teste:
-    echo   1. Abra o cliente Ramonia.
-    echo   2. Execute PID_Injector_x86.exe ^(compilado neste mesmo build^).
-    echo   3. Quando pedir a DLL, selecione RamoniaResearchProbe_V37.dll.
-    echo   4. No probe V37, capture as acoes solicitadas para classificar a ABI.
+    echo Teste Pipe:
+    echo   1. Abra o cliente Ramonia e entre no personagem.
+    echo   2. Execute PID_Injector_x86.exe.
+    echo   3. Injete CromeRamoniaBridge_x86.dll.
+    echo   4. Execute CromePipeTest_x64.exe.
+    echo   5. Esperado: HELLO, BUILD_INFO e GET_PLAYER com [OK].
     echo.
-    echo Observacao:
-    echo   artifacts\legacy NAO e a DLL deste build.
+    echo O Research Probe V37 continua no pacote apenas como ferramenta de pesquisa.
 ) > "%PKG_DIR%\TESTE.txt"
 
 echo.
@@ -228,8 +334,14 @@ echo.
 echo Pacote de teste:
 echo   %PKG_DIR%
 echo.
-echo DLL:
+echo Research DLL:
 echo   %OUT_DLL%
+echo.
+echo Pipe Bridge x86:
+echo   %OUT_BRIDGE%
+echo.
+echo Pipe Test x64:
+echo   %OUT_PIPE_TEST%
 echo ============================================================
 echo.
 start "" explorer.exe "%PKG_DIR%"
