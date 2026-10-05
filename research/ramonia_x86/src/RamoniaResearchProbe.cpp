@@ -21,7 +21,7 @@
 #include <vector>
 
 // ============================================================================
-// OTCLab Ramonia x86 Research Probe V34
+// OTCLab Ramonia x86 Research Probe V35
 // DISCOVERY READ-ONLY + ONE-SHOT RUNTIME ABI CAPTURE
 // No internal game action is called by the probe. V33 temporarily replaces one
 // selected action entry byte with INT3, captures the natural game call made by
@@ -1901,6 +1901,21 @@ std::string PersistentProfileDirectory() {
 
 std::string PersistentProfilePath(const Report& r) {
     return PersistentProfileDirectory() + "\\" + FingerprintStem(r) + ".json";
+}
+
+std::string CanonicalProjectProfilePath(const Report& r) {
+    const std::string probeDir = ProbeDirectory();
+    const std::string low = Lower(probeDir);
+    const std::string marker = "\\build\\ramonia_x86_test";
+    const size_t p = low.rfind(marker);
+    if (p == std::string::npos) return {};
+
+    const std::string projectRoot = probeDir.substr(0, p);
+    const std::string profiles = projectRoot + "\\profiles";
+    const std::string ramonia = profiles + "\\ramonia_x86";
+    EnsureDir(profiles);
+    EnsureDir(ramonia);
+    return ramonia + "\\" + FingerprintStem(r) + ".json";
 }
 
 std::string FindJsonObject(const std::string& json, const std::string& key) {
@@ -4440,10 +4455,10 @@ std::string SaveJson(const Report& r) {
     if (!o) return {};
 
     o << "{\n";
-    o << "  \"schema\": \"otclab-ramonia-x86-research-v27\",\n";
+    o << "  \"schema\": \"otclab-ramonia-x86-research-v35\",\n";
     o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
-    o << "  \"persistence\": {\"profileVersion\": 27, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
+    o << "  \"persistence\": {\"profileVersion\": 35, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
     o << "  \"build\": {\n";
     o << "    \"exe\": \"" << JsonEscape(r.module.path) << "\",\n";
@@ -4626,6 +4641,16 @@ std::string SaveJson(const Report& r) {
     o << "    }\n";
     o << "  }\n";
     o << "}\n";
+    o.flush();
+    o.close();
+
+    const std::string canonical = CanonicalProjectProfilePath(r);
+    if (!canonical.empty() && Lower(canonical) != Lower(path)) {
+        if (CopyFileA(path.c_str(), canonical.c_str(), FALSE))
+            std::cout << "[PROFILE MIRROR] canonical -> " << canonical << "\n";
+        else
+            std::cout << "[PROFILE MIRROR] falhou Win32=" << GetLastError() << " -> " << canonical << "\n";
+    }
     return path;
 }
 
@@ -4639,7 +4664,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V34\n"
+        << "        OTCLab Ramonia x86 Research Probe V35\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4657,7 +4682,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V34 - RUNTIME ABI CAPTURE");
+    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V35 - RUNTIME ABI CAPTURE");
 }
 
 
@@ -8683,6 +8708,58 @@ bool V34LooksPosition(const V33MemSnap& s,uint32_t& x,uint32_t& y,uint32_t& z) {
     return x>0 && x<=65535 && y>0 && y<=65535 && z<=15;
 }
 
+
+bool V35IsCallerStackRef(const V33Capture& c,uint32_t address) {
+    if(!address || !c.esp || address<c.esp) return false;
+    return static_cast<uint64_t>(address)-c.esp <= 0x1000ULL;
+}
+
+bool V35LooksPackedPosition(const V33MemSnap& s,uint16_t& x,uint16_t& y,uint8_t& z,bool& special) {
+    if(s.valid<5) return false;
+    std::memcpy(&x,s.bytes+0,2);
+    std::memcpy(&y,s.bytes+2,2);
+    z=s.bytes[4];
+    special = (x==0xFFFFu);
+    if(special) return true; // inventory/container encoded Position used by OTC clients
+    return x>0 && y>0 && z<=15;
+}
+
+bool V35LooksDirectionVector(const V33MemSnap& vec,const V33MemSnap& data,
+                             uint32_t& count,uint32_t& sampled) {
+    uint32_t begin=0,end=0,cap=0;
+    count=sampled=0;
+    if(!V33LooksVector3(vec,begin,end,cap) || !begin || end<=begin) return false;
+    const uint32_t bytes=end-begin;
+    if(bytes%4u!=0) return false;
+    count=bytes/4u;
+    if(count==0 || count>512) return false;
+    sampled=std::min<uint32_t>(count,data.valid/4u);
+    if(sampled==0) return false;
+    for(uint32_t i=0;i<sampled;++i) {
+        uint32_t d=0;
+        std::memcpy(&d,data.bytes+i*4u,4);
+        if(d>7u) return false;
+    }
+    return true;
+}
+
+bool V35HolderObject(const Report& r,const V33Capture& c,int idx,std::string& cls) {
+    cls.clear();
+    if(idx<0 || idx>=6) return false;
+    const uint32_t raw=c.stack[idx+1];
+    if(!V35IsCallerStackRef(c,raw)) return false;
+    cls=V33ClassFromSnap(r,c.argNested0[idx]);
+    return !cls.empty();
+}
+
+bool V35ActionAlreadyConfirmed(const Report& r,const std::string& token) {
+    auto a=r.actionAbi.find(token);
+    if(a!=r.actionAbi.end() && a->second.status=="runtime_confirmed") return true;
+    auto raw=r.actionAbiRaw.find(token);
+    if(raw==r.actionAbiRaw.end()) return false;
+    return JsonStringValue(raw->second,"status")=="runtime_confirmed";
+}
+
 bool V34LooksMsvcString(const V33MemSnap& s,const V33MemSnap& nested0) {
     if(s.valid<24) return false;
     const uint32_t sz=V33SnapDword(s,0x10), cp=V33SnapDword(s,0x14);
@@ -8703,7 +8780,6 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
     const V33MemSnap& n0s=c.argNested0[idx];
     const uint32_t raw=c.stack[idx+1];
     const std::string direct=V33ClassFromSnap(r,snap);
-    const std::string n0=V33ClassFromSnap(r,n0s);
 
     if(token=="talkChannel") {
         if(idx==0) { out.semantic="MessageMode"; out.abiType="u32"; out.status="runtime_confirmed"; return out; }
@@ -8717,30 +8793,56 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
         out.semantic="Creature"; out.abiType="raw_ptr"; out.status="runtime_confirmed"; out.rtti=direct; return out;
     }
 
-    uint32_t vb=0,ve=0,vc=0;
-    if(token=="autoWalk" && idx==0 && V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
-        out.semantic="Directions"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
+    if(token=="autoWalk" && idx==0) {
+        uint32_t count=0,sampled=0;
+        if(V35LooksDirectionVector(snap,n0s,count,sampled)) {
+            out.semantic="Directions";
+            out.abiType="vector_direction_u32_ref";
+            out.status="runtime_confirmed";
+            return out;
+        }
+        uint32_t vb=0,ve=0,vc=0;
+        if(V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
+            out.semantic="Directions"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
+        }
     }
 
     if(token=="move" && idx==2) {
-        out.semantic="Count"; out.abiType="u32"; out.status="runtime_observed"; return out;
-    }
-
-    uint32_t px=0,py=0,pz=0;
-    if(V34LooksPosition(snap,px,py,pz)) {
-        out.semantic="Position"; out.abiType="position_ref"; out.status="runtime_observed"; return out;
-    }
-
-    if(!n0.empty()) {
-        out.semantic = V34CreatureFamily(n0) ? "Creature" : n0;
-        out.abiType="object_holder_ref";
-        out.status="runtime_observed";
-        out.rtti=n0;
+        out.semantic="Count"; out.abiType="u32";
+        out.status=(raw>0 && raw<=0xFFFFu)?"runtime_confirmed":"runtime_observed";
         return out;
     }
 
+    if(token=="move" && idx==1) {
+        uint16_t px=0,py=0; uint8_t pz=0; bool special=false;
+        if(V35IsCallerStackRef(c,raw) && V35LooksPackedPosition(snap,px,py,pz,special)) {
+            out.semantic="Position";
+            out.abiType=special?"position_otc_special_ref":"position_u16_u16_u8_ref";
+            out.status="runtime_confirmed";
+            return out;
+        }
+        uint32_t x=0,y=0,z=0;
+        if(V35IsCallerStackRef(c,raw) && V34LooksPosition(snap,x,y,z)) {
+            out.semantic="Position"; out.abiType="position_u32x3_ref"; out.status="runtime_confirmed"; return out;
+        }
+    }
+
+    std::string holderCls;
+    if(V35HolderObject(r,c,idx,holderCls)) {
+        out.semantic=V34CreatureFamily(holderCls)?"Creature":holderCls;
+        out.abiType="shared_object_ptr_ref";
+        out.status="runtime_confirmed";
+        out.rtti=holderCls;
+        return out;
+    }
+
+    uint32_t x=0,y=0,z=0;
+    if(V34LooksPosition(snap,x,y,z)) {
+        out.semantic="Position"; out.abiType="position_u32x3_ref"; out.status="runtime_observed"; return out;
+    }
+
     if(!direct.empty()) {
-        out.semantic = V34CreatureFamily(direct) ? "Creature" : direct;
+        out.semantic=V34CreatureFamily(direct)?"Creature":direct;
         out.abiType="raw_ptr";
         out.status="runtime_observed";
         out.rtti=direct;
@@ -8751,12 +8853,9 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
         out.semantic="String"; out.abiType="msvc_string_ref"; out.status="runtime_observed"; return out;
     }
 
+    uint32_t vb=0,ve=0,vc=0;
     if(V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
         out.semantic="Vector"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
-    }
-
-    if(!raw) {
-        out.semantic="Scalar"; out.abiType="u32"; out.status="runtime_observed"; return out;
     }
 
     out.semantic="Scalar";
@@ -8779,19 +8878,14 @@ void V34PromoteCapture(Report& r,const std::string& token) {
     for(int i=0;i<argc && i<6;++i) a.args.push_back(V34ClassifyArg(r,token,i,g_v33Capture));
 
     a.status = thisOk ? "runtime_observed" : "runtime_this_mismatch";
-    if(thisOk && (token=="attack" || token=="follow") &&
-       !a.args.empty() && a.args[0].status=="runtime_confirmed")
-        a.status="runtime_confirmed";
-    if(thisOk && token=="talkChannel" && a.args.size()==3 &&
-       a.args[0].status=="runtime_confirmed" &&
-       a.args[1].status=="runtime_confirmed" &&
-       a.args[2].status=="runtime_confirmed")
-        a.status="runtime_confirmed";
+    bool allArgsConfirmed=!a.args.empty();
+    for(const auto& arg:a.args) if(arg.status!="runtime_confirmed") allArgsConfirmed=false;
+    if(thisOk && allArgsConfirmed) a.status="runtime_confirmed";
 
     r.actionAbi[token]=a;
     r.actionAbiRaw.erase(token);
 
-    std::cout << "    [V34 ABI] " << token
+    std::cout << "    [V35 ABI] " << token
               << " status=" << a.status
               << " cc=" << a.callingConvention << "\n";
     for(const auto& arg:a.args) {
@@ -8845,10 +8939,19 @@ void V33DescribeArg(const Report& r,const std::string& token,int idx,const V33Me
         }
     }
 
+    uint16_t px=0,py=0; uint8_t pz=0; bool special=false;
+    if(V35LooksPackedPosition(s,px,py,pz,special)) {
+        std::cout << " packedPos?{x=" << px << ",y=" << py << ",z=" << static_cast<unsigned>(pz)
+                  << (special?",special":"") << "}";
+    }
+
     uint32_t vb=0,ve=0,vc=0;
     if(V33LooksVector3(s,vb,ve,vc) && (vb || ve || vc)) {
         std::cout << " vectorLike?{" << HexU32(vb) << "," << HexU32(ve) << "," << HexU32(vc)
                   << ",bytes=" << (ve>=vb?ve-vb:0) << "}";
+        uint32_t cnt=0,sampled=0;
+        if(V35LooksDirectionVector(s,nested0,cnt,sampled))
+            std::cout << " directionVector{count=" << cnt << ",sampled=" << sampled << "}";
     }
     std::cout << "\n";
 }
@@ -8938,14 +9041,24 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] V34 classifica a ABI observada e grava actions no profile; ainda NAO executa chamadas internas.\n";
+              << "[RULE] V35 confirma vetores/holders/Position por estrutura runtime e grava actions; ainda NAO executa chamadas internas.\n";
 
-    for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"})
+    for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
+        if(V35ActionAlreadyConfirmed(r,tok)) {
+            std::cout << "[V35 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
+            continue;
+        }
+        // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
+        if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
+            std::cout << "[V35 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
+            continue;
+        }
         V33CaptureAction(r,tok);
+    }
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V34 COMPLETE] ABI observada classificada e persistida no bloco actions do profile.\n";
+    std::cout << "\n[V35 COMPLETE] ABI estrutural classificada; actions confirmadas foram persistidas no profile.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
