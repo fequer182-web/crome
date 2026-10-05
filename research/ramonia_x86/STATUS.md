@@ -2,7 +2,7 @@
 
 ## Probe
 
-Version: **V34**
+Version: **V35**
 
 Canonical source:
 
@@ -40,7 +40,7 @@ Tile::things:
 - stride `4`
 - Tile vtable RVA `0x774208`
 
-## V33.1 runtime capture safety + V34 ABI classifier
+## V33.1 runtime capture safety + V35 ABI classifier
 
 - target page protection is changed before arming;
 - VEH does not call `VirtualProtect`;
@@ -54,3 +54,12 @@ Tile::things:
 
 The profile is the source of truth for already-confirmed offsets/RVAs.
 V34 promotes only classified runtime evidence into the portable `actions` profile block; active calls remain disabled.
+
+
+## V35 closeout targets
+
+Already confirmed from V34 profile: `attack`, `follow`, `talkChannel`.
+
+V35 retests only unresolved actions: `autoWalk`, `look`, `move`, `use`, `useWith`. It validates direction-vector contents, stack-local shared-object holders and OTC Position encoding before promoting an action to `runtime_confirmed`.
+
+The profile schema emitted by V35 is `otclab-ramonia-x86-research-v35` / `profileVersion: 35`.
