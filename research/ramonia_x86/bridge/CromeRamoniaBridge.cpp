@@ -493,7 +493,9 @@ std::string handleRequest(const std::string& request) {
           << "\"bridgeVersion\":3,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
-          << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false");
+          << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
+          << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
+          << ",\"dispatcherReady\":" << ((g_gameWindow && g_originalWndProc) ? "true" : "false");
         if (!g_profileError.empty())
             o << ",\"profileError\":\"" << jsonEscape(g_profileError) << "\"";
         o << "}";
@@ -514,7 +516,10 @@ std::string handleRequest(const std::string& request) {
           << ",\"architecture\":\"" << jsonEscape(p.architecture)
           << "\",\"timestamp\":\"" << jsonEscape(p.timestamp)
           << "\",\"sizeOfImage\":\"" << jsonEscape(p.sizeOfImage)
-          << "\",\"textHash\":\"" << jsonEscape(p.textHash) << "\"}";
+          << "\",\"textHash\":\"" << jsonEscape(p.textHash) << "\","
+          << "\"runtimeTimestamp\":\"0x" << std::hex << std::uppercase << g_imageTimestamp
+          << "\",\"runtimeSizeOfImage\":\"0x" << g_imageSize << std::dec
+          << "\",\"matched\":" << (g_buildMatched ? "true" : "false") << "}";
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
