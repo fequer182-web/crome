@@ -1,0 +1,32 @@
+# CMake / generated build trees
+**/build/
+**/CMakeFiles/
+**/_deps/
+**/bin/
+**/obj/
+
+# Compiler/linker outputs
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.d
+
+# CMake generated files
+CMakeCache.txt
+cmake_install.cmake
+
+# Runtime logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

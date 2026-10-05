@@ -1,3 +1,0 @@
-C:\Users\alex1\AppData\Local\Programs\Python\Python314\Lib\site-packages\cmake\data\bin\cmake.exe -E rm -f CMakeFiles\Crome.dir/objects.a
-C:\msys64\ucrt64\bin\ar.exe qc CMakeFiles\Crome.dir/objects.a @CMakeFiles\Crome.dir\objects1.rsp
-C:\msys64\ucrt64\bin\c++.exe -O3 -DNDEBUG -mwindows -Wl,--whole-archive CMakeFiles\Crome.dir/objects.a -Wl,--no-whole-archive -o bin\Crome.exe -Wl,--out-implib,libCrome.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\Crome.dir\linkLibs.rsp
