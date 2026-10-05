@@ -68,8 +68,14 @@ bool request(DWORD pid, const std::string& json) {
         return false;
     }
 
-    std::cout << std::string(buffer, buffer + read) << "\n";
+    const std::string response(buffer, buffer + read);
+    std::cout << response << "\n";
     CloseHandle(pipe);
+
+    if (response.find("\"ok\":false") != std::string::npos) {
+        std::cout << "[ERRO] A bridge respondeu, mas o comando falhou.\n";
+        return false;
+    }
     return true;
 }
 
