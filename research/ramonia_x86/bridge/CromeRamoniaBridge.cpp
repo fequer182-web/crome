@@ -562,6 +562,7 @@ std::string handleRequest(const std::string& request) {
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
     if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
+    if (cmd == "ATTACK_SELECTED") return attackSelectedResponse();
     return "{\"ok\":false,\"error\":\"unknown_command\",\"cmd\":\"" + jsonEscape(cmd) + "\"}";
 }
 
