@@ -2,7 +2,7 @@
   "schema": "otclab-ramonia-x86-research-v27",
   "mode": "read_only_no_hooks_no_internal_calls",
   "policy": "discovery_rules_only_no_cross_build_rva_oracle",
-  "persistence": {"profileVersion": 27, "checkpoint": "inventory_item_v24", "resumeEnabled": true},
+  "persistence": {"profileVersion": 27, "checkpoint": "complete", "resumeEnabled": true},
   "build": {
     "exe": "C:\\Users\\alex1\\AppData\\Roaming\\Ramonia\\RamoniaSummer26\\ramonia_gl-1790824009.exe",
     "architecture": "x86",
@@ -11,7 +11,7 @@
     "entryPointRva": "0x47F460",
     "textHashFNV1A64": "0xE281E9CA5BA0AF2",
     "textHashMethod": "disk_raw_text",
-    "mappedTextHashDiagnostic": "0xB317A099E15C911A",
+    "mappedTextHashDiagnostic": "0x68827D868743A2D8",
     "rendererHint": "opengl"
   },
   "rtti": {
@@ -103,6 +103,72 @@
     "useWith": {"methodRva": "0x784F0", "ownerRva": "0xA2D4D0", "ownerSection": ".data", "status": "offline_semantic"}
   },
   "owners": {"gameRva": "0xA2D4D0", "mapRva": "0xA2D600"},
+  "actions": {
+    "autoWalk": {
+      "methodRva": "0x76860",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_observed",
+      "args": [{"index":0,"semantic":"Directions","abiType":"vector_ref","status":"runtime_observed"}]
+    },
+    "attack": {
+      "methodRva": "0x79190",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_confirmed",
+      "args": [{"index":0,"semantic":"Creature","abiType":"raw_ptr","status":"runtime_confirmed","rtti":"Monster"}]
+    },
+    "follow": {
+      "methodRva": "0x79300",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_confirmed",
+      "args": [{"index":0,"semantic":"Creature","abiType":"raw_ptr","status":"runtime_confirmed","rtti":"Monster"}]
+    },
+    "look": {
+      "methodRva": "0x77640",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_observed",
+      "args": [{"index":0,"semantic":"Item","abiType":"object_holder_ref","status":"runtime_observed","rtti":"Item"}]
+    },
+    "move": {
+      "methodRva": "0x77920",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_observed",
+      "args": [{"index":0,"semantic":"Item","abiType":"object_holder_ref","status":"runtime_observed","rtti":"Item"}, {"index":1,"semantic":"Scalar","abiType":"u32","status":"runtime_observed"}, {"index":2,"semantic":"Count","abiType":"u32","status":"runtime_observed"}]
+    },
+    "use": {
+      "methodRva": "0x780D0",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_observed",
+      "args": [{"index":0,"semantic":"Item","abiType":"object_holder_ref","status":"runtime_observed","rtti":"Item"}]
+    },
+    "useWith": {
+      "methodRva": "0x784F0",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_observed",
+      "args": [{"index":0,"semantic":"Item","abiType":"object_holder_ref","status":"runtime_observed","rtti":"Item"}, {"index":1,"semantic":"Creature","abiType":"object_holder_ref","status":"runtime_observed","rtti":"LocalPlayer"}]
+    },
+    "talkChannel": {
+      "methodRva": "0x79750",
+      "ownerRva": "0xA2D4D0",
+      "callingConvention": "x86_thiscall_like",
+      "this": {"semantic": "Game", "location": "ecx"},
+      "status": "runtime_confirmed",
+      "args": [{"index":0,"semantic":"MessageMode","abiType":"u32","status":"runtime_confirmed"}, {"index":1,"semantic":"Channel","abiType":"u32","status":"runtime_confirmed"}, {"index":2,"semantic":"Message","abiType":"msvc_string_ref","status":"runtime_confirmed"}]
+    }
+  },
   "gameLayout": {
     "localPlayerOffset": "0x0",
     "attackTargetOffset": "0x4",
@@ -113,7 +179,7 @@
     "status": "runtime_or_static_consistent"
   },
   "runtime": {
-    "localPlayerPtr": "0x1BA00968",
+    "localPlayerPtr": "0x1B439240",
     "localPlayerVtableRva": "0x76E158",
     "localPlayerVtableMatch": true,
     "position": {"x": "0xC", "y": "0x10", "z": "0x14", "direction": "0x4C"},
