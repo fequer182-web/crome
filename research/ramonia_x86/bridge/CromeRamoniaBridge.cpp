@@ -462,6 +462,29 @@ std::string playerResponse(const Profile& p, std::uintptr_t base) {
     return o.str();
 }
 
+std::string combatTargetsResponse(const Profile& p) {
+    const auto game = g_base + p.gameRva;
+    std::uintptr_t attackTarget{};
+    std::uintptr_t followTarget{};
+    safeRead(game + p.attackTargetOffset, attackTarget);
+    safeRead(game + p.followTargetOffset, followTarget);
+
+    std::uint32_t attackId{};
+    std::uint32_t followId{};
+    const bool attackMonster = targetSnapshot(attackTarget, attackId);
+    const bool followMonster = targetSnapshot(followTarget, followId);
+
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"GET_COMBAT_TARGETS\","
+      << "\"attack\":{\"present\":" << (attackTarget ? "true" : "false")
+      << ",\"monster\":" << (attackMonster ? "true" : "false")
+      << ",\"id\":" << attackId << "},"
+      << "\"follow\":{\"present\":" << (followTarget ? "true" : "false")
+      << ",\"monster\":" << (followMonster ? "true" : "false")
+      << ",\"id\":" << followId << "}}";
+    return o.str();
+}
+
 std::string handleRequest(const std::string& request) {
     const auto cmd = commandFromRequest(request);
     if (cmd == "HELLO") {
@@ -495,6 +518,7 @@ std::string handleRequest(const std::string& request) {
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
+    if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
     return "{\"ok\":false,\"error\":\"unknown_command\",\"cmd\":\"" + jsonEscape(cmd) + "\"}";
 }
 
