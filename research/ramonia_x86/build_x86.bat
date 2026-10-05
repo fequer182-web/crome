@@ -81,6 +81,7 @@ echo [BUILD] Compilando RamoniaResearchProbe_V33_1.dll...
     -std=c++20 ^
     -O2 ^
     -shared ^
+    -static ^
     -static-libgcc ^
     -static-libstdc++ ^
     "%SRC%" ^
@@ -98,6 +99,21 @@ if not exist "%OUT_DLL%" (
     goto :fail
 )
 
+echo.
+echo [DEPENDENCIAS] DLLs importadas:
+if exist "%CXX_DIR%objdump.exe" (
+    "%CXX_DIR%objdump.exe" -p "%OUT_DLL%" | findstr /I /C:"DLL Name"
+    "%CXX_DIR%objdump.exe" -p "%OUT_DLL%" | findstr /I /C:"libwinpthread-1.dll" >nul
+    if not errorlevel 1 (
+        echo.
+        echo [ERRO] A DLL ainda depende de libwinpthread-1.dll.
+        echo        O build deve ser autocontido antes do teste.
+        goto :fail
+    )
+) else (
+    echo [AVISO] objdump.exe nao encontrado; auditoria automatica pulada.
+)
+
 copy /Y "%PROFILE_SRC%" "%PROFILE_DIR%\6AB03F94_E281E9CA5BA0AF2.json" >nul
 if errorlevel 1 (
     echo [ERRO] Falha ao copiar o profile canonico.
@@ -110,10 +126,7 @@ if exist "%INJECTOR_SRC%" (
     echo [AVISO] PID_Injector_x86.exe nao encontrado; DLL ainda foi gerada.
 )
 
-if exist "%PTHREAD_SRC%" (
-    copy /Y "%PTHREAD_SRC%" "%PKG_DIR%\libwinpthread-1.dll" >nul
-)
-
+rem A DLL nova e compilada com runtime estatico. libwinpthread nao deve ser necessario.
 (
     echo Ramonia x86 Research Probe V33.1
     echo.
