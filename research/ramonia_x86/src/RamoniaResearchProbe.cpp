@@ -21,7 +21,7 @@
 #include <vector>
 
 // ============================================================================
-// OTCLab Ramonia x86 Research Probe V35
+// OTCLab Ramonia x86 Research Probe V36
 // DISCOVERY READ-ONLY + ONE-SHOT RUNTIME ABI CAPTURE
 // No internal game action is called by the probe. V33 temporarily replaces one
 // selected action entry byte with INT3, captures the natural game call made by
@@ -4455,10 +4455,10 @@ std::string SaveJson(const Report& r) {
     if (!o) return {};
 
     o << "{\n";
-    o << "  \"schema\": \"otclab-ramonia-x86-research-v35\",\n";
+    o << "  \"schema\": \"otclab-ramonia-x86-research-v36\",\n";
     o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
-    o << "  \"persistence\": {\"profileVersion\": 35, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
+    o << "  \"persistence\": {\"profileVersion\": 36, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
     o << "  \"build\": {\n";
     o << "    \"exe\": \"" << JsonEscape(r.module.path) << "\",\n";
@@ -4664,7 +4664,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V35\n"
+        << "        OTCLab Ramonia x86 Research Probe V36\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4682,7 +4682,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V35 - RUNTIME ABI CAPTURE");
+    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V36 - RUNTIME ABI CAPTURE");
 }
 
 
@@ -8724,6 +8724,123 @@ bool V35LooksPackedPosition(const V33MemSnap& s,uint16_t& x,uint16_t& y,uint8_t&
     return x>0 && y>0 && z<=15;
 }
 
+
+struct V36PositionMatch {
+    bool ok=false;
+    bool confirmed=false;
+    std::string abiType;
+    std::string source;
+    size_t offset=0;
+    uint32_t x=0,y=0,z=0;
+};
+
+bool V36ReadLocalPosition(const Report& r,uint32_t& x,uint32_t& y,uint32_t& z) {
+    x=y=z=0;
+    if(!r.localPlayerPtr || r.positionRuntime.x<0 || r.positionRuntime.y<0 || r.positionRuntime.z<0) return false;
+    uint8_t zz=0;
+    if(!SafeRead(r.localPlayerPtr+r.positionRuntime.x,x) ||
+       !SafeRead(r.localPlayerPtr+r.positionRuntime.y,y) ||
+       !SafeRead(r.localPlayerPtr+r.positionRuntime.z,zz)) return false;
+    z=zz;
+    return x>0 && x<=65535 && y>0 && y<=65535 && z<=15;
+}
+
+bool V36NearLocal(const Report& r,uint32_t x,uint32_t y,uint32_t z) {
+    uint32_t lx=0,ly=0,lz=0;
+    if(!V36ReadLocalPosition(r,lx,ly,lz)) return false;
+    const uint32_t dx=(x>lx)?(x-lx):(lx-x);
+    const uint32_t dy=(y>ly)?(y-ly):(ly-y);
+    const uint32_t dz=(z>lz)?(z-lz):(lz-z);
+    return dx<=32 && dy<=32 && dz<=1;
+}
+
+bool V36ScanPackedPosition(const Report& r,const V33MemSnap& snap,const std::string& source,
+                           const std::string& abiType,V36PositionMatch& out) {
+    if(snap.valid<5) return false;
+    const size_t maxOff=std::min<size_t>(snap.valid-5,24);
+    for(size_t off=0;off<=maxOff;++off) {
+        uint16_t x16=0,y16=0; uint8_t z8=0;
+        std::memcpy(&x16,snap.bytes+off,2);
+        std::memcpy(&y16,snap.bytes+off+2,2);
+        z8=snap.bytes[off+4];
+        if(!x16 || !y16 || z8>15) continue;
+        if(!V36NearLocal(r,x16,y16,z8)) continue;
+        out.ok=true; out.confirmed=true; out.source=source; out.abiType=abiType;
+        out.offset=off; out.x=x16; out.y=y16; out.z=z8;
+        return true;
+    }
+    return false;
+}
+
+bool V36ScanU32Position(const Report& r,const V33MemSnap& snap,const std::string& source,
+                        const std::string& abiType,V36PositionMatch& out) {
+    if(snap.valid<12) return false;
+    const size_t maxOff=std::min<size_t>(snap.valid-12,24);
+    for(size_t off=0;off<=maxOff;off+=4) {
+        uint32_t x=0,y=0,z=0;
+        std::memcpy(&x,snap.bytes+off,4);
+        std::memcpy(&y,snap.bytes+off+4,4);
+        std::memcpy(&z,snap.bytes+off+8,4);
+        if(!x || !y || x>65535 || y>65535 || z>15) continue;
+        if(!V36NearLocal(r,x,y,z)) continue;
+        out.ok=true; out.confirmed=true; out.source=source; out.abiType=abiType;
+        out.offset=off; out.x=x; out.y=y; out.z=z;
+        return true;
+    }
+    return false;
+}
+
+V36PositionMatch V36FindMovePosition(const Report& r,const V33Capture& c,int idx) {
+    V36PositionMatch out;
+    if(idx<0 || idx>=6) return out;
+    const uint32_t raw=c.stack[idx+1];
+    if(!V35IsCallerStackRef(c,raw)) return out;
+
+    if(V36ScanPackedPosition(r,c.argSnap[idx],"direct","position_u16_u16_u8_ref",out)) return out;
+    if(V36ScanU32Position(r,c.argSnap[idx],"direct","position_u32x3_ref",out)) return out;
+    if(V36ScanPackedPosition(r,c.argNested0[idx],"p0","position_ptr_u16_u16_u8_ref",out)) return out;
+    if(V36ScanU32Position(r,c.argNested0[idx],"p0","position_ptr_u32x3_ref",out)) return out;
+    if(V36ScanPackedPosition(r,c.argNested1[idx],"p1","position_second_ptr_u16_u16_u8_ref",out)) return out;
+    if(V36ScanU32Position(r,c.argNested1[idx],"p1","position_second_ptr_u32x3_ref",out)) return out;
+    return out;
+}
+
+std::string V36HexBytes(const V33MemSnap& s,size_t maxBytes=32) {
+    std::ostringstream os;
+    const size_t n=std::min<size_t>(s.valid,maxBytes);
+    for(size_t i=0;i<n;++i) {
+        if(i) os << ' ';
+        os << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+           << static_cast<unsigned>(s.bytes[i]);
+    }
+    return os.str();
+}
+
+void V36PrintMoveArg2Evidence(const Report& r,const V33Capture& c) {
+    const int idx=1;
+    const V36PositionMatch m=V36FindMovePosition(r,c,idx);
+    uint32_t lx=0,ly=0,lz=0;
+    const bool lp=V36ReadLocalPosition(r,lx,ly,lz);
+    std::cout << "    [V36 MOVE ARG2] raw=" << HexU32(c.stack[idx+1]);
+    if(lp) std::cout << " localPos={" << lx << "," << ly << "," << lz << "}";
+    std::cout << "\n"
+              << "      direct@" << HexU32(c.argSnap[idx].address)
+              << " bytes=" << V36HexBytes(c.argSnap[idx]) << "\n"
+              << "      p0@" << HexU32(c.argNested0[idx].address)
+              << " bytes=" << V36HexBytes(c.argNested0[idx]) << "\n"
+              << "      p1@" << HexU32(c.argNested1[idx].address)
+              << " bytes=" << V36HexBytes(c.argNested1[idx]) << "\n";
+    if(m.ok) {
+        std::cout << "      POSITION MATCH source=" << m.source
+                  << " offset=+" << HexU32(static_cast<uint32_t>(m.offset))
+                  << " xyz={" << m.x << "," << m.y << "," << m.z << "}"
+                  << " abiType=" << m.abiType
+                  << " status=" << (m.confirmed?"runtime_confirmed":"runtime_observed") << "\n";
+    } else {
+        std::cout << "      POSITION MATCH: not found\n";
+    }
+}
+
 bool V35LooksDirectionVector(const V33MemSnap& vec,const V33MemSnap& data,
                              uint32_t& count,uint32_t& sampled) {
     uint32_t begin=0,end=0,cap=0;
@@ -8814,16 +8931,12 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
     }
 
     if(token=="move" && idx==1) {
-        uint16_t px=0,py=0; uint8_t pz=0; bool special=false;
-        if(V35IsCallerStackRef(c,raw) && V35LooksPackedPosition(snap,px,py,pz,special)) {
+        const V36PositionMatch pm=V36FindMovePosition(r,c,idx);
+        if(pm.ok) {
             out.semantic="Position";
-            out.abiType=special?"position_otc_special_ref":"position_u16_u16_u8_ref";
-            out.status="runtime_confirmed";
+            out.abiType=pm.abiType;
+            out.status=pm.confirmed?"runtime_confirmed":"runtime_observed";
             return out;
-        }
-        uint32_t x=0,y=0,z=0;
-        if(V35IsCallerStackRef(c,raw) && V34LooksPosition(snap,x,y,z)) {
-            out.semantic="Position"; out.abiType="position_u32x3_ref"; out.status="runtime_confirmed"; return out;
         }
     }
 
@@ -8885,7 +8998,7 @@ void V34PromoteCapture(Report& r,const std::string& token) {
     r.actionAbi[token]=a;
     r.actionAbiRaw.erase(token);
 
-    std::cout << "    [V35 ABI] " << token
+    std::cout << "    [V36 ABI] " << token
               << " status=" << a.status
               << " cc=" << a.callingConvention << "\n";
     for(const auto& arg:a.args) {
@@ -9024,6 +9137,7 @@ void V33CaptureAction(Report& r,const std::string& token) {
         V33Disarm();
         if(InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0) {
             V33PrintCapture(r,token);
+            if(token=="move") V36PrintMoveArg2Evidence(r,g_v33Capture);
             V34PromoteCapture(r,token);
             SaveCheckpoint(r,std::string("action_abi_")+token);
             return;
@@ -9041,16 +9155,16 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] V35 confirma vetores/holders/Position por estrutura runtime e grava actions; ainda NAO executa chamadas internas.\n";
+              << "[RULE] V36 fecha apenas actions ainda pendentes; move.arg2 e validado por Position proxima ao LocalPlayer.\n";
 
     for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
         if(V35ActionAlreadyConfirmed(r,tok)) {
-            std::cout << "[V35 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
+            std::cout << "[V36 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
             continue;
         }
         // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
         if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
-            std::cout << "[V35 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
+            std::cout << "[V36 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
             continue;
         }
         V33CaptureAction(r,tok);
@@ -9058,7 +9172,7 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V35 COMPLETE] ABI estrutural classificada; actions confirmadas foram persistidas no profile.\n";
+    std::cout << "\n[V36 COMPLETE] actions pendentes foram reavaliadas; profile atualizado e espelhado no caminho canonico.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
