@@ -6,7 +6,7 @@ Esta pasta concentra a pesquisa da build Ramonia x86 e é a base oficial para as
 
 `src/RamoniaResearchProbe.cpp`
 
-Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V36**.
+Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V37**.
 
 ## Build rápido no Windows
 
@@ -26,7 +26,7 @@ O script:
 
 Saída esperada:
 
-`build/Ramonia_x86_Test/RamoniaResearchProbe_V36.dll`
+`build/Ramonia_x86_Test/RamoniaResearchProbe_V37.dll`
 
 > A pasta `build/` é gerada localmente e não é versionada pelo Git.
 
@@ -101,3 +101,23 @@ O V36 reaproveita todo o profile V35 e pula automaticamente as actions já `runt
 A captura examina o argumento direto e os dois primeiros níveis apontados por ele, procurando os layouts de Position observáveis na build. Para um movimento chão -> chão, a promoção exige uma posição plausível e próxima da posição atual do LocalPlayer, reduzindo falsos positivos.
 
 Se a classificação automática ainda não fechar, o console imprime um dump curto de bytes de `move.arg2`, `p0` e `p1` para a próxima análise sem repetir as outras actions.
+
+
+## V37 — contrato principal Ramonia fechado
+
+A evidência V36 mostrou `move.arg2` diretamente como `x=u32, y=u32, z=u8`:
+
+`818, 1859, 7`, enquanto o LocalPlayer estava em `819, 1859, 7`.
+
+O V37 incorpora esse layout ao classificador genérico, mantendo a validação pela posição atual do LocalPlayer antes de promover a ABI.
+
+Contrato principal de actions do profile Ramonia:
+
+- `autoWalk` → `vector_direction_u32_ref`
+- `attack` / `follow` → `Creature raw_ptr`
+- `look` / `use` → `shared_object_ptr_ref`
+- `move` → `shared_object_ptr_ref<Item>, Position(u32,u32,u8), u32 count`
+- `useWith` → `shared_object_ptr_ref<Item>, shared_object_ptr_ref<Thing>`
+- `talkChannel` → `MessageMode, Channel, msvc_string_ref`
+
+O profile canônico passa a ser suficiente para a próxima camada: o Generic Action Runtime do Crome.
