@@ -8,11 +8,11 @@ set "PKG_DIR=%BUILD_DIR%\Ramonia_x86_Test"
 set "PROFILE_SRC=%~dp0profiles\ramonia_x86\6AB03F94_E281E9CA5BA0AF2.json"
 set "PROFILE_DIR=%PKG_DIR%\profiles\ramonia_x86"
 set "INJECTOR_CPP=%~dp0..\..\tools\injector\PID_Injector.cpp"
-set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V35.dll"
+set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V36.dll"
 set "OUT_INJECTOR=%PKG_DIR%\PID_Injector_x86.exe"
 
 echo ============================================================
-echo          Crome - Ramonia x86 Research Probe V35
+echo          Crome - Ramonia x86 Research Probe V36
 echo                     BUILD X86
 echo ============================================================
 echo.
@@ -76,7 +76,7 @@ if errorlevel 1 (
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%PROFILE_DIR%" >nul 2>&1
 
-echo [BUILD] Compilando RamoniaResearchProbe_V35.dll...
+echo [BUILD] Compilando RamoniaResearchProbe_V36.dll...
 "%CXX%" ^
     -std=c++20 ^
     -O2 ^
@@ -203,10 +203,10 @@ if exist "%CXX_DIR%objdump.exe" (
     goto :fail
 )
 (
-    echo Ramonia x86 Research Probe V35
+    echo Ramonia x86 Research Probe V36
     echo.
     echo DLL:
-    echo   RamoniaResearchProbe_V35.dll
+    echo   RamoniaResearchProbe_V36.dll
     echo.
     echo Profile:
     echo   profiles\ramonia_x86\6AB03F94_E281E9CA5BA0AF2.json
@@ -214,8 +214,8 @@ if exist "%CXX_DIR%objdump.exe" (
     echo Teste:
     echo   1. Abra o cliente Ramonia.
     echo   2. Execute PID_Injector_x86.exe ^(compilado neste mesmo build^).
-    echo   3. Quando pedir a DLL, selecione RamoniaResearchProbe_V35.dll.
-    echo   4. No probe V35, capture as acoes solicitadas para classificar a ABI.
+    echo   3. Quando pedir a DLL, selecione RamoniaResearchProbe_V36.dll.
+    echo   4. No probe V36, capture as acoes solicitadas para classificar a ABI.
     echo.
     echo Observacao:
     echo   artifacts\legacy NAO e a DLL deste build.
