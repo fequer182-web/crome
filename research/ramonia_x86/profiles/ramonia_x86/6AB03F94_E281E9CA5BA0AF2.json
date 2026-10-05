@@ -1,8 +1,8 @@
 {
-  "schema": "otclab-ramonia-x86-research-v36",
+  "schema": "otclab-ramonia-x86-research-v37",
   "mode": "read_only_no_hooks_no_internal_calls",
   "policy": "discovery_rules_only_no_cross_build_rva_oracle",
-  "persistence": {"profileVersion": 36, "checkpoint": "complete", "resumeEnabled": true},
+  "persistence": {"profileVersion": 37, "checkpoint": "complete", "resumeEnabled": true},
   "build": {
     "exe": "C:\\Users\\alex1\\AppData\\Roaming\\Ramonia\\RamoniaSummer26\\ramonia_gl-1790824009.exe",
     "architecture": "x86",
@@ -141,8 +141,8 @@
       "ownerRva": "0xA2D4D0",
       "callingConvention": "x86_thiscall_like",
       "this": {"semantic": "Game", "location": "ecx"},
-      "status": "runtime_observed",
-      "args": [{"index":0,"semantic":"Item","abiType":"shared_object_ptr_ref","status":"runtime_confirmed","rtti":"Item"}, {"index":1,"semantic":"Scalar","abiType":"u32","status":"runtime_observed"}, {"index":2,"semantic":"Count","abiType":"u32","status":"runtime_confirmed"}]
+      "status": "runtime_confirmed",
+      "args": [{"index":0,"semantic":"Item","abiType":"shared_object_ptr_ref","status":"runtime_confirmed","rtti":"Item"}, {"index":1,"semantic":"Position","abiType":"position_u32_u32_u8_ref","status":"runtime_confirmed"}, {"index":2,"semantic":"Count","abiType":"u32","status":"runtime_confirmed"}]
     },
     "use": {
       "methodRva": "0x780D0",
@@ -158,7 +158,7 @@
       "callingConvention": "x86_thiscall_like",
       "this": {"semantic": "Game", "location": "ecx"},
       "status": "runtime_confirmed",
-      "args": [{"index":0,"semantic":"Item","abiType":"shared_object_ptr_ref","status":"runtime_confirmed","rtti":"Item"}, {"index":1,"semantic":"Item","abiType":"shared_object_ptr_ref","status":"runtime_confirmed","rtti":"Item"}]
+      "args": [{"index":0,"semantic":"Item","abiType":"shared_object_ptr_ref","status":"runtime_confirmed","rtti":"Item"}, {"index":1,"semantic":"Thing","abiType":"shared_object_ptr_ref","status":"runtime_confirmed","rtti":"dynamic"}]
     },
     "talkChannel": {
       "methodRva": "0x79750",
