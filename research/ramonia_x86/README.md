@@ -6,7 +6,7 @@ Esta pasta concentra a pesquisa da build Ramonia x86 e é a base oficial para as
 
 `src/RamoniaResearchProbe.cpp`
 
-Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V33.1**.
+Apesar do arquivo histórico ter usado o nome `OTCLab_BuildMigrator_V4_9_DIRECT_BIND_x86.cpp`, o conteúdo atual corresponde ao **Research Probe V34**.
 
 ## Build rápido no Windows
 
@@ -26,7 +26,7 @@ O script:
 
 Saída esperada:
 
-`build/Ramonia_x86_Test/RamoniaResearchProbe_V33_1.dll`
+`build/Ramonia_x86_Test/RamoniaResearchProbe_V34.dll`
 
 > A pasta `build/` é gerada localmente e não é versionada pelo Git.
 
@@ -62,7 +62,7 @@ O source atual contém:
 - layouts de LocalPlayer, Creature, Inventory, Container, UIMap/MapView;
 - Tile::things V30;
 - Game Action ABI Static Probe V32;
-- Game Action ABI Runtime Capture V33.1;
+- Game Action ABI Runtime Capture V33.1 + ABI Classifier V34;
 - breakpoint temporário de um byte por ação;
 - restauração do byte original no hit;
 - `ReadProcessMemory` para snapshots do contexto;
@@ -77,4 +77,4 @@ Não alterar esse metadado junto com mudanças funcionais. A migração de schem
 
 ## Próximo passo
 
-Usar este source como baseline e retomar o teste do runtime ABI capture V33.1, começando por `autoWalk`. Depois das capturas válidas, classificar os argumentos antes de promover qualquer assinatura ativa.
+Usar este source como baseline e capturar as ações reais no V34 para classificar automaticamente os argumentos e persistir o bloco `actions` no profile. O probe continua sem executar chamadas internas.
