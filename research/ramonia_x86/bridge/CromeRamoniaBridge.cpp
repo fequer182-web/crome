@@ -92,7 +92,7 @@ ULONGLONG g_tileCacheTick{};
 std::uint32_t g_tileCacheOriginX{};
 std::uint32_t g_tileCacheOriginY{};
 std::uint8_t g_tileCacheOriginZ{};
-constexpr ULONGLONG kTileCacheMaxAgeMs = 15000;
+constexpr ULONGLONG kTileCacheMaxAgeMs = 60000;
 constexpr ULONGLONG kTileCacheMinRefreshMs = 4000;
 constexpr std::uint32_t kTileCacheMoveRefresh = 8;
 
@@ -1218,6 +1218,13 @@ std::string attackIdResponse(std::uint32_t creatureId) {
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"build_not_validated"})";
     if (!dispatcherReady())
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"dispatcher_not_ready"})";
+
+    const auto tileVisible = scanCachedTileMonsters(15);
+    const bool idVisible = std::any_of(
+        tileVisible.begin(), tileVisible.end(),
+        [creatureId](const auto& d){ return d.monster.id == creatureId; });
+    if (!idVisible)
+        return R"({"ok":false,"cmd":"ATTACK_ID","error":"creature_id_not_visible"})";
 
     g_lastActionTargetId = 0;
     g_pendingAttackTarget = 0;
