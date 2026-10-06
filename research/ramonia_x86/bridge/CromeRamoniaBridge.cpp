@@ -1025,6 +1025,262 @@ struct LootBaselineState {
 SRWLOCK g_lootBaselineLock = SRWLOCK_INIT;
 LootBaselineState g_lootBaseline;
 
+SRWLOCK g_lootCandidateLock = SRWLOCK_INIT;
+std::vector<TileItemDiagnostic> g_lastLootCandidates;
+
+bool safeCopyBytes(std::uintptr_t address, void* out, std::size_t size) {
+    if (!address || !out || !size) return false;
+    SIZE_T got{};
+    return ReadProcessMemory(GetCurrentProcess(),
+                             reinterpret_cast<LPCVOID>(address),
+                             out, size, &got) && got == size;
+}
+
+bool looksHeapPointer(std::uintptr_t address) {
+    if (address < 0x10000u || address >= 0x7FFF0000u) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi)))
+        return false;
+    return mbi.State == MEM_COMMIT &&
+           (mbi.Type == MEM_PRIVATE || mbi.Type == MEM_MAPPED) &&
+           readableProtection(mbi.Protect);
+}
+
+bool exactObjectVtable(std::uintptr_t object, std::uintptr_t vtableRva) {
+    if (!object || !vtableRva) return false;
+    std::uintptr_t vt{};
+    return safeRead(object, vt) && vt == g_base + vtableRva;
+}
+
+bool readMsvcString32(std::uintptr_t address, std::string& out) {
+    out.clear();
+    std::uint32_t len{}, cap{};
+    if (!safeRead(address + 0x10, len) ||
+        !safeRead(address + 0x14, cap) ||
+        len > 96 || cap < len || cap > 0x10000)
+        return false;
+
+    if (len == 0) return true;
+
+    char buf[97]{};
+    if (cap < 16) {
+        if (!safeCopyBytes(address, buf, len)) return false;
+    } else {
+        std::uint32_t ptr{};
+        if (!safeRead(address, ptr) || !ptr ||
+            !safeCopyBytes(static_cast<std::uintptr_t>(ptr), buf, len))
+            return false;
+    }
+
+    for (std::uint32_t i = 0; i < len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(buf[i]);
+        if (c < 0x20 || c > 0x7E) return false;
+    }
+    out.assign(buf, buf + len);
+    return true;
+}
+
+struct ContainerItemSlot {
+    std::uintptr_t holderAddress{};
+    std::uintptr_t itemAddress{};
+    std::uint16_t id{};
+    std::uint16_t count{};
+    std::uint32_t index{};
+};
+
+struct ContainerSnapshot {
+    std::uintptr_t address{};
+    std::uint32_t id{};
+    std::uint32_t capacity{};
+    std::string name;
+    std::vector<ContainerItemSlot> items;
+};
+
+bool readContainerItems(std::uintptr_t container,
+                        std::vector<ContainerItemSlot>& items) {
+    items.clear();
+    if (!g_profile || !g_profile->containerContractReady ||
+        !exactObjectVtable(container, g_profile->containerVtableRva))
+        return false;
+
+    const auto base = container + g_profile->containerItemsOffset;
+    std::uint32_t map{}, mapSize{}, myOff{}, mySize{};
+    if (!safeRead(base + 0x0, map) ||
+        !safeRead(base + 0x4, mapSize) ||
+        !safeRead(base + 0x8, myOff) ||
+        !safeRead(base + 0xC, mySize))
+        return false;
+
+    if (mySize == 0) return true;
+    if (!map || !looksHeapPointer(map) ||
+        mapSize == 0 || mapSize > 256 ||
+        mySize > 100 ||
+        g_profile->containerItemStride != 4)
+        return false;
+
+    constexpr std::uint32_t blockSize = 4; // MSVC x86 deque block for 4-byte holders.
+    items.reserve(mySize);
+
+    for (std::uint32_t i = 0; i < mySize; ++i) {
+        const std::uint32_t logical = myOff + i;
+        std::uint32_t blockIndex = logical / blockSize;
+        if ((mapSize & (mapSize - 1)) == 0)
+            blockIndex &= (mapSize - 1);
+        else
+            blockIndex %= mapSize;
+
+        const std::uint32_t inner = logical % blockSize;
+        std::uint32_t blockPtr{};
+        if (!safeRead(static_cast<std::uintptr_t>(map) + blockIndex * 4u, blockPtr) ||
+            !blockPtr || !looksHeapPointer(blockPtr))
+            return false;
+
+        const auto holder =
+            static_cast<std::uintptr_t>(blockPtr) +
+            inner * g_profile->containerItemStride;
+
+        std::uintptr_t item{};
+        if (!safeRead(holder, item) ||
+            !item ||
+            !exactObjectVtable(item, g_profile->itemVtableRva))
+            return false;
+
+        std::uint16_t id{}, count{};
+        if (!safeRead(item + g_profile->itemIdOffset, id) || !id ||
+            !safeRead(item + g_profile->itemCountOffset, count))
+            return false;
+
+        items.push_back({holder, item, id, count, i});
+    }
+    return true;
+}
+
+bool readContainerSnapshot(std::uintptr_t container, ContainerSnapshot& out) {
+    out = {};
+    if (!g_profile || !g_profile->containerContractReady ||
+        !exactObjectVtable(container, g_profile->containerVtableRva))
+        return false;
+
+    std::uint32_t id{}, capacity{};
+    if (!safeRead(container + g_profile->containerIdOffset, id) ||
+        !safeRead(container + g_profile->containerCapacityOffset, capacity) ||
+        id > 255 || capacity > 1000)
+        return false;
+
+    std::string name;
+    readMsvcString32(container + g_profile->containerNameOffset, name);
+
+    std::vector<ContainerItemSlot> items;
+    if (!readContainerItems(container, items)) return false;
+    if (capacity && items.size() > capacity) return false;
+
+    out.address = container;
+    out.id = id;
+    out.capacity = capacity;
+    out.name = std::move(name);
+    out.items = std::move(items);
+    return true;
+}
+
+std::vector<std::uintptr_t> discoverOpenContainerAddresses() {
+    std::vector<std::uintptr_t> found;
+    if (!g_profile || !g_profile->containerContractReady) return found;
+
+    const auto game = g_base + g_profile->gameRva;
+    const auto rootAddress = game + g_profile->openContainersOffset;
+
+    struct Node { std::uintptr_t address{}; int depth{}; };
+    std::vector<Node> queue;
+    std::set<std::uintptr_t> seen;
+
+    const auto scan = [&](auto&& self,
+                          std::uintptr_t address,
+                          std::size_t bytes,
+                          int depth,
+                          bool enqueue) -> void {
+        for (std::size_t off = 0; off + 4 <= bytes; off += 4) {
+            std::uint32_t value{};
+            if (!safeRead(address + off, value) || !value) continue;
+            const auto ptr = static_cast<std::uintptr_t>(value);
+
+            if (exactObjectVtable(ptr, g_profile->containerVtableRva)) {
+                found.push_back(ptr);
+                continue;
+            }
+
+            if (enqueue && depth < 4 && queue.size() < 600 &&
+                looksHeapPointer(ptr) && seen.insert(ptr).second) {
+                queue.push_back({ptr, depth + 1});
+            }
+        }
+    };
+
+    scan(scan, rootAddress, 0x60, 0, true);
+    for (std::size_t i = 0; i < queue.size() && i < 600; ++i)
+        scan(scan, queue[i].address, 0xA0, queue[i].depth, true);
+
+    std::sort(found.begin(), found.end());
+    found.erase(std::unique(found.begin(), found.end()), found.end());
+    return found;
+}
+
+std::vector<ContainerSnapshot> scanOpenContainers() {
+    std::vector<ContainerSnapshot> out;
+    for (const auto address : discoverOpenContainerAddresses()) {
+        ContainerSnapshot c;
+        if (readContainerSnapshot(address, c))
+            out.push_back(std::move(c));
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.id != b.id) return a.id < b.id;
+        return a.address < b.address;
+    });
+    return out;
+}
+
+bool resolveTileItemHolder(std::uintptr_t tile,
+                           std::uint16_t itemId,
+                           std::uintptr_t expectedItem,
+                           std::uintptr_t& holderOut,
+                           std::uintptr_t& itemOut) {
+    holderOut = itemOut = 0;
+    if (!g_profile || !g_profile->itemContractReady || !tile || !itemId)
+        return false;
+
+    std::uint32_t begin{}, end{}, cap{}, count{};
+    if (!readTileVectorHeader(tile, begin, end, cap, count) || !count)
+        return false;
+
+    std::uintptr_t fallbackHolder{}, fallbackItem{};
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto holder = static_cast<std::uintptr_t>(begin) + i * 4u;
+        std::uintptr_t item{};
+        if (!safeRead(holder, item) ||
+            !item ||
+            !exactObjectVtable(item, g_profile->itemVtableRva))
+            continue;
+
+        std::uint16_t id{};
+        if (!safeRead(item + g_profile->itemIdOffset, id) || id != itemId)
+            continue;
+
+        if (expectedItem && item == expectedItem) {
+            holderOut = holder;
+            itemOut = item;
+            return true;
+        }
+        if (!fallbackHolder) {
+            fallbackHolder = holder;
+            fallbackItem = item;
+        }
+    }
+
+    holderOut = fallbackHolder;
+    itemOut = fallbackItem;
+    return holderOut != 0;
+}
+
 std::uint32_t tileSlotOf(const std::vector<std::uintptr_t>& tiles,
                          std::uintptr_t tile) {
     for (std::size_t i = 0; i < tiles.size(); ++i)
