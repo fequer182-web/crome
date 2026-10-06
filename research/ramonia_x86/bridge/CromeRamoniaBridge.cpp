@@ -55,6 +55,8 @@ struct Profile {
     std::size_t followTargetOffset{};
     std::size_t posX{}, posY{}, posZ{};
     std::size_t creatureIdOffset{};
+    std::size_t creatureNameOffset{};
+    std::size_t creatureHpPercentOffset{};
     std::uintptr_t monsterVtableRva{};
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
@@ -224,6 +226,12 @@ Profile loadProfile(const std::string& path) {
     const auto* creatureId = child(creatureLayout, "id");
     if (const auto n = integerValue(child(creatureId, "offset")))
         p.creatureIdOffset = static_cast<std::size_t>(*n);
+    const auto* creatureName = child(creatureLayout, "name");
+    if (const auto n = integerValue(child(creatureName, "offset")))
+        p.creatureNameOffset = static_cast<std::size_t>(*n);
+    const auto* creatureHp = child(creatureLayout, "hpPercent");
+    if (const auto n = integerValue(child(creatureHp, "offset")))
+        p.creatureHpPercentOffset = static_cast<std::size_t>(*n);
 
     const auto* fields = child(runtime, "selectedFields");
     p.health = readField(fields, "health");
@@ -234,9 +242,10 @@ Profile loadProfile(const std::string& path) {
         throw std::runtime_error("required player fields missing");
     if (!p.expectedTimestamp || !p.expectedImageSize)
         throw std::runtime_error("build fingerprint incomplete");
-    if (!p.monsterVtableRva || !p.creatureIdOffset || !p.attackMethodRva ||
+    if (!p.monsterVtableRva || !p.creatureIdOffset || !p.creatureNameOffset ||
+        !p.creatureHpPercentOffset || !p.attackMethodRva ||
         !p.attackRuntimeConfirmed || !p.attackCancelFalseConfirmed)
-        throw std::runtime_error("V37 attack contract incomplete");
+        throw std::runtime_error("V37 target/attack contract incomplete");
 
     return p;
 }
