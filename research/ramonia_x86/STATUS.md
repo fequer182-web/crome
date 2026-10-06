@@ -132,3 +132,8 @@ The external x64 target loop was validated live against multiple consecutive Rat
 - repeated across multiple targets until the user stopped the loop with CTRL+C.
 
 A transient pipe reconnect race was observed between one-request pipe instances. The x64 client now retries short ERROR_FILE_NOT_FOUND / ERROR_PIPE_BUSY windows locally instead of surfacing them as target failures.
+
+
+## Bridge V7 game-thread target resolution
+
+After a live UI test produced an access violation in the Ramonia process, the ATTACK_ID handoff was hardened. The pipe side no longer stores a resolved Monster pointer. It stores only creatureId; the game-thread dispatcher resolves the current Monster pointer and validates it immediately before the native attack call. This specifically reduces stale-pointer risk when a creature dies/despawns during retargeting.
