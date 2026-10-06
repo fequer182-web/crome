@@ -58,6 +58,264 @@ static DWORD g_nativeAttemptPid = 0;
 static bool g_nativeAttemptedForPid = false;
 static std::unordered_map<std::string,std::string> g_lastWrittenJson;
 
+struct RamoniaMonsterUi {
+    std::uint32_t id{};
+    std::string name;
+    std::uint32_t hpPercent{};
+    std::uint32_t distance{};
+};
+
+struct RamoniaTargetConfigUi {
+    bool enabled{};
+    bool attackAny{};
+    int hpMin{0};
+    int hpMax{100};
+    int maxRange{7};
+    std::vector<std::string> names;
+};
+
+static std::atomic<bool> g_ramoniaWorkerRun{true};
+static std::atomic<bool> g_ramoniaBridgeReady{false};
+static std::atomic<DWORD> g_ramoniaPid{0};
+static std::mutex g_ramoniaMutex;
+static RamoniaTargetConfigUi g_ramoniaTargetConfig;
+static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
+static std::string g_ramoniaCurrentTarget;
+static std::uint32_t g_ramoniaCurrentTargetId{};
+static std::uint32_t g_ramoniaCurrentTargetHp{};
+static std::thread g_ramoniaWorker;
+
+static std::string LowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+static DWORD FindRamoniaProcess() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            std::wstring exe = pe.szExeFile;
+            std::transform(exe.begin(), exe.end(), exe.begin(),
+                [](wchar_t c){ return static_cast<wchar_t>(towlower(c)); });
+            if (exe.rfind(L"ramonia_gl-", 0) == 0 &&
+                exe.size() >= 4 && exe.substr(exe.size()-4) == L".exe") {
+                pid = pe.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return pid;
+}
+
+static void SetRamoniaStatus(const std::string& status,
+                             const std::string& target = {},
+                             std::uint32_t id = 0,
+                             std::uint32_t hp = 0) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaTargetStatus = status;
+    g_ramoniaCurrentTarget = target;
+    g_ramoniaCurrentTargetId = id;
+    g_ramoniaCurrentTargetHp = hp;
+}
+
+static std::string RamoniaStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaTargetStatus;
+}
+
+static void SetRamoniaTargetConfig(const RamoniaTargetConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaTargetConfig = cfg;
+}
+
+static RamoniaTargetConfigUi GetRamoniaTargetConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaTargetConfig;
+}
+
+static bool RamoniaPipeRequest(DWORD pid, const nlohmann::json& request, nlohmann::json& response) {
+    const std::string pipeName = "\\\\.\\pipe\\Crome.Ramonia." + std::to_string(pid);
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    DWORD lastError = ERROR_SUCCESS;
+
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        pipe = CreateFileA(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        lastError = GetLastError();
+        if (lastError != ERROR_PIPE_BUSY && lastError != ERROR_FILE_NOT_FOUND) break;
+        if (lastError == ERROR_PIPE_BUSY) WaitNamedPipeA(pipeName.c_str(), 100);
+        Sleep(25);
+    }
+    if (pipe == INVALID_HANDLE_VALUE) return false;
+
+    DWORD mode = PIPE_READMODE_MESSAGE;
+    SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+
+    const std::string payload = request.dump();
+    DWORD written{};
+    if (!WriteFile(pipe, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr)) {
+        CloseHandle(pipe);
+        return false;
+    }
+
+    char buffer[16384]{};
+    DWORD read{};
+    const BOOL ok = ReadFile(pipe, buffer, sizeof(buffer)-1, &read, nullptr);
+    if (!ok && GetLastError() != ERROR_MORE_DATA) {
+        CloseHandle(pipe);
+        return false;
+    }
+    CloseHandle(pipe);
+
+    try {
+        response = nlohmann::json::parse(std::string(buffer, buffer + read));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static std::vector<RamoniaMonsterUi> ParseRamoniaMonsters(const nlohmann::json& j) {
+    std::vector<RamoniaMonsterUi> out;
+    if (!j.value("ok", false) || !j.contains("monsters") || !j["monsters"].is_array()) return out;
+    for (const auto& v : j["monsters"]) {
+        if (!v.is_object()) continue;
+        RamoniaMonsterUi m;
+        m.id = v.value("id", 0u);
+        m.name = v.value("name", std::string());
+        m.hpPercent = v.value("hpPercent", 0u);
+        m.distance = v.value("distance", 999u);
+        if (m.id && !m.name.empty() && m.hpPercent <= 100u) out.push_back(std::move(m));
+    }
+    return out;
+}
+
+static std::uint32_t ParseRamoniaAttackId(const nlohmann::json& j) {
+    if (!j.value("ok", false) || !j.contains("attack") || !j["attack"].is_object()) return 0;
+    return j["attack"].value("id", 0u);
+}
+
+static bool RamoniaNameMatches(const RamoniaMonsterUi& m, const RamoniaTargetConfigUi& cfg, int& priority) {
+    priority = 1000000;
+    if (cfg.attackAny) { priority = 0; return true; }
+    const auto monsterName = LowerAscii(m.name);
+    for (std::size_t i=0; i<cfg.names.size(); ++i) {
+        const auto rule = LowerAscii(cfg.names[i]);
+        if (rule == "*" || rule == monsterName) {
+            priority = static_cast<int>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::optional<RamoniaMonsterUi> ChooseRamoniaTarget(
+    const std::vector<RamoniaMonsterUi>& monsters,
+    const RamoniaTargetConfigUi& cfg,
+    std::uint32_t currentAttackId) {
+
+    for (const auto& m : monsters) {
+        int pr{};
+        if (m.id != currentAttackId || !RamoniaNameMatches(m, cfg, pr)) continue;
+        if (static_cast<int>(m.hpPercent) < cfg.hpMin || static_cast<int>(m.hpPercent) > cfg.hpMax) continue;
+        if (static_cast<int>(m.distance) > cfg.maxRange) continue;
+        return m;
+    }
+
+    std::optional<RamoniaMonsterUi> best;
+    int bestPriority = 1000000;
+    for (const auto& m : monsters) {
+        int pr{};
+        if (!RamoniaNameMatches(m, cfg, pr)) continue;
+        if (static_cast<int>(m.hpPercent) < cfg.hpMin || static_cast<int>(m.hpPercent) > cfg.hpMax) continue;
+        if (static_cast<int>(m.distance) > cfg.maxRange) continue;
+        if (!best || pr < bestPriority || (pr == bestPriority && m.distance < best->distance)) {
+            best = m;
+            bestPriority = pr;
+        }
+    }
+    return best;
+}
+
+static void RamoniaTargetWorker() {
+    while (g_ramoniaWorkerRun.load()) {
+        const DWORD pid = FindRamoniaProcess();
+        g_ramoniaPid.store(pid);
+        if (!pid) {
+            g_ramoniaBridgeReady.store(false);
+            SetRamoniaStatus("Ramonia nao esta aberto");
+            Sleep(700);
+            continue;
+        }
+
+        nlohmann::json hello;
+        if (!RamoniaPipeRequest(pid, {{"cmd","HELLO"}}, hello) ||
+            !hello.value("ok",false) ||
+            !hello.value("profileReady",false) ||
+            !hello.value("buildMatched",false) ||
+            !hello.value("dispatcherReady",false) ||
+            hello.value("bridgeVersion",0) < 6) {
+            g_ramoniaBridgeReady.store(false);
+            SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
+            Sleep(500);
+            continue;
+        }
+
+        g_ramoniaBridgeReady.store(true);
+        const auto cfg = GetRamoniaTargetConfig();
+        if (!cfg.enabled) {
+            SetRamoniaStatus("Ramonia Bridge V6 pronta");
+            Sleep(300);
+            continue;
+        }
+
+        nlohmann::json monstersJson, combatJson;
+        if (!RamoniaPipeRequest(pid, {{"cmd","GET_VISIBLE_MONSTERS"}}, monstersJson) ||
+            !RamoniaPipeRequest(pid, {{"cmd","GET_COMBAT_TARGETS"}}, combatJson)) {
+            SetRamoniaStatus("Target: aguardando bridge");
+            Sleep(300);
+            continue;
+        }
+
+        const auto monsters = ParseRamoniaMonsters(monstersJson);
+        const auto currentAttackId = ParseRamoniaAttackId(combatJson);
+        const auto target = ChooseRamoniaTarget(monsters, cfg, currentAttackId);
+
+        if (!target) {
+            SetRamoniaStatus("Target ativo - aguardando alvo");
+            Sleep(300);
+            continue;
+        }
+
+        if (target->id != currentAttackId) {
+            nlohmann::json attackResponse;
+            if (!RamoniaPipeRequest(pid, {{"cmd","ATTACK_ID"},{"creatureId",target->id}}, attackResponse) ||
+                !attackResponse.value("ok",false)) {
+                if (attackResponse.value("error",std::string()) == "creature_id_not_visible") {
+                    SetRamoniaStatus("Alvo sumiu - procurando proximo");
+                } else {
+                    SetRamoniaStatus("ATTACK_ID pendente - nova tentativa");
+                }
+                Sleep(250);
+                continue;
+            }
+        }
+
+        SetRamoniaStatus("Target ativo", target->name, target->id, target->hpPercent);
+        Sleep(300);
+    }
+}
+
+static bool TargetRuntimeReady() {
+    return g_nativeRuntimeLoaded || g_ramoniaBridgeReady.load();
+}
+
 static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (snap == INVALID_HANDLE_VALUE) return false;
