@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V11
+# Crome Ramonia Pipe Bridge V12
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -150,3 +150,19 @@ V11 moves the real Target path onto that validated source.
 - Broad Tile discovery is refreshed on cache initialization, large movement/floor change, or a long safety interval; it is never run from the game thread.
 
 GET_TILE_MONSTERS now reports source `Tile::things-cache`, cachedTiles and cacheAgeMs for diagnostics.
+
+
+## V12 - on-demand game-thread hook
+
+A repeated Ramonia access violation was reproduced while walking in town with no monster/attack activity. This removed Target/Tile selection as a necessary trigger and left the permanently installed WH_GETMESSAGE hook as the main bridge component that remained active while idle.
+
+V12 keeps the V11 cached Tile::things target resolver, but removes the permanent game-thread hook/event lifetime:
+
+- bridge startup only finds the game window/thread ID;
+- idle bridge state has no WH_GETMESSAGE hook and no action event installed;
+- ATTACK_ID/ATTACK_SELECTED create a temporary event and thread-scoped WH_GETMESSAGE hook;
+- the action message executes Game::attack on the game thread;
+- the hook removes itself from inside the target thread after the action is consumed;
+- timeout/error paths also clean up the temporary hook/event.
+
+HELLO now reports `dispatcherMode:"on_demand"` and `dispatcherHookActive:false` while idle.
