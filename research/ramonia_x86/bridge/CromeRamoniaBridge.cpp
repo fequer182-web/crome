@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -435,14 +436,15 @@ bool executeAttackSelectedOnGameThread() {
     const auto& p = *g_profile;
     const auto game = g_base + p.gameRva;
 
-    std::uintptr_t followTarget{};
-    std::uintptr_t attackTarget{};
-    safeRead(game + p.followTargetOffset, followTarget);
-    safeRead(game + p.attackTargetOffset, attackTarget);
+    std::uintptr_t target = g_pendingAttackTarget;
+    if (!target) {
+        std::uintptr_t followTarget{};
+        std::uintptr_t attackTarget{};
+        safeRead(game + p.followTargetOffset, followTarget);
+        safeRead(game + p.attackTargetOffset, attackTarget);
+        target = followTarget ? followTarget : attackTarget;
+    }
 
-    // For the first active proof, the user selects a Monster with Follow.
-    // If Follow is empty, reuse the current AttackTarget only as a fallback.
-    const auto target = followTarget ? followTarget : attackTarget;
     if (!target) {
         InterlockedExchange(&g_lastActionCode, 2);
         return false;
@@ -451,6 +453,10 @@ bool executeAttackSelectedOnGameThread() {
     std::uint32_t id{};
     if (!targetSnapshot(target, id)) {
         InterlockedExchange(&g_lastActionCode, 3);
+        return false;
+    }
+    if (g_pendingAttackRequestedId && id != g_pendingAttackRequestedId) {
+        InterlockedExchange(&g_lastActionCode, 9);
         return false;
     }
 
@@ -525,6 +531,8 @@ std::string actionCodeText(LONG code) {
         case 6: return "attack_target_not_updated";
         case 7: return "dispatcher_not_ready";
         case 8: return "dispatcher_timeout";
+        case 9: return "creature_id_mismatch";
+        case 10: return "creature_id_not_visible";
         default: return "unknown_action_result";
     }
 }
