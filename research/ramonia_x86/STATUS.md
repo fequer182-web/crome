@@ -120,3 +120,15 @@ This closes the first semantic Crome action path without raw pointers crossing I
 ## Automatic target loop
 
 The x64 pipe test now contains the first external target-policy loop. It polls semantic monster snapshots, keeps the current matching target while alive, selects the nearest matching monster when needed, and invokes `ATTACK_ID`. This keeps target policy in the external Crome layer while the x86 bridge remains an ABI/runtime adapter.
+
+
+## Automatic Target loop runtime-confirmed
+
+The external x64 target loop was validated live against multiple consecutive Rats:
+
+- selected Rat by semantic name without Follow/manual Attack;
+- tracked HP transitions (for example 100 -> 85 -> 65 -> 30 -> 15);
+- when the current Rat disappeared/died, automatically selected a new Rat ID;
+- repeated across multiple targets until the user stopped the loop with CTRL+C.
+
+A transient pipe reconnect race was observed between one-request pipe instances. The x64 client now retries short ERROR_FILE_NOT_FOUND / ERROR_PIPE_BUSY windows locally instead of surfacing them as target failures.
