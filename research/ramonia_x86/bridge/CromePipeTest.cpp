@@ -255,6 +255,79 @@ int runTargetLoop(DWORD pid, const std::string& wantedName) {
     }
 }
 
+int runAutoFoodLoop(DWORD pid,
+                    std::uint32_t itemId,
+                    std::uint32_t successDelayMs,
+                    std::uint32_t retryDelayMs) {
+    std::cout << "[AUTO FOOD] Ativo. itemId=" << itemId
+              << " successDelayMs=" << successDelayMs
+              << " retryDelayMs=" << retryDelayMs << "\n"
+              << "[AUTO FOOD] Procura em QUALQUER container aberto.\n"
+              << "[AUTO FOOD] CTRL+C para encerrar.\n\n";
+
+    bool waitingShown = false;
+    std::uint64_t successCount = 0;
+
+    for (;;) {
+        const std::string cmd =
+            "{\"cmd\":\"USE_CONTAINER_ITEM\",\"itemId\":" +
+            std::to_string(itemId) + "}";
+
+        std::string response;
+        const bool ok = requestRaw(pid, cmd, response, false);
+
+        if (ok) {
+            ++successCount;
+            waitingShown = false;
+
+            std::cout << "[AUTO FOOD] FOOD USADO"
+                      << " itemId=" << itemId
+                      << " total=" << successCount << "\n";
+
+            try {
+                const auto root = crome::json::parse(response);
+                const auto* container = root.get("sourceContainerId");
+                const auto* slot = root.get("slot");
+                if (container && container->isNumber() &&
+                    slot && slot->isNumber()) {
+                    std::cout << "            container="
+                              << static_cast<std::uint32_t>(container->number())
+                              << " slot="
+                              << static_cast<std::uint32_t>(slot->number())
+                              << "\n";
+                }
+            } catch (...) {}
+
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(successDelayMs));
+            continue;
+        }
+
+        if (response.find("\"item_not_found_in_open_containers\"") != std::string::npos) {
+            if (!waitingShown) {
+                std::cout << "[AUTO FOOD] Nenhum item " << itemId
+                          << " nos containers abertos. Aguardando...\n";
+                waitingShown = true;
+            }
+        } else if (response.find("\"source_container_not_open\"") != std::string::npos) {
+            if (!waitingShown) {
+                std::cout << "[AUTO FOOD] Container indisponivel. Aguardando...\n";
+                waitingShown = true;
+            }
+        } else if (response.find("\"dispatcher_timeout\"") != std::string::npos) {
+            std::cout << "[AUTO FOOD] Dispatcher timeout; nova tentativa.\n";
+        } else if (!response.empty()) {
+            std::cout << "[AUTO FOOD] USE_CONTAINER_ITEM falhou: "
+                      << response << "\n";
+        } else {
+            std::cout << "[AUTO FOOD] Pipe indisponivel; tentando novamente...\n";
+        }
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(retryDelayMs));
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -268,6 +341,9 @@ int main(int argc, char** argv) {
     std::uint32_t moveItemId = 2148;
     std::uint32_t useContainerItemId = 2696;
     std::uint32_t useContainerId = 0;
+    std::uint32_t autoFoodItemId = 2696;
+    std::uint32_t autoFoodSuccessDelayMs = 60000;
+    std::uint32_t autoFoodRetryDelayMs = 2000;
     bool useContainerProvided = false;
     bool sourceContainerProvided = false;
     bool targetContainerProvided = false;
@@ -309,6 +385,23 @@ int main(int argc, char** argv) {
         }
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "autofood") {
+        if (argc >= 3) {
+            try { autoFoodItemId = static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { autoFoodSuccessDelayMs = static_cast<std::uint32_t>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+        if (argc >= 5) {
+            try { autoFoodRetryDelayMs = static_cast<std::uint32_t>(std::stoul(argv[4])); }
+            catch (...) {}
+        }
+        if (argc >= 6) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[5])); }
             catch (...) {}
         }
     } else if (mode == "useitem" || mode == "usefood") {
@@ -433,6 +526,20 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok ? "[OK] Game::use foi chamado no holder do Item. Confira se o corpse abriu.\n"
                                    : "[FALHOU] USE_LOOT_ITEM nao foi confirmado.\n");
         return ok ? 0 : 2;
+    }
+
+    if (mode == "autofood") {
+        if (!autoFoodItemId || autoFoodItemId > 0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe autofood [itemId=2696] [successDelayMs=60000] [retryDelayMs=2000] [PID]\n";
+            return 1;
+        }
+        if (autoFoodSuccessDelayMs < 1000) autoFoodSuccessDelayMs = 1000;
+        if (autoFoodRetryDelayMs < 250) autoFoodRetryDelayMs = 250;
+        return runAutoFoodLoop(
+            pid,
+            autoFoodItemId,
+            autoFoodSuccessDelayMs,
+            autoFoodRetryDelayMs);
     }
 
     if (mode == "useitem" || mode == "usefood") {
