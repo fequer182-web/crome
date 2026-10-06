@@ -554,6 +554,19 @@ std::string jsonEscape(const std::string& s) {
     return o.str();
 }
 
+std::optional<std::uint32_t> uint32FieldFromRequest(
+    const std::string& request, const char* field) {
+    try {
+        const auto root = crome::json::parse(request);
+        if (!root.isObject()) return std::nullopt;
+        const auto n = integerValue(root.get(field));
+        if (!n || *n == 0 || *n > 0xFFFFFFFFull) return std::nullopt;
+        return static_cast<std::uint32_t>(*n);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::string commandFromRequest(const std::string& request) {
     try {
         const auto root = crome::json::parse(request);
