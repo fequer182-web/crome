@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <optional>
 #include <sstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -35,14 +36,36 @@ HWND g_gameWindow{};
 DWORD g_gameThreadId{};
 HHOOK g_gameThreadHook{};
 HANDLE g_actionEvent{};
-constexpr UINT kAttackSelectedMessage = WM_APP + 0x620;
+constexpr UINT kActionMessage = WM_APP + 0x620;
+
+enum PendingActionKind : LONG {
+    PendingNone = 0,
+    PendingAttack = 1,
+    PendingUse = 2,
+    PendingMove = 3
+};
 
 volatile LONG g_lastActionCode{};
 volatile LONG g_actionTokenCounter{};
 volatile LONG g_pendingActionToken{};
+volatile LONG g_pendingActionKind{};
 std::uint32_t g_lastActionTargetId{};
 std::uintptr_t g_pendingAttackTarget{};
 std::uint32_t g_pendingAttackRequestedId{};
+
+std::uintptr_t g_pendingUseTile{};
+std::uintptr_t g_pendingUseHolder{};
+std::uintptr_t g_pendingUseItem{};
+std::uint16_t g_pendingUseItemId{};
+
+std::uintptr_t g_pendingMoveSourceContainer{};
+std::uintptr_t g_pendingMoveHolder{};
+std::uintptr_t g_pendingMoveItem{};
+std::uint16_t g_pendingMoveItemId{};
+std::uint32_t g_pendingMoveCount{};
+std::uintptr_t g_pendingMoveTargetContainer{};
+std::uint32_t g_pendingMoveTargetContainerId{};
+std::uint8_t g_pendingMoveTargetSlot{};
 
 struct Profile {
     std::string schema;
@@ -63,9 +86,28 @@ struct Profile {
     std::size_t creatureHpPercentOffset{};
     std::uintptr_t monsterVtableRva{};
     std::uintptr_t itemVtableRva{};
+    std::uintptr_t containerVtableRva{};
     std::size_t itemIdOffset{};
     std::size_t itemCountOffset{};
     bool itemContractReady{};
+
+    std::size_t openContainersOffset{};
+    std::size_t containerIdOffset{};
+    std::size_t containerCapacityOffset{};
+    std::size_t containerNameOffset{};
+    std::size_t containerItemsOffset{};
+    std::size_t containerItemStride{};
+    bool containerContractReady{};
+
+    std::uintptr_t useMethodRva{};
+    bool useRuntimeConfirmed{};
+    bool useItemSharedRefConfirmed{};
+    std::uintptr_t moveMethodRva{};
+    bool moveRuntimeConfirmed{};
+    bool moveItemSharedRefConfirmed{};
+    bool movePositionRefConfirmed{};
+    bool moveCountConfirmed{};
+
     std::uintptr_t tileVtableRva{};
     std::size_t tileThingsOffset{};
     std::size_t tileThingsEndOffset{};
@@ -229,6 +271,13 @@ Profile loadProfile(const std::string& path) {
         if (n) p.itemVtableRva = static_cast<std::uintptr_t>(*n);
     }
 
+    const auto* container = child(rtti, "Container");
+    const auto* containerVtables = child(container, "vtables");
+    if (containerVtables && containerVtables->isArray() && !containerVtables->array().empty()) {
+        const auto n = integerValue(&containerVtables->array().front());
+        if (n) p.containerVtableRva = static_cast<std::uintptr_t>(*n);
+    }
+
     const auto* actions = root.get("actions");
     const auto* attack = child(actions, "attack");
     if (attack && attack->isObject()) {
@@ -246,6 +295,51 @@ Profile loadProfile(const std::string& path) {
                 stringValue(cancel.get("abiType")) == "bool" &&
                 stringValue(cancel.get("status")) == "runtime_confirmed" &&
                 required && required->isBool() && required->boolean() == false;
+        }
+    }
+
+
+    const auto* use = child(actions, "use");
+    if (use && use->isObject()) {
+        if (const auto n = integerValue(use->get("methodRva")))
+            p.useMethodRva = static_cast<std::uintptr_t>(*n);
+        p.useRuntimeConfirmed = stringValue(use->get("status")) == "runtime_confirmed";
+        const auto* args = use->get("args");
+        if (args && args->isArray() && !args->array().empty()) {
+            const auto& a0 = args->array()[0];
+            p.useItemSharedRefConfirmed =
+                a0.isObject() &&
+                stringValue(a0.get("semantic")) == "Item" &&
+                stringValue(a0.get("abiType")) == "shared_object_ptr_ref" &&
+                stringValue(a0.get("status")) == "runtime_confirmed";
+        }
+    }
+
+    const auto* move = child(actions, "move");
+    if (move && move->isObject()) {
+        if (const auto n = integerValue(move->get("methodRva")))
+            p.moveMethodRva = static_cast<std::uintptr_t>(*n);
+        p.moveRuntimeConfirmed = stringValue(move->get("status")) == "runtime_confirmed";
+        const auto* args = move->get("args");
+        if (args && args->isArray() && args->array().size() >= 3) {
+            const auto& a0 = args->array()[0];
+            const auto& a1 = args->array()[1];
+            const auto& a2 = args->array()[2];
+            p.moveItemSharedRefConfirmed =
+                a0.isObject() &&
+                stringValue(a0.get("semantic")) == "Item" &&
+                stringValue(a0.get("abiType")) == "shared_object_ptr_ref" &&
+                stringValue(a0.get("status")) == "runtime_confirmed";
+            p.movePositionRefConfirmed =
+                a1.isObject() &&
+                stringValue(a1.get("semantic")) == "Position" &&
+                stringValue(a1.get("abiType")) == "position_u32_u32_u8_ref" &&
+                stringValue(a1.get("status")) == "runtime_confirmed";
+            p.moveCountConfirmed =
+                a2.isObject() &&
+                stringValue(a2.get("semantic")) == "Count" &&
+                stringValue(a2.get("abiType")) == "u32" &&
+                stringValue(a2.get("status")) == "runtime_confirmed";
         }
     }
 
@@ -284,6 +378,31 @@ Profile loadProfile(const std::string& path) {
         p.itemIdOffset = itemId.offset;
         p.itemCountOffset = itemCount.offset;
         p.itemContractReady = true;
+    }
+
+    const auto openContainers = readField(fields, "openContainersMap");
+    const auto containerId = readField(fields, "containerId");
+    const auto containerCapacity = readField(fields, "containerCapacity");
+    const auto containerName = readField(fields, "containerName");
+    const auto containerItems = readField(fields, "containerItems");
+    const auto containerItemStride = readField(fields, "containerItemStride");
+    if (openContainers.valid && containerId.valid && containerCapacity.valid &&
+        containerName.valid && containerItems.valid && containerItemStride.valid &&
+        openContainers.type == "inline_registry" &&
+        containerId.type == "u32" &&
+        containerCapacity.type == "u32" &&
+        containerName.type == "msvc_string" &&
+        containerItems.type == "deque" &&
+        containerItemStride.type == "bytes" &&
+        containerItemStride.offset == 4 &&
+        p.containerVtableRva) {
+        p.openContainersOffset = openContainers.offset;
+        p.containerIdOffset = containerId.offset;
+        p.containerCapacityOffset = containerCapacity.offset;
+        p.containerNameOffset = containerName.offset;
+        p.containerItemsOffset = containerItems.offset;
+        p.containerItemStride = containerItemStride.offset;
+        p.containerContractReady = true;
     }
 
     const auto tileThings = readField(fields, "tileThings");
