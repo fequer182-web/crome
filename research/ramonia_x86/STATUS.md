@@ -208,3 +208,21 @@ GET_OPEN_CONTAINERS reads the exact Container RTTI graph rooted at the runtime-c
 Live V14 evidence showed Container registry decoding is correct (container id/name/capacity/items and gold 2148 were read successfully). The active use call was not reached because the corpse candidate filter required the new Item to appear on the exact Tile occupied by the monster at LOOT_MARK. In the observed run the Rat moved before death, so corpse candidate 2813 appeared on a different Tile.
 
 V15 stores the exact Tile cache address list at LOOT_MARK and rereads that frozen Tile set at LOOT_DIFF. It no longer rejects the diff merely because the global Target cache generation changed. When at least one tracked monster disappears, newly-added Items in the marked snapshot are retained as death-window candidates; USE_LOOT_ITEM still revalidates the requested Item ID and exact holder on the game thread before calling Game::use.
+
+
+## V15 live move confirmation
+
+Live validation completed successfully:
+- source Container: id=1, name=`dead rat`
+- destination Container: id=0, name=`bag`
+- moved Item: gold id=2148, count=3
+- before: Bag gold=27, dead rat gold=3
+- after: Bag gold=30, dead rat no longer contained gold
+
+This confirms the active `Game::move` path end-to-end for this build, including:
+- Item `shared_object_ptr_ref` holder ABI;
+- runtime-confirmed Position ABI;
+- runtime-confirmed Count ABI;
+- destination container encoding `x=0xFFFF, y=0x40|containerId, z=slot`.
+
+The bridge now reports `destinationEncoding=otclient_container_position_runtime_confirmed` for this path.
