@@ -985,18 +985,28 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
             const LONG expected = InterlockedCompareExchange(&g_pendingActionToken, 0, 0);
             if (token != 0 && token == expected) {
                 executeAttackSelectedOnGameThread();
+
+                // Preserve the normal hook chain first, then remove our hook
+                // from inside the target thread itself. No permanent hook is
+                // left installed after the action message is consumed.
+                const HHOOK hook = g_gameThreadHook;
+                const LRESULT next = CallNextHookEx(hook, code, wParam, lParam);
+                if (hook) {
+                    UnhookWindowsHookEx(hook);
+                    if (g_gameThreadHook == hook) g_gameThreadHook = nullptr;
+                }
                 if (g_actionEvent) SetEvent(g_actionEvent);
+                return next;
             }
         }
     }
     return CallNextHookEx(g_gameThreadHook, code, wParam, lParam);
 }
-
 bool dispatcherReady() {
-    return g_gameWindow && g_gameThreadId && g_gameThreadHook && g_actionEvent;
+    return g_gameWindow && IsWindow(g_gameWindow) && g_gameThreadId != 0;
 }
 
-bool installGameThreadDispatcher() {
+bool prepareGameThreadDispatcher() {
     if (dispatcherReady()) return true;
 
     g_gameWindow = findCurrentProcessWindow();
@@ -1012,11 +1022,38 @@ bool installGameThreadDispatcher() {
         return false;
     }
 
+    logLine("[DISPATCH] on-demand game-thread target ready tid=" +
+            std::to_string(g_gameThreadId));
+    return true;
+}
+
+void cleanupOnDemandDispatcher() {
+    if (g_gameThreadHook) {
+        const HHOOK hook = g_gameThreadHook;
+        g_gameThreadHook = nullptr;
+        UnhookWindowsHookEx(hook);
+    }
+    if (g_actionEvent) {
+        const HANDLE event = g_actionEvent;
+        g_actionEvent = nullptr;
+        CloseHandle(event);
+    }
+}
+
+bool dispatchAttackToGameThread(DWORD& win32Error) {
+    win32Error = ERROR_SUCCESS;
+
+    if (!prepareGameThreadDispatcher()) {
+        win32Error = ERROR_INVALID_WINDOW_HANDLE;
+        return false;
+    }
+
+    // V12: no hook/event remains installed while the bridge is idle.
+    cleanupOnDemandDispatcher();
+
     g_actionEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!g_actionEvent) {
-        logLine("[DISPATCH] CreateEvent failed Win32=" + std::to_string(GetLastError()));
-        g_gameThreadId = 0;
-        g_gameWindow = nullptr;
+        win32Error = GetLastError();
         return false;
     }
 
@@ -1027,24 +1064,8 @@ bool installGameThreadDispatcher() {
         nullptr,
         g_gameThreadId);
     if (!g_gameThreadHook) {
-        const auto error = GetLastError();
-        logLine("[DISPATCH] SetWindowsHookEx(WH_GETMESSAGE) failed Win32=" + std::to_string(error));
-        CloseHandle(g_actionEvent);
-        g_actionEvent = nullptr;
-        g_gameThreadId = 0;
-        g_gameWindow = nullptr;
-        return false;
-    }
-
-    logLine("[DISPATCH] WH_GETMESSAGE game-thread dispatcher installed tid=" +
-            std::to_string(g_gameThreadId));
-    return true;
-}
-
-bool dispatchAttackToGameThread(DWORD& win32Error) {
-    win32Error = ERROR_SUCCESS;
-    if (!dispatcherReady()) {
-        win32Error = ERROR_INVALID_HANDLE;
+        win32Error = GetLastError();
+        cleanupOnDemandDispatcher();
         return false;
     }
 
@@ -1063,6 +1084,7 @@ bool dispatchAttackToGameThread(DWORD& win32Error) {
             0)) {
         win32Error = GetLastError();
         InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+        cleanupOnDemandDispatcher();
         return false;
     }
 
@@ -1070,10 +1092,15 @@ bool dispatchAttackToGameThread(DWORD& win32Error) {
     if (wait != WAIT_OBJECT_0) {
         win32Error = (wait == WAIT_TIMEOUT) ? ERROR_TIMEOUT : GetLastError();
         InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+        cleanupOnDemandDispatcher();
         return false;
     }
 
     InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+
+    // The hook normally removes itself in the callback. This is only a safety
+    // cleanup for unexpected paths.
+    cleanupOnDemandDispatcher();
     return true;
 }
 
@@ -1216,7 +1243,7 @@ std::string visibleMonstersResponse() {
 std::string attackIdResponse(std::uint32_t creatureId) {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"build_not_validated"})";
-    if (!dispatcherReady())
+    if (!prepareGameThreadDispatcher())
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"dispatcher_not_ready"})";
 
     const auto tileVisible = scanCachedTileMonsters(15);
@@ -1256,7 +1283,7 @@ std::string attackIdResponse(std::uint32_t creatureId) {
 std::string attackSelectedResponse() {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"build_not_validated"})";
-    if (!dispatcherReady())
+    if (!prepareGameThreadDispatcher())
         return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"dispatcher_not_ready"})";
 
     g_lastActionTargetId = 0;
@@ -1286,12 +1313,14 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":11,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":12,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
           << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
-          << ",\"dispatcherReady\":" << (dispatcherReady() ? "true" : "false");
+          << ",\"dispatcherReady\":" << (dispatcherReady() ? "true" : "false")
+          << ",\"dispatcherMode\":\"on_demand\""
+          << ",\"dispatcherHookActive\":" << (g_gameThreadHook ? "true" : "false");
         if (!g_profileError.empty())
             o << ",\"profileError\":\"" << jsonEscape(g_profileError) << "\"";
         o << "}";
@@ -1378,7 +1407,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V11 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V12 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -1418,8 +1447,8 @@ DWORD WINAPI bridgeThread(LPVOID) {
             if (!g_buildMatched)
                 throw std::runtime_error("runtime build does not match V37 profile");
 
-            if (!installGameThreadDispatcher())
-                throw std::runtime_error("game-thread dispatcher install failed");
+            if (!prepareGameThreadDispatcher())
+                throw std::runtime_error("game-thread target prepare failed");
 
             g_status = "runtime_ready";
         } catch (const std::exception& e) {
@@ -1452,14 +1481,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         writeStatusFile();
     }
 
-    if (g_gameThreadHook) {
-        UnhookWindowsHookEx(g_gameThreadHook);
-        g_gameThreadHook = nullptr;
-    }
-    if (g_actionEvent) {
-        CloseHandle(g_actionEvent);
-        g_actionEvent = nullptr;
-    }
+    cleanupOnDemandDispatcher();
     g_gameThreadId = 0;
     g_gameWindow = nullptr;
     return 0;
