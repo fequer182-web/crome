@@ -1275,6 +1275,11 @@ static void DrawFooter(const Theme& t) {
     ImGui::Separator();
     const auto* p=g_session?g_session->profile():nullptr;
     if(p){ auto caps=crome::Capabilities::from(*p); ImGui::Text("Read: Player %s | Map %s | Containers %s",caps.playerRead?"READY":"MISS",caps.mapRead?"READY":"MISS",caps.containerRead?"READY":"MISS"); ImGui::SameLine(420); ImGui::TextColored(g_nativeRuntimeLoaded?t.green:ImVec4(1.0f,0.58f,0.25f,1.0f),"Native: %s",g_nativeRuntimeStatus.c_str()); }
+    if(g_ramoniaPid.load()){
+        ImGui::TextColored(g_ramoniaBridgeReady.load()?t.green:ImVec4(1.0f,0.58f,0.25f,1.0f),
+                           "Ramonia PID %lu | %s",
+                           (unsigned long)g_ramoniaPid.load(), RamoniaStatusText().c_str());
+    }
     if(g_lastLook.valid && g_lastLook.id>0){
         if(g_lastLook.onGround) ImGui::Text("Look ID: %d   Pos: %d,%d,%d",g_lastLook.id,g_lastLook.x,g_lastLook.y,g_lastLook.z);
         else ImGui::Text("Look ID: %d",g_lastLook.id);
@@ -1283,6 +1288,7 @@ static void DrawFooter(const Theme& t) {
 }
 
 static void DrawRuntimeGuard(const Theme& t) {
+    if (g_ramoniaPid.load()) return;
     const auto* sessionStatus = g_session ? &g_session->status() : nullptr;
     const bool nonOldersProfile = sessionStatus && sessionStatus->profileMatched && sessionStatus->exe.find("Olders") == std::string::npos && sessionStatus->exe.find("olders") == std::string::npos;
     if (nonOldersProfile) return; // permite validar builds como Classico em modo leitura sem exigir o runtime Olders.
@@ -1320,7 +1326,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.7.9 x64 Features");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.0 Ramonia Target");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
@@ -1445,6 +1451,9 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE, LPSTR,int) {
         g_session->refresh(true);
     }
 
+    g_ramoniaWorkerRun.store(true);
+    g_ramoniaWorker = std::thread(RamoniaTargetWorker);
+
     IMGUI_CHECKVERSION(); ImGui::CreateContext();
     ImGuiIO& io=ImGui::GetIO(); io.IniFilename=nullptr; io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
     if(GetFileAttributesA("C:\\Windows\\Fonts\\segoeui.ttf")!=INVALID_FILE_ATTRIBUTES) {
@@ -1470,6 +1479,9 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE, LPSTR,int) {
         SwapBuffers(g_hDC);
         Sleep(8);
     }
+
+    g_ramoniaWorkerRun.store(false);
+    if(g_ramoniaWorker.joinable()) g_ramoniaWorker.join();
 
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
     DestroyOpenGLContext(); DestroyWindow(g_hWnd); UnregisterClassW(wc.lpszClassName,hInst);
