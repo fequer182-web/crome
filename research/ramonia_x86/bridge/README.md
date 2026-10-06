@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V5
+# Crome Ramonia Pipe Bridge V6
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -12,7 +12,7 @@ Comandos read-only:
 - `BUILD_INFO`
 - `GET_PLAYER`
 - `GET_COMBAT_TARGETS`
-- `GET_VISIBLE_MONSTERS`
+- `GET_VISIBLE_MONSTERS` — retorna `id`, `name`, `hpPercent`, posição e distância
 
 Actions:
 
