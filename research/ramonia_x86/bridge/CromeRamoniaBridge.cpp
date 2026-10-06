@@ -307,6 +307,122 @@ bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
     return safeRead(target + g_profile->creatureIdOffset, id) && id != 0;
 }
 
+struct VisibleMonster {
+    std::uintptr_t address{};
+    std::uint32_t id{};
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint8_t z{};
+    std::uint32_t distance{};
+};
+
+bool readableProtection(DWORD protect) {
+    if (protect & PAGE_GUARD) return false;
+    if ((protect & 0xFFu) == PAGE_NOACCESS) return false;
+    const DWORD p = protect & 0xFFu;
+    return p == PAGE_READONLY || p == PAGE_READWRITE || p == PAGE_WRITECOPY ||
+           p == PAGE_EXECUTE_READ || p == PAGE_EXECUTE_READWRITE ||
+           p == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool localPlayerPosition(std::uint32_t& x, std::uint32_t& y, std::uint8_t& z) {
+    x = y = 0; z = 0;
+    if (!g_profile) return false;
+    const auto game = g_base + g_profile->gameRva;
+    std::uintptr_t player{};
+    if (!safeRead(game + g_profile->localPlayerOffset, player) || !player) return false;
+    return safeRead(player + g_profile->posX, x) &&
+           safeRead(player + g_profile->posY, y) &&
+           safeRead(player + g_profile->posZ, z) &&
+           x > 0 && y > 0 && z <= 15;
+}
+
+std::vector<VisibleMonster> scanVisibleMonsters(std::uint32_t maxRange = 15) {
+    std::vector<VisibleMonster> out;
+    if (!g_profile) return out;
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz)) return out;
+
+    const std::uint32_t wantedVtable =
+        static_cast<std::uint32_t>(g_base + g_profile->monsterVtableRva);
+
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    auto address = reinterpret_cast<std::uintptr_t>(si.lpMinimumApplicationAddress);
+    const auto maxAddress = reinterpret_cast<std::uintptr_t>(si.lpMaximumApplicationAddress);
+
+    constexpr SIZE_T kChunk = 1u << 20;
+    std::vector<std::uint8_t> buffer(kChunk);
+
+    while (address < maxAddress) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi))) break;
+
+        const auto regionBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        const auto regionEnd = regionBase + mbi.RegionSize;
+        if (regionEnd <= address) break;
+
+        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE &&
+            readableProtection(mbi.Protect)) {
+            for (auto chunkBase = regionBase; chunkBase < regionEnd; ) {
+                const SIZE_T want = static_cast<SIZE_T>(
+                    std::min<std::uintptr_t>(kChunk, regionEnd - chunkBase));
+                SIZE_T got{};
+                if (ReadProcessMemory(GetCurrentProcess(),
+                                      reinterpret_cast<LPCVOID>(chunkBase),
+                                      buffer.data(), want, &got) && got >= sizeof(std::uint32_t)) {
+                    for (SIZE_T i = 0; i + sizeof(std::uint32_t) <= got; i += 4) {
+                        std::uint32_t vt{};
+                        std::memcpy(&vt, buffer.data() + i, sizeof(vt));
+                        if (vt != wantedVtable) continue;
+
+                        const auto candidate = chunkBase + i;
+                        std::uint32_t id{}, x{}, y{};
+                        std::uint8_t z{};
+                        if (!safeRead(candidate + g_profile->creatureIdOffset, id) || !id ||
+                            !safeRead(candidate + g_profile->posX, x) ||
+                            !safeRead(candidate + g_profile->posY, y) ||
+                            !safeRead(candidate + g_profile->posZ, z)) {
+                            continue;
+                        }
+
+                        if (!x || !y || z != pz) continue;
+                        const auto dx = x > px ? x - px : px - x;
+                        const auto dy = y > py ? y - py : py - y;
+                        const auto dist = std::max(dx, dy);
+                        if (dist > maxRange) continue;
+
+                        bool duplicate = false;
+                        for (const auto& m : out) {
+                            if (m.address == candidate) { duplicate = true; break; }
+                        }
+                        if (!duplicate) out.push_back({candidate, id, x, y, z, dist});
+                    }
+                }
+                chunkBase += want ? want : 1;
+            }
+        }
+
+        address = regionEnd;
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.distance != b.distance) return a.distance < b.distance;
+        return a.id < b.id;
+    });
+    return out;
+}
+
+std::uintptr_t resolveVisibleMonsterById(std::uint32_t id) {
+    if (!id) return 0;
+    const auto monsters = scanVisibleMonsters();
+    for (const auto& m : monsters)
+        if (m.id == id) return m.address;
+    return 0;
+}
+
 bool executeAttackSelectedOnGameThread() {
     InterlockedExchange(&g_lastActionCode, 0);
     g_lastActionTargetId = 0;
