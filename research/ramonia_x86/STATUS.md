@@ -192,3 +192,12 @@ After V12 remained stable under extended cave combat, Loot discovery starts with
 LOOT_MARK captures cached Tile::things Items plus nearby Monster membership. LOOT_DIFF reports new exact-Item objects and Monsters that disappeared, correlated by the same cached Tile address internally and exposed only through ephemeral tileSlot diagnostics.
 
 No corpse is opened and no item is moved in V13. The goal is to identify the real corpse client item ID(s) produced by creature death before validating the Game::use/container-open ABI.
+
+
+## Bridge V14 active loot ABI test
+
+V13 correlated Rat/Cave Rat disappearance with new Item 2813 on the exact death Tiles (plus transient Item 2016). V14 promotes this only to an experimental one-shot use path; 2813 is not persisted as a universal corpse ID.
+
+Game::use and Game::move use their V37 runtime-confirmed shared_object_ptr_ref contracts. The bridge passes addresses of the actual 4-byte Tile::things / Container::items holder elements rather than raw Item pointers. The V12 on-demand WH_GETMESSAGE lifetime remains unchanged.
+
+GET_OPEN_CONTAINERS reads the exact Container RTTI graph rooted at the runtime-confirmed Game+0x10 inline registry. MOVE_CONTAINER_ITEM is prepared for gold 2148 -> an already-open Bag. Its special container Position encoding is explicitly experimental pending this live test.
