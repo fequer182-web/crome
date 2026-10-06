@@ -87,6 +87,7 @@ ULONGLONG g_monsterCacheTick{};
 constexpr ULONGLONG kMonsterCacheTtlMs = 1000;
 
 std::string moduleDirectory();
+std::string jsonEscape(const std::string& s);
 
 std::filesystem::path bridgeLogPath() {
     return moduleDirectory() + "\\CromeRamoniaBridge.log";
