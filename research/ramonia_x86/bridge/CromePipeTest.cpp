@@ -337,6 +337,22 @@ int main(int argc, char** argv) {
         return ok ? 0 : 2;
     }
 
+    if (mode == "lootmark") {
+        std::cout << "[LOOT_MARK - READ ONLY]\n";
+        ok &= request(pid, R"({"cmd":"LOOT_MARK"})");
+        std::cout << "\n" << (ok ? "[OK] Snapshot de Tile::things salvo. Agora mate UMA criatura sem andar longe.\n"
+                                   : "[FALHOU] Nao foi possivel criar o snapshot de loot.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "lootdiff") {
+        std::cout << "[LOOT_DIFF - READ ONLY]\n";
+        ok &= request(pid, R"({"cmd":"LOOT_DIFF"})");
+        std::cout << "\n" << (ok ? "[OK] Diferenca de Tile::things calculada.\n"
+                                   : "[FALHOU] Nao foi possivel comparar o snapshot de loot.\n");
+        return ok ? 0 : 2;
+    }
+
     if (mode == "attackid") {
         if (!creatureId) {
             std::cout << "[ERRO] Uso: CromePipeTest_x64.exe attackid <creatureId> [PID]\n";
