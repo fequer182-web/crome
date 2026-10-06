@@ -9104,6 +9104,7 @@ int V33ExpectedArgs(const std::string& token) {
     if(token=="move") return 3;
     if(token=="useWith") return 2;
     if(token=="talkChannel") return 3;
+    if(token=="attack") return 2;
     return 1;
 }
 
