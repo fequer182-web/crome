@@ -62,6 +62,12 @@ struct Profile {
     std::size_t creatureNameOffset{};
     std::size_t creatureHpPercentOffset{};
     std::uintptr_t monsterVtableRva{};
+    std::uintptr_t tileVtableRva{};
+    std::size_t tileThingsOffset{};
+    std::size_t tileThingsEndOffset{};
+    std::size_t tileThingsCapOffset{};
+    std::size_t tileThingsElemSize{};
+    bool tileThingsRuntimeConfirmed{};
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
     bool attackCancelFalseConfirmed{};
@@ -246,6 +252,25 @@ Profile loadProfile(const std::string& path) {
     p.maxHealth = readField(fields, "maxHealth");
     p.mana = readField(fields, "mana");
     p.maxMana = readField(fields, "maxMana");
+
+    const auto tileThings = readField(fields, "tileThings");
+    const auto tileThingsEnd = readField(fields, "tileThingsEnd");
+    const auto tileThingsCap = readField(fields, "tileThingsCap");
+    const auto tileThingsElem = readField(fields, "tileThingsElem");
+    const auto tileVtable = readField(fields, "tileVtableRva");
+    if (tileThings.valid && tileThingsEnd.valid && tileThingsCap.valid &&
+        tileThingsElem.valid && tileVtable.valid) {
+        p.tileThingsOffset = tileThings.offset;
+        p.tileThingsEndOffset = tileThingsEnd.offset;
+        p.tileThingsCapOffset = tileThingsCap.offset;
+        p.tileThingsElemSize = tileThingsElem.offset;
+        p.tileVtableRva = tileVtable.offset;
+        p.tileThingsRuntimeConfirmed =
+            tileThings.type.find("vector") != std::string::npos &&
+            tileThingsElem.type == "bytes" &&
+            tileVtable.type == "rva" &&
+            p.tileThingsElemSize == 4;
+    }
     if (!p.health.valid || !p.maxHealth.valid || !p.mana.valid || !p.maxMana.valid)
         throw std::runtime_error("required player fields missing");
     if (!p.expectedTimestamp || !p.expectedImageSize)
@@ -499,6 +524,220 @@ std::vector<VisibleMonster> scanVisibleMonsters(std::uint32_t maxRange = 15) {
         return a.id < b.id;
     });
     return out;
+}
+
+
+struct TileMonsterDiagnostic {
+    VisibleMonster monster;
+    std::uintptr_t tileAddress{};
+    std::uint32_t tileThingCount{};
+    bool tileContainsLocalPlayer{};
+};
+
+bool readStableTileThings(std::uintptr_t tile,
+                          std::vector<std::uintptr_t>& things,
+                          bool& containsLocalPlayer) {
+    things.clear();
+    containsLocalPlayer = false;
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed || !tile) return false;
+
+    const auto& p = *g_profile;
+    std::uintptr_t vt{};
+    if (!safeRead(tile, vt) || vt != g_base + p.tileVtableRva) return false;
+
+    std::uint32_t begin1{}, end1{}, cap1{};
+    if (!safeRead(tile + p.tileThingsOffset, begin1) ||
+        !safeRead(tile + p.tileThingsEndOffset, end1) ||
+        !safeRead(tile + p.tileThingsCapOffset, cap1))
+        return false;
+
+    if (!begin1 || end1 < begin1 || cap1 < end1 || p.tileThingsElemSize != 4)
+        return false;
+
+    const std::uint32_t bytes = end1 - begin1;
+    const std::uint32_t capBytes = cap1 - begin1;
+    if (bytes % 4 || capBytes % 4) return false;
+
+    const std::uint32_t count = bytes / 4;
+    const std::uint32_t capacity = capBytes / 4;
+    if (count > 80 || capacity < count || capacity > 160) return false;
+
+    std::uintptr_t localPlayer{};
+    const auto game = g_base + p.gameRva;
+    safeRead(game + p.localPlayerOffset, localPlayer);
+
+    things.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t raw{};
+        if (!safeRead(static_cast<std::uintptr_t>(begin1) + i * 4, raw))
+            return false;
+        const auto thing = static_cast<std::uintptr_t>(raw);
+        if (!thing) return false;
+
+        std::uintptr_t thingVtable{};
+        if (!safeRead(thing, thingVtable) ||
+            thingVtable < g_base || thingVtable >= g_base + g_imageSize)
+            return false;
+
+        if (localPlayer && thing == localPlayer) containsLocalPlayer = true;
+        things.push_back(thing);
+    }
+
+    // Tile vectors can change while creatures/items move. Require the header
+    // to remain identical for the whole snapshot; otherwise discard this Tile.
+    std::uint32_t begin2{}, end2{}, cap2{};
+    if (!safeRead(tile + p.tileThingsOffset, begin2) ||
+        !safeRead(tile + p.tileThingsEndOffset, end2) ||
+        !safeRead(tile + p.tileThingsCapOffset, cap2))
+        return false;
+
+    return begin1 == begin2 && end1 == end2 && cap1 == cap2;
+}
+
+std::vector<TileMonsterDiagnostic> scanTileMonstersReadOnly(std::uint32_t maxRange = 15) {
+    std::vector<TileMonsterDiagnostic> out;
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed) return out;
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz)) return out;
+
+    const std::uint32_t wantedTileVtable =
+        static_cast<std::uint32_t>(g_base + g_profile->tileVtableRva);
+    const std::uintptr_t wantedMonsterVtable =
+        g_base + g_profile->monsterVtableRva;
+
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    auto address = reinterpret_cast<std::uintptr_t>(si.lpMinimumApplicationAddress);
+    const auto maxAddress = reinterpret_cast<std::uintptr_t>(si.lpMaximumApplicationAddress);
+
+    constexpr SIZE_T kChunk = 1u << 20;
+    std::vector<std::uint8_t> buffer(kChunk);
+
+    while (address < maxAddress) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi))) break;
+
+        const auto regionBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        const auto regionEnd = regionBase + mbi.RegionSize;
+        if (regionEnd <= address) break;
+
+        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE &&
+            readableProtection(mbi.Protect)) {
+            for (auto chunkBase = regionBase; chunkBase < regionEnd; ) {
+                const SIZE_T want = static_cast<SIZE_T>(
+                    std::min<std::uintptr_t>(kChunk, regionEnd - chunkBase));
+                SIZE_T got{};
+                if (ReadProcessMemory(GetCurrentProcess(),
+                                      reinterpret_cast<LPCVOID>(chunkBase),
+                                      buffer.data(), want, &got) &&
+                    got >= sizeof(std::uint32_t)) {
+                    for (SIZE_T i = 0; i + sizeof(std::uint32_t) <= got; i += 4) {
+                        std::uint32_t vt{};
+                        std::memcpy(&vt, buffer.data() + i, sizeof(vt));
+                        if (vt != wantedTileVtable) continue;
+
+                        const auto tile = chunkBase + i;
+                        std::vector<std::uintptr_t> things;
+                        bool containsLocalPlayer = false;
+                        if (!readStableTileThings(tile, things, containsLocalPlayer))
+                            continue;
+
+                        for (const auto thing : things) {
+                            std::uintptr_t thingVtable{};
+                            if (!safeRead(thing, thingVtable) ||
+                                thingVtable != wantedMonsterVtable)
+                                continue;
+
+                            std::uint32_t id{}, x{}, y{};
+                            std::uint8_t z{}, hpPercent{};
+                            if (!safeRead(thing + g_profile->creatureIdOffset, id) || !id ||
+                                !safeRead(thing + g_profile->posX, x) ||
+                                !safeRead(thing + g_profile->posY, y) ||
+                                !safeRead(thing + g_profile->posZ, z) ||
+                                !safeRead(thing + g_profile->creatureHpPercentOffset, hpPercent))
+                                continue;
+
+                            if (!x || !y || z != pz || hpPercent > 100) continue;
+                            const auto name = safeReadInlineString(
+                                thing + g_profile->creatureNameOffset, 48);
+                            if (name.empty()) continue;
+
+                            const auto dx = x > px ? x - px : px - x;
+                            const auto dy = y > py ? y - py : py - y;
+                            const auto dist = std::max(dx, dy);
+                            if (dist > maxRange) continue;
+
+                            bool duplicate = false;
+                            for (const auto& existing : out) {
+                                if (existing.monster.address == thing ||
+                                    existing.monster.id == id) {
+                                    duplicate = true;
+                                    break;
+                                }
+                            }
+                            if (duplicate) continue;
+
+                            TileMonsterDiagnostic d;
+                            d.monster.address = thing;
+                            d.monster.id = id;
+                            d.monster.name = name;
+                            d.monster.hpPercent = hpPercent;
+                            d.monster.x = x;
+                            d.monster.y = y;
+                            d.monster.z = z;
+                            d.monster.distance = dist;
+                            d.tileAddress = tile;
+                            d.tileThingCount = static_cast<std::uint32_t>(things.size());
+                            d.tileContainsLocalPlayer = containsLocalPlayer;
+                            out.push_back(std::move(d));
+                        }
+                    }
+                }
+                chunkBase += want;
+            }
+        }
+
+        address = regionEnd;
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.monster.distance != b.monster.distance)
+            return a.monster.distance < b.monster.distance;
+        return a.monster.id < b.monster.id;
+    });
+    return out;
+}
+
+std::string tileMonstersResponse() {
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed)
+        return R"({"ok":false,"cmd":"GET_TILE_MONSTERS","error":"tile_contract_not_ready"})";
+
+    const auto monsters = scanTileMonstersReadOnly(15);
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"GET_TILE_MONSTERS\","
+      << "\"source\":\"Tile::things\",\"readOnly\":true,"
+      << "\"count\":" << monsters.size() << ",\"monsters\":[";
+
+    for (std::size_t i = 0; i < monsters.size() && i < 64; ++i) {
+        if (i) o << ",";
+        const auto& d = monsters[i];
+        const auto& m = d.monster;
+        o << "{\"id\":" << m.id
+          << ",\"name\":\"" << jsonEscape(m.name) << "\""
+          << ",\"hpPercent\":" << static_cast<unsigned>(m.hpPercent)
+          << ",\"x\":" << m.x
+          << ",\"y\":" << m.y
+          << ",\"z\":" << static_cast<unsigned>(m.z)
+          << ",\"distance\":" << m.distance
+          << ",\"tileThingCount\":" << d.tileThingCount
+          << ",\"tileContainsLocalPlayer\":"
+          << (d.tileContainsLocalPlayer ? "true" : "false")
+          << "}";
+    }
+    o << "]}";
+    return o.str();
 }
 
 std::uintptr_t resolveVisibleMonsterById(std::uint32_t id) {
@@ -893,7 +1132,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":9,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":10,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -928,6 +1167,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
     if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
+    if (cmd == "GET_TILE_MONSTERS") return tileMonstersResponse();
     if (cmd == "ATTACK_SELECTED") return attackSelectedResponse();
     if (cmd == "ATTACK_ID") {
         const auto id = uint32FieldFromRequest(request, "creatureId");
@@ -984,7 +1224,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V9 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V10 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
