@@ -114,10 +114,14 @@ O V37 incorpora esse layout ao classificador genérico, mantendo a validação p
 Contrato principal de actions do profile Ramonia:
 
 - `autoWalk` → `vector_direction_u32_ref`
-- `attack` / `follow` → `Creature raw_ptr`
+- `attack` → `Creature raw_ptr, bool Cancel` (`Cancel=false` confirmado para ataque real)
+- `follow` → `Creature raw_ptr`
 - `look` / `use` → `shared_object_ptr_ref`
 - `move` → `shared_object_ptr_ref<Item>, Position(u32,u32,u8), u32 count`
 - `useWith` → `shared_object_ptr_ref<Item>, shared_object_ptr_ref<Thing>`
 - `talkChannel` → `MessageMode, Channel, msvc_string_ref`
 
-O profile canônico passa a ser suficiente para a próxima camada: o Generic Action Runtime do Crome.
+O profile canônico alimenta agora a camada de runtime do Crome.
+
+A bridge x86 V5 já confirmou `Game::attack` com dano real no jogo e expõe
+`GET_VISIBLE_MONSTERS` + `ATTACK_ID`, mantendo ponteiros internos fora do IPC.
