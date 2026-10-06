@@ -236,7 +236,11 @@ int runTargetLoop(DWORD pid, const std::string& wantedName) {
                       << " hp=" << chosen->hpPercent << "%"
                       << " dist=" << chosen->distance << "\n";
             if (!requestRaw(pid, cmd, attackResponse, false)) {
-                std::cout << "[TARGET] ATTACK_ID falhou; nova tentativa no proximo ciclo.\n";
+                if (attackResponse.find("\"creature_id_not_visible\"") != std::string::npos) {
+                    std::cout << "[TARGET] Alvo sumiu/morreu antes do ataque; procurando o proximo.\n";
+                } else {
+                    std::cout << "[TARGET] ATTACK_ID falhou; nova tentativa no proximo ciclo.\n";
+                }
             }
         } else if (chosen->id != lastTargetId || chosen->hpPercent != lastHp) {
             std::cout << "[TARGET] " << chosen->name
