@@ -32,10 +32,14 @@ std::uint32_t g_imageSize{};
 bool g_buildMatched{false};
 
 HWND g_gameWindow{};
-WNDPROC g_originalWndProc{};
+DWORD g_gameThreadId{};
+HHOOK g_gameThreadHook{};
+HANDLE g_actionEvent{};
 constexpr UINT kAttackSelectedMessage = WM_APP + 0x620;
 
 volatile LONG g_lastActionCode{};
+volatile LONG g_actionTokenCounter{};
+volatile LONG g_pendingActionToken{};
 std::uint32_t g_lastActionTargetId{};
 std::uintptr_t g_pendingAttackTarget{};
 std::uint32_t g_pendingAttackRequestedId{};
@@ -586,35 +590,103 @@ bool executeAttackSelectedOnGameThread() {
     return false;
 }
 
-LRESULT CALLBACK bridgeWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == kAttackSelectedMessage) {
-        return executeAttackSelectedOnGameThread() ? 1 : 0;
+LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code >= 0 && lParam) {
+        auto* msg = reinterpret_cast<MSG*>(lParam);
+        if (msg->message == kAttackSelectedMessage) {
+            const LONG token = static_cast<LONG>(msg->wParam);
+            const LONG expected = InterlockedCompareExchange(&g_pendingActionToken, 0, 0);
+            if (token != 0 && token == expected) {
+                executeAttackSelectedOnGameThread();
+                if (g_actionEvent) SetEvent(g_actionEvent);
+            }
+        }
     }
-    return g_originalWndProc
-        ? CallWindowProc(g_originalWndProc, hwnd, message, wParam, lParam)
-        : DefWindowProc(hwnd, message, wParam, lParam);
+    return CallNextHookEx(g_gameThreadHook, code, wParam, lParam);
+}
+
+bool dispatcherReady() {
+    return g_gameWindow && g_gameThreadId && g_gameThreadHook && g_actionEvent;
 }
 
 bool installGameThreadDispatcher() {
-    if (g_gameWindow && g_originalWndProc) return true;
+    if (dispatcherReady()) return true;
+
     g_gameWindow = findCurrentProcessWindow();
     if (!g_gameWindow) {
         logLine("[DISPATCH] main game window not found");
         return false;
     }
 
-    SetLastError(0);
-    const LONG_PTR previous = SetWindowLongPtr(
-        g_gameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&bridgeWndProc));
-    if (!previous) {
-        const auto error = GetLastError();
-        logLine("[DISPATCH] SetWindowLongPtr failed Win32=" + std::to_string(error));
+    g_gameThreadId = GetWindowThreadProcessId(g_gameWindow, nullptr);
+    if (!g_gameThreadId) {
+        logLine("[DISPATCH] game window thread id unavailable");
         g_gameWindow = nullptr;
         return false;
     }
 
-    g_originalWndProc = reinterpret_cast<WNDPROC>(previous);
-    logLine("[DISPATCH] game-thread dispatcher installed");
+    g_actionEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_actionEvent) {
+        logLine("[DISPATCH] CreateEvent failed Win32=" + std::to_string(GetLastError()));
+        g_gameThreadId = 0;
+        g_gameWindow = nullptr;
+        return false;
+    }
+
+    SetLastError(0);
+    g_gameThreadHook = SetWindowsHookExW(
+        WH_GETMESSAGE,
+        &gameThreadGetMessageHook,
+        nullptr,
+        g_gameThreadId);
+    if (!g_gameThreadHook) {
+        const auto error = GetLastError();
+        logLine("[DISPATCH] SetWindowsHookEx(WH_GETMESSAGE) failed Win32=" + std::to_string(error));
+        CloseHandle(g_actionEvent);
+        g_actionEvent = nullptr;
+        g_gameThreadId = 0;
+        g_gameWindow = nullptr;
+        return false;
+    }
+
+    logLine("[DISPATCH] WH_GETMESSAGE game-thread dispatcher installed tid=" +
+            std::to_string(g_gameThreadId));
+    return true;
+}
+
+bool dispatchAttackToGameThread(DWORD& win32Error) {
+    win32Error = ERROR_SUCCESS;
+    if (!dispatcherReady()) {
+        win32Error = ERROR_INVALID_HANDLE;
+        return false;
+    }
+
+    ResetEvent(g_actionEvent);
+    InterlockedExchange(&g_lastActionCode, 0);
+
+    LONG token = InterlockedIncrement(&g_actionTokenCounter);
+    if (token == 0) token = InterlockedIncrement(&g_actionTokenCounter);
+    InterlockedExchange(&g_pendingActionToken, token);
+
+    SetLastError(0);
+    if (!PostThreadMessageW(
+            g_gameThreadId,
+            kAttackSelectedMessage,
+            static_cast<WPARAM>(static_cast<ULONG_PTR>(token)),
+            0)) {
+        win32Error = GetLastError();
+        InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+        return false;
+    }
+
+    const DWORD wait = WaitForSingleObject(g_actionEvent, 3000);
+    if (wait != WAIT_OBJECT_0) {
+        win32Error = (wait == WAIT_TIMEOUT) ? ERROR_TIMEOUT : GetLastError();
+        InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+        return false;
+    }
+
+    InterlockedCompareExchange(&g_pendingActionToken, 0, token);
     return true;
 }
 
@@ -758,30 +830,20 @@ std::string visibleMonstersResponse() {
 std::string attackIdResponse(std::uint32_t creatureId) {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"build_not_validated"})";
-    if (!g_gameWindow || !g_originalWndProc)
+    if (!dispatcherReady())
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"dispatcher_not_ready"})";
 
-    InterlockedExchange(&g_lastActionCode, 0);
     g_lastActionTargetId = 0;
     g_pendingAttackTarget = 0;
     g_pendingAttackRequestedId = creatureId;
 
-    DWORD_PTR dispatchResult{};
-    SetLastError(0);
-    const auto sent = SendMessageTimeout(
-        g_gameWindow,
-        kAttackSelectedMessage,
-        0,
-        0,
-        SMTO_ABORTIFHUNG | SMTO_BLOCK,
-        3000,
-        &dispatchResult);
-    const auto win32 = GetLastError();
+    DWORD win32{};
+    const bool dispatched = dispatchAttackToGameThread(win32);
 
     g_pendingAttackTarget = 0;
     g_pendingAttackRequestedId = 0;
 
-    if (!sent) {
+    if (!dispatched) {
         InterlockedExchange(&g_lastActionCode, 8);
         std::ostringstream o;
         o << "{\"ok\":false,\"cmd\":\"ATTACK_ID\",\"error\":\"dispatcher_timeout\","
@@ -795,36 +857,26 @@ std::string attackIdResponse(std::uint32_t creatureId) {
       << ",\"cmd\":\"ATTACK_ID\",\"result\":\"" << actionCodeText(code)
       << "\",\"requestedId\":" << creatureId
       << ",\"targetId\":" << g_lastActionTargetId
-      << ",\"gameThreadResult\":" << static_cast<unsigned long long>(dispatchResult) << "}";
+      << ",\"gameThreadResult\":" << (code == 1 ? 1 : 0) << "}";
     return o.str();
 }
-
 std::string attackSelectedResponse() {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"build_not_validated"})";
-
-    if (!g_gameWindow || !g_originalWndProc)
+    if (!dispatcherReady())
         return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"dispatcher_not_ready"})";
 
-    InterlockedExchange(&g_lastActionCode, 0);
     g_lastActionTargetId = 0;
+    g_pendingAttackTarget = 0;
+    g_pendingAttackRequestedId = 0;
 
-    DWORD_PTR dispatchResult{};
-    SetLastError(0);
-    const auto sent = SendMessageTimeout(
-        g_gameWindow,
-        kAttackSelectedMessage,
-        0,
-        0,
-        SMTO_ABORTIFHUNG | SMTO_BLOCK,
-        3000,
-        &dispatchResult);
-
-    if (!sent) {
+    DWORD win32{};
+    const bool dispatched = dispatchAttackToGameThread(win32);
+    if (!dispatched) {
         InterlockedExchange(&g_lastActionCode, 8);
         std::ostringstream o;
         o << "{\"ok\":false,\"cmd\":\"ATTACK_SELECTED\","
-          << "\"error\":\"dispatcher_timeout\",\"win32\":" << GetLastError() << "}";
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
         return o.str();
     }
 
@@ -833,21 +885,20 @@ std::string attackSelectedResponse() {
     o << "{\"ok\":" << (code == 1 ? "true" : "false")
       << ",\"cmd\":\"ATTACK_SELECTED\",\"result\":\"" << actionCodeText(code)
       << "\",\"targetId\":" << g_lastActionTargetId
-      << ",\"gameThreadResult\":" << static_cast<unsigned long long>(dispatchResult) << "}";
+      << ",\"gameThreadResult\":" << (code == 1 ? 1 : 0) << "}";
     return o.str();
 }
-
 std::string handleRequest(const std::string& request) {
     const auto cmd = commandFromRequest(request);
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":8,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":9,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
           << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
-          << ",\"dispatcherReady\":" << ((g_gameWindow && g_originalWndProc) ? "true" : "false");
+          << ",\"dispatcherReady\":" << (dispatcherReady() ? "true" : "false");
         if (!g_profileError.empty())
             o << ",\"profileError\":\"" << jsonEscape(g_profileError) << "\"";
         o << "}";
@@ -933,7 +984,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V8 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V9 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -1006,6 +1057,17 @@ DWORD WINAPI bridgeThread(LPVOID) {
         logLine("[FATAL] unknown exception");
         writeStatusFile();
     }
+
+    if (g_gameThreadHook) {
+        UnhookWindowsHookEx(g_gameThreadHook);
+        g_gameThreadHook = nullptr;
+    }
+    if (g_actionEvent) {
+        CloseHandle(g_actionEvent);
+        g_actionEvent = nullptr;
+    }
+    g_gameThreadId = 0;
+    g_gameWindow = nullptr;
     return 0;
 }
 
