@@ -115,3 +115,8 @@ Bridge V5 was validated end-to-end on the live Ramonia client:
 This closes the first semantic Crome action path without raw pointers crossing IPC:
 
 `Crome x64 -> creatureId -> pipe -> x86 resolver -> Game::attack(Creature*, false)`.
+
+
+## Automatic target loop
+
+The x64 pipe test now contains the first external target-policy loop. It polls semantic monster snapshots, keeps the current matching target while alive, selects the nearest matching monster when needed, and invokes `ATTACK_ID`. This keeps target policy in the external Crome layer while the x86 bridge remains an ABI/runtime adapter.
