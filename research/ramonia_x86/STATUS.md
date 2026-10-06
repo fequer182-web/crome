@@ -167,3 +167,12 @@ The next crash-isolation step does not modify Target behavior. V10 adds GET_TILE
 It scans exact Tile-vtable objects, validates the runtime-confirmed Tile::things vector (+0x24/+0x28/+0x2C, elem 4), requires a stable vector header during the snapshot, and reports only same-floor nearby Monster objects that are actual members of a Tile::things collection.
 
 No attack/follow/internal call is performed by this diagnostic. The existing GET_VISIBLE_MONSTERS heap scanner and ATTACK_ID path remain unchanged until this Tile-membership proof is validated live.
+
+
+## Bridge V11 cached Tile Target resolver
+
+V10 live proof succeeded with moving/damaged creatures and multiple same-name Spiders. V11 promotes Tile::things from diagnostic-only to the Target resolver.
+
+GET_VISIBLE_MONSTERS now reads Monsters only as members of cached Tile::things. ATTACK_ID prevalidates the semantic ID against Tile membership on the pipe thread and then resolves the ID again from current Tile::things on the game thread before Game::attack.
+
+The previous broad Monster heap scanner is no longer on the Target/ATTACK_ID execution path. Broad memory scanning remains only as an occasional Tile-address discovery step and is not executed on the game thread.
