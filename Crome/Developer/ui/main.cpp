@@ -16,6 +16,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <cctype>
+#include <cwctype>
 #include <optional>
 #include <thread>
 #include <mutex>
@@ -801,7 +802,7 @@ static void DrawHealing(const Theme& t) {
     static bool lifeFluidEnabled = false;
     static int lifeFluidHp = 50;
     static int lifeFluidId = 0;
-    static std::uint64_t seenProfileLoadGeneration=0;
+    static std::uint64_t seenProfileLoadGeneration=~0ull;
     if(seenProfileLoadGeneration!=g_profileLoadGeneration){
         seenProfileLoadGeneration=g_profileLoadGeneration;
         nlohmann::json hj;
@@ -1025,6 +1026,7 @@ static void DrawCavebot(const Theme& t) {
         }
     } else if(!recording) recordInitialized=false;
 
+    const bool targetRuntimeReady = TargetRuntimeReady();
     CardBegin("cave","Cavebot",CardIcon::Pin,ImVec4(0.12f,0.62f,1.0f,1),245,t);
     if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
     ImGui::Checkbox("Enabled",&enabled);
@@ -1032,7 +1034,13 @@ static void DrawCavebot(const Theme& t) {
     ImGui::SameLine(); ImGui::TextColored(t.blue,"Waypoints");
     ImGui::SameLine(210); if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("Walker IDs");
     ImGui::SameLine(255); ImGui::TextColored(recording?t.green:t.muted,recording?"REC ON":"REC OFF");
-    if(!g_nativeRuntimeLoaded){ ImGui::SameLine(315); ImGui::TextColored(ImVec4(1.0f,0.55f,0.25f,1),"WAITING RUNTIME"); enabled=false; targeting=false; }
+    if(!g_nativeRuntimeLoaded){
+        enabled=false;
+        ImGui::SameLine(315);
+        if(g_ramoniaBridgeReady.load()) ImGui::TextColored(t.green,"RAMONIA READY");
+        else ImGui::TextColored(ImVec4(1.0f,0.55f,0.25f,1),"WAITING RUNTIME");
+        if(!targetRuntimeReady) targeting=false;
+    }
 
     ImVec2 listSize(ImGui::GetContentRegionAvail().x-100,92);
     ImGui::BeginChild("##wps",listSize,ImGuiChildFlags_Borders);
@@ -1096,17 +1104,27 @@ static void DrawCavebot(const Theme& t) {
     ImGui::TextUnformatted("Profile:"); ImGui::SameLine(); ImGui::TextDisabled("salva toda a configuracao, inclusive Cavebot/Loot/Tools");
     ImGui::SameLine(); if(ImGui::SmallButton("Save Profile...")) { std::filesystem::path p; if(PickProfilePath(true,p)) SaveCromeProfileBundle(p); }
     ImGui::SameLine(); if(ImGui::SmallButton("Load Profile...")) { std::filesystem::path p; if(PickProfilePath(false,p) && LoadCromeProfileBundle(p)) g_walkerIds.loaded=false; }
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
-    ImGui::Checkbox("Targeting",&targeting);ImGui::SameLine(140);ImGui::TextUnformatted("HP Range:");ImGui::SameLine();SmallInt("##hpmin",&hpMin,44);ImGui::SameLine();ImGui::TextUnformatted("-");ImGui::SameLine();SmallInt("##hpmax",&hpMax,44);
-    ImGui::TextUnformatted("Monsters:");ImGui::SameLine();ImGui::SetNextItemWidth(-1);ImGui::InputText("##monsters",monsters,sizeof(monsters));
-    ImGui::Checkbox("Keep Follow",&keep);ImGui::SameLine(120);ImGui::Checkbox("Attack Any Monster",&attackAny);ImGui::SameLine(285);ImGui::TextUnformatted("Range:");ImGui::SameLine();SmallInt("##range",&range,44);
-    if(keep) ImGui::TextDisabled("Follow/chase pode disputar movimento com o Cavebot; use apenas quando quiser perseguir o alvo.");
+    if(!targetRuntimeReady) ImGui::BeginDisabled();
+    ImGui::Checkbox("Ativar Target",&targeting);ImGui::SameLine(140);ImGui::TextUnformatted("HP Range:");ImGui::SameLine();SmallInt("##hpmin",&hpMin,44);ImGui::SameLine();ImGui::TextUnformatted("-");ImGui::SameLine();SmallInt("##hpmax",&hpMax,44);
+    ImGui::TextUnformatted("Alvos:");ImGui::SameLine();ImGui::SetNextItemWidth(-1);ImGui::InputText("##monsters",monsters,sizeof(monsters));
+    ImGui::Checkbox("Keep Follow",&keep);ImGui::SameLine(120);ImGui::Checkbox("Attack Any (*)",&attackAny);ImGui::SameLine(285);ImGui::TextUnformatted("Range:");ImGui::SameLine();SmallInt("##range",&range,44);
+    if(keep && g_nativeRuntimeLoaded) ImGui::TextDisabled("Follow/chase pode disputar movimento com o Cavebot.");
     ImGui::Checkbox("Should Attack Me",&shouldAttack);ImGui::SameLine(160);ImGui::TextUnformatted("Mode:");ImGui::SameLine();ImGui::SetNextItemWidth(120);ImGui::Combo("##targetmode",&mode,modes,IM_ARRAYSIZE(modes));
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
-    if(!attackAny&&monsters[0]=='\0')ImGui::TextDisabled("Targeting: informe os monstros, ex.: rat, rotworm");
+    if(!targetRuntimeReady) ImGui::EndDisabled();
+    if(!attackAny&&monsters[0]=='\0')ImGui::TextDisabled("Target: informe os monstros, ex.: Rat, Wolf ou *");
 
-    nlohmann::json tcfg={{"enabled",g_nativeRuntimeLoaded&&targeting},{"poll_ms",300},{"attack_any_monster",attackAny},{"pause_walker",true},{"chase_enabled",keep},{"chase_distance",1},{"chase_scan_range",15},{"chase_interval_ms",350},{"hp_min",hpMin},{"hp_max",hpMax},{"max_range",range},{"chase_repath_ms",900},{"chase_force_refresh_ms",1800},{"manual_input_pause_ms",1500},{"targets",nlohmann::json::array()}};
-    int pr=0;for(const auto&name:SplitCsv(monsters))tcfg["targets"].push_back({{"name",name},{"priority",pr++}});WriteJsonIfChanged("targeting.json",tcfg);
+    nlohmann::json tcfg={{"enabled",targetRuntimeReady&&targeting},{"poll_ms",300},{"attack_any_monster",attackAny},{"pause_walker",true},{"chase_enabled",keep},{"chase_distance",1},{"chase_scan_range",15},{"chase_interval_ms",350},{"hp_min",hpMin},{"hp_max",hpMax},{"max_range",range},{"chase_repath_ms",900},{"chase_force_refresh_ms",1800},{"manual_input_pause_ms",1500},{"targets",nlohmann::json::array()}};
+    const auto targetNames=SplitCsv(monsters);
+    int pr=0;for(const auto&name:targetNames)tcfg["targets"].push_back({{"name",name},{"priority",pr++}});WriteJsonIfChanged("targeting.json",tcfg);
+
+    RamoniaTargetConfigUi ramCfg;
+    ramCfg.enabled=targeting;
+    ramCfg.attackAny=attackAny;
+    ramCfg.hpMin=std::clamp(hpMin,0,100);
+    ramCfg.hpMax=std::clamp(hpMax,0,100);
+    ramCfg.maxRange=std::max(0,range);
+    ramCfg.names=targetNames;
+    SetRamoniaTargetConfig(ramCfg);
 
     nlohmann::json rcfg={{"enabled",g_nativeRuntimeLoaded&&enabled},{"loop",true},{"reach_distance",0},{"timeout_ms",15000},{"stuck_ms",3500},{"retry_delay_ms",650},{"max_retries",2},{"action_wait_ms",450},{"tool_ids",{{"rope",CatalogFirst("rope",3003)},{"shovel",CatalogFirst("shovel",3457)},{"fishing_rod",CatalogFirst("fishingRod",3483)}}},{"waypoints",nlohmann::json::array()}};
     for(const auto&line:wps){int x=0,y=0,z=0,item=0,ms=0;if(std::sscanf(line.c_str(),"Walk %d, %d, %d",&x,&y,&z)==3||std::sscanf(line.c_str(),"Stand %d, %d, %d",&x,&y,&z)==3||std::sscanf(line.c_str(),"FloorChange %d, %d, %d",&x,&y,&z)==3)rcfg["waypoints"].push_back({{"type","walk"},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Wait %d ms",&ms)==1)rcfg["waypoints"].push_back({{"type","wait"},{"ms",ms}});else if(line.rfind("Say ",0)==0)rcfg["waypoints"].push_back({{"type","say"},{"text",line.substr(4)}});else if(std::sscanf(line.c_str(),"Use %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","use"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Rope %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","rope"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Shovel %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","shovel"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Ladder %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","ladder"},{"item_id",item},{"x",x},{"y",y},{"z",z},{"after_ms",500}});else if(std::sscanf(line.c_str(),"Hole %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","use_with_ground"},{"item_id",item},{"x",x},{"y",y},{"z",z}});}
