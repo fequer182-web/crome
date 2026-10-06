@@ -1895,6 +1895,7 @@ bool dispatchPendingActionToGameThread(DWORD& win32Error) {
     if (wait != WAIT_OBJECT_0) {
         win32Error = (wait == WAIT_TIMEOUT) ? ERROR_TIMEOUT : GetLastError();
         InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+        InterlockedExchange(&g_pendingActionKind, PendingNone);
         cleanupOnDemandDispatcher();
         return false;
     }
