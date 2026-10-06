@@ -636,6 +636,76 @@ std::string combatTargetsResponse(const Profile& p) {
     return o.str();
 }
 
+std::string visibleMonstersResponse() {
+    const auto monsters = scanVisibleMonsters();
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"GET_VISIBLE_MONSTERS\",\"count\":" << monsters.size()
+      << ",\"monsters\":[";
+    for (std::size_t i = 0; i < monsters.size() && i < 32; ++i) {
+        if (i) o << ",";
+        const auto& m = monsters[i];
+        o << "{\"id\":" << m.id
+          << ",\"x\":" << m.x
+          << ",\"y\":" << m.y
+          << ",\"z\":" << static_cast<unsigned>(m.z)
+          << ",\"distance\":" << m.distance << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+std::string attackIdResponse(std::uint32_t creatureId) {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"ATTACK_ID","error":"build_not_validated"})";
+    if (!g_gameWindow || !g_originalWndProc)
+        return R"({"ok":false,"cmd":"ATTACK_ID","error":"dispatcher_not_ready"})";
+
+    const auto target = resolveVisibleMonsterById(creatureId);
+    if (!target) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"ATTACK_ID\",\"error\":\"creature_id_not_visible\","
+          << "\"creatureId\":" << creatureId << "}";
+        return o.str();
+    }
+
+    InterlockedExchange(&g_lastActionCode, 0);
+    g_lastActionTargetId = 0;
+    g_pendingAttackTarget = target;
+    g_pendingAttackRequestedId = creatureId;
+
+    DWORD_PTR dispatchResult{};
+    SetLastError(0);
+    const auto sent = SendMessageTimeout(
+        g_gameWindow,
+        kAttackSelectedMessage,
+        0,
+        0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        3000,
+        &dispatchResult);
+    const auto win32 = GetLastError();
+
+    g_pendingAttackTarget = 0;
+    g_pendingAttackRequestedId = 0;
+
+    if (!sent) {
+        InterlockedExchange(&g_lastActionCode, 8);
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"ATTACK_ID\",\"error\":\"dispatcher_timeout\","
+          << "\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    const LONG code = InterlockedCompareExchange(&g_lastActionCode, 0, 0);
+    std::ostringstream o;
+    o << "{\"ok\":" << (code == 1 ? "true" : "false")
+      << ",\"cmd\":\"ATTACK_ID\",\"result\":\"" << actionCodeText(code)
+      << "\",\"requestedId\":" << creatureId
+      << ",\"targetId\":" << g_lastActionTargetId
+      << ",\"gameThreadResult\":" << static_cast<unsigned long long>(dispatchResult) << "}";
+    return o.str();
+}
+
 std::string attackSelectedResponse() {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_SELECTED","error":"build_not_validated"})";
