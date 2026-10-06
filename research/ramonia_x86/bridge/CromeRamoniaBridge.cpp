@@ -1369,6 +1369,10 @@ std::string lootMarkResponse() {
     g_lootBaseline.monsters = monsters;
     ReleaseSRWLockExclusive(&g_lootBaselineLock);
 
+    AcquireSRWLockExclusive(&g_lootCandidateLock);
+    g_lastLootCandidates.clear();
+    ReleaseSRWLockExclusive(&g_lootCandidateLock);
+
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"LOOT_MARK\",\"readOnly\":true,"
       << "\"tileGeneration\":" << cache.generation
@@ -1419,6 +1423,22 @@ std::string lootDiffResponse() {
         }
         if (!existed) added.push_back(now);
     }
+
+    std::vector<TileItemDiagnostic> correlatedAdded;
+    for (const auto& item : added) {
+        bool hadMonster = false;
+        for (const auto& oldMonster : baseline.monsters) {
+            if (oldMonster.tileAddress == item.tileAddress) {
+                hadMonster = true;
+                break;
+            }
+        }
+        if (hadMonster) correlatedAdded.push_back(item);
+    }
+
+    AcquireSRWLockExclusive(&g_lootCandidateLock);
+    g_lastLootCandidates = correlatedAdded;
+    ReleaseSRWLockExclusive(&g_lootCandidateLock);
 
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"LOOT_DIFF\",\"readOnly\":true,"
