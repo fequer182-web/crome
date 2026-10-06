@@ -1784,6 +1784,8 @@ struct ActionAbiArgV34 {
     std::string abiType;
     std::string status;
     std::string rtti;
+    bool hasObservedBool = false;
+    bool observedBool = false;
 };
 
 struct ActionAbiV34 {
@@ -4538,6 +4540,8 @@ std::string SaveJson(const Report& r) {
               << "\",\"abiType\":\"" << JsonEscape(arg.abiType)
               << "\",\"status\":\"" << JsonEscape(arg.status) << "\"";
             if (!arg.rtti.empty()) o << ",\"rtti\":\"" << JsonEscape(arg.rtti) << "\"";
+            if (arg.hasObservedBool)
+                o << ",\"observedRequiredValue\":" << (arg.observedBool?"true":"false");
             o << "}";
         }
         o << "]\n"
@@ -8942,6 +8946,8 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
         out.semantic="Cancel";
         out.abiType="bool";
         out.status="runtime_confirmed";
+        out.hasObservedBool=true;
+        out.observedBool=(raw!=0);
         return out;
     }
 
