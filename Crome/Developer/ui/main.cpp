@@ -296,9 +296,16 @@ static void RamoniaTargetWorker() {
 
         if (target->id != currentAttackId) {
             nlohmann::json attackResponse;
-            if (!RamoniaPipeRequest(pid, {{"cmd","ATTACK_ID"},{"creatureId",target->id}}, attackResponse) ||
-                !attackResponse.value("ok",false)) {
-                if (attackResponse.value("error",std::string()) == "creature_id_not_visible") {
+            const bool transportOk =
+                RamoniaPipeRequest(pid, {{"cmd","ATTACK_ID"},{"creatureId",target->id}}, attackResponse);
+            const bool actionOk =
+                transportOk && attackResponse.is_object() && attackResponse.value("ok",false);
+            if (!actionOk) {
+                const std::string error =
+                    (transportOk && attackResponse.is_object())
+                        ? attackResponse.value("error",std::string())
+                        : std::string();
+                if (error == "creature_id_not_visible") {
                     SetRamoniaStatus("Alvo sumiu - procurando proximo");
                 } else {
                     SetRamoniaStatus("ATTACK_ID pendente - nova tentativa");
