@@ -208,10 +208,20 @@ static bool RamoniaNameMatches(const RamoniaMonsterUi& m, const RamoniaTargetCon
     const auto monsterName = LowerAscii(m.name);
     for (std::size_t i=0; i<cfg.names.size(); ++i) {
         const auto rule = LowerAscii(cfg.names[i]);
+        if (rule.empty()) continue;
         if (rule == "*" || rule == monsterName) {
             priority = static_cast<int>(i);
             return true;
         }
+    }
+    return false;
+}
+
+static bool HasRamoniaTargetPolicy(const RamoniaTargetConfigUi& cfg) {
+    if (cfg.attackAny) return true;
+    for (const auto& raw : cfg.names) {
+        const auto name = LowerAscii(raw);
+        if (!name.empty()) return true;
     }
     return false;
 }
@@ -272,6 +282,15 @@ static void RamoniaTargetWorker() {
         const auto cfg = GetRamoniaTargetConfig();
         if (!cfg.enabled) {
             SetRamoniaStatus("Ramonia Bridge V9 pronta");
+            Sleep(300);
+            continue;
+        }
+
+        // Target enabled without a target policy must be a true idle state.
+        // Do not run the provisional monster heap scan when there is nothing
+        // the user actually asked us to attack.
+        if (!HasRamoniaTargetPolicy(cfg)) {
+            SetRamoniaStatus("Target ativo - informe um alvo ou marque Any");
             Sleep(300);
             continue;
         }
@@ -1333,7 +1352,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.0 Ramonia Target");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.1 Ramonia Target");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
