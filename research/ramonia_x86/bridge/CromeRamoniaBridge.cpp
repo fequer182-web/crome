@@ -1785,9 +1785,9 @@ bool executeMoveOnGameThread() {
         return false;
     }
 
-    // OTClient container position convention. The ABI layout itself
-    // (u32,u32,u8 ref) is runtime-confirmed for this build. The semantic
-    // container encoding is deliberately kept isolated in this experiment.
+    // OTClient container position convention. Live V15 validation confirmed
+    // that x=0xFFFF, y=0x40|containerId, z=slot moves the requested stack
+    // into the open destination container on this Ramonia build.
     MovePosition dest{};
     dest.x = 0xFFFFu;
     dest.y = 0x40u | (g_pendingMoveTargetContainerId & 0xFFu);
@@ -2315,7 +2315,7 @@ std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
       << ",\"count\":" << movedCount
       << ",\"destinationSlot\":" << static_cast<unsigned>(destinationSlot)
       << ",\"holderAbi\":\"shared_object_ptr_ref\""
-      << ",\"destinationEncoding\":\"otclient_container_position_experimental\"}";
+      << ",\"destinationEncoding\":\"otclient_container_position_runtime_confirmed\"}";
     return o.str();
 }
 
