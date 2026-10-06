@@ -290,9 +290,9 @@ HWND findCurrentProcessWindow() {
 }
 
 #if defined(__GNUC__)
-typedef void (__attribute__((thiscall)) *GameAttackFn)(void*, void*);
+typedef void (__attribute__((thiscall)) *GameAttackFn)(void*, void*, bool);
 #else
-typedef void (__thiscall *GameAttackFn)(void*, void*);
+typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 #endif
 
 bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
@@ -345,7 +345,11 @@ bool executeAttackSelectedOnGameThread() {
     const auto fn = reinterpret_cast<GameAttackFn>(functionAddress);
 
     logLine("[ACTION] ATTACK_SELECTED game-thread id=" + std::to_string(id));
-    fn(reinterpret_cast<void*>(game), reinterpret_cast<void*>(target));
+    // V4 ABI experiment: V37 captured Creature* as arg1, but the
+    // original probe only inspected one attack argument. OTC-family Game::attack
+    // commonly has a trailing bool cancel; false is the path that transmits the
+    // attack rather than only updating local target state.
+    fn(reinterpret_cast<void*>(game), reinterpret_cast<void*>(target), false);
 
     std::uintptr_t after{};
     safeRead(game + p.attackTargetOffset, after);
@@ -535,7 +539,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":3,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":4,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
