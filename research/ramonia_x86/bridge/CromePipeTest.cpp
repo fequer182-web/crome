@@ -266,6 +266,9 @@ int main(int argc, char** argv) {
     std::uint32_t sourceContainerId = 0;
     std::uint32_t targetContainerId = 0;
     std::uint32_t moveItemId = 2148;
+    std::uint32_t useContainerItemId = 2696;
+    std::uint32_t useContainerId = 0;
+    bool useContainerProvided = false;
     bool sourceContainerProvided = false;
     bool targetContainerProvided = false;
 
@@ -306,6 +309,26 @@ int main(int argc, char** argv) {
         }
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "useitem" || mode == "usefood") {
+        if (argc >= 3) {
+            std::string containerArg = argv[2];
+            for (auto& c : containerArg)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (containerArg != "any" && containerArg != "*") {
+                try {
+                    useContainerId = static_cast<std::uint32_t>(std::stoul(containerArg));
+                    useContainerProvided = true;
+                } catch (...) {}
+            }
+        }
+        if (argc >= 4) {
+            try { useContainerItemId = static_cast<std::uint32_t>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+        if (argc >= 5) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[4])); }
             catch (...) {}
         }
     } else if (mode == "movegold" || mode == "moveitem") {
@@ -409,6 +432,26 @@ int main(int argc, char** argv) {
         ok &= request(pid, cmd);
         std::cout << "\n" << (ok ? "[OK] Game::use foi chamado no holder do Item. Confira se o corpse abriu.\n"
                                    : "[FALHOU] USE_LOOT_ITEM nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "useitem" || mode == "usefood") {
+        if (!useContainerItemId || useContainerItemId > 0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe usefood <containerId|any> [itemId=2696] [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[USE_CONTAINER_ITEM - EXPERIMENTAL]\n";
+        std::string cmd = "{\"cmd\":\"USE_CONTAINER_ITEM\",\"itemId\":" +
+                          std::to_string(useContainerItemId);
+        if (useContainerProvided)
+            cmd += ",\"sourceContainerId\":" + std::to_string(useContainerId);
+        cmd += "}";
+
+        ok &= request(pid, cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] Game::use foi chamado no item do container. Confira se o food foi consumido.\n"
+            : "[FALHOU] USE_CONTAINER_ITEM nao foi confirmado.\n");
         return ok ? 0 : 2;
     }
 
