@@ -201,3 +201,10 @@ V13 correlated Rat/Cave Rat disappearance with new Item 2813 on the exact death 
 Game::use and Game::move use their V37 runtime-confirmed shared_object_ptr_ref contracts. The bridge passes addresses of the actual 4-byte Tile::things / Container::items holder elements rather than raw Item pointers. The V12 on-demand WH_GETMESSAGE lifetime remains unchanged.
 
 GET_OPEN_CONTAINERS reads the exact Container RTTI graph rooted at the runtime-confirmed Game+0x10 inline registry. MOVE_CONTAINER_ITEM is prepared for gold 2148 -> an already-open Bag. Its special container Position encoding is explicitly experimental pending this live test.
+
+
+## V15 loot snapshot correction
+
+Live V14 evidence showed Container registry decoding is correct (container id/name/capacity/items and gold 2148 were read successfully). The active use call was not reached because the corpse candidate filter required the new Item to appear on the exact Tile occupied by the monster at LOOT_MARK. In the observed run the Rat moved before death, so corpse candidate 2813 appeared on a different Tile.
+
+V15 stores the exact Tile cache address list at LOOT_MARK and rereads that frozen Tile set at LOOT_DIFF. It no longer rejects the diff merely because the global Target cache generation changed. When at least one tracked monster disappears, newly-added Items in the marked snapshot are retained as death-window candidates; USE_LOOT_ITEM still revalidates the requested Item ID and exact holder on the game thread before calling Game::use.
