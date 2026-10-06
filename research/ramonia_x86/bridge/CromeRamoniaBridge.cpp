@@ -54,6 +54,8 @@ std::uintptr_t g_pendingAttackTarget{};
 std::uint32_t g_pendingAttackRequestedId{};
 
 std::uintptr_t g_pendingUseTile{};
+std::uintptr_t g_pendingUseContainer{};
+std::uint32_t g_pendingUseContainerId{};
 std::uintptr_t g_pendingUseHolder{};
 std::uintptr_t g_pendingUseItem{};
 std::uint16_t g_pendingUseItemId{};
@@ -1694,14 +1696,41 @@ bool executeUseOnGameThread() {
     }
 
     std::uintptr_t holder{}, item{};
-    if (!resolveTileItemHolder(g_pendingUseTile,
-                               g_pendingUseItemId,
-                               g_pendingUseItem,
-                               holder,
-                               item) ||
-        !holder || !item) {
-        InterlockedExchange(&g_lastActionCode, 11);
-        return false;
+
+    if (g_pendingUseContainer) {
+        ContainerSnapshot source;
+        if (!readContainerSnapshot(g_pendingUseContainer, source) ||
+            source.id != g_pendingUseContainerId) {
+            InterlockedExchange(&g_lastActionCode, 21);
+            return false;
+        }
+
+        const ContainerItemSlot* sourceSlot = nullptr;
+        for (const auto& slot : source.items) {
+            if (slot.holderAddress == g_pendingUseHolder &&
+                slot.itemAddress == g_pendingUseItem &&
+                slot.id == g_pendingUseItemId) {
+                sourceSlot = &slot;
+                break;
+            }
+        }
+        if (!sourceSlot) {
+            InterlockedExchange(&g_lastActionCode, 21);
+            return false;
+        }
+
+        holder = sourceSlot->holderAddress;
+        item = sourceSlot->itemAddress;
+    } else {
+        if (!resolveTileItemHolder(g_pendingUseTile,
+                                   g_pendingUseItemId,
+                                   g_pendingUseItem,
+                                   holder,
+                                   item) ||
+            !holder || !item) {
+            InterlockedExchange(&g_lastActionCode, 11);
+            return false;
+        }
     }
 
     if (holder != g_pendingUseHolder || item != g_pendingUseItem) {
@@ -1983,6 +2012,7 @@ std::string actionCodeText(LONG code) {
         case 18: return "move_contract_not_ready";
         case 19: return "move_target_full";
         case 20: return "loot_candidate_missing";
+        case 21: return "container_item_not_visible";
         default: return "unknown_action_result";
     }
 }
@@ -2189,6 +2219,8 @@ std::string useLootItemResponse(std::uint16_t itemId) {
     const auto before = scanOpenContainers();
 
     g_pendingUseTile = chosen->tileAddress;
+    g_pendingUseContainer = 0;
+    g_pendingUseContainerId = 0;
     g_pendingUseHolder = holder;
     g_pendingUseItem = item;
     g_pendingUseItemId = itemId;
@@ -2199,6 +2231,8 @@ std::string useLootItemResponse(std::uint16_t itemId) {
     const LONG code = InterlockedCompareExchange(&g_lastActionCode, 0, 0);
 
     g_pendingUseTile = 0;
+    g_pendingUseContainer = 0;
+    g_pendingUseContainerId = 0;
     g_pendingUseHolder = 0;
     g_pendingUseItem = 0;
     g_pendingUseItemId = 0;
@@ -2222,6 +2256,90 @@ std::string useLootItemResponse(std::uint16_t itemId) {
       << ",\"openContainersBefore\":" << before.size()
       << ",\"openContainersAfter\":" << after.size()
       << ",\"holderAbi\":\"shared_object_ptr_ref\"}";
+    return o.str();
+}
+
+std::string useContainerItemResponse(
+    const std::optional<std::uint32_t>& sourceContainerId,
+    std::uint16_t itemId) {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM","error":"build_not_validated"})";
+    if (!g_profile->useRuntimeConfirmed ||
+        !g_profile->useItemSharedRefConfirmed ||
+        !g_profile->itemContractReady ||
+        !g_profile->containerContractReady)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM","error":"use_contract_not_ready"})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM","error":"dispatcher_not_ready"})";
+
+    const auto containers = scanOpenContainers();
+
+    const ContainerSnapshot* source = nullptr;
+    const ContainerItemSlot* sourceSlot = nullptr;
+    bool requestedContainerOpen = !sourceContainerId.has_value();
+
+    for (const auto& container : containers) {
+        if (sourceContainerId && container.id != *sourceContainerId)
+            continue;
+
+        if (sourceContainerId && container.id == *sourceContainerId)
+            requestedContainerOpen = true;
+
+        for (const auto& slot : container.items) {
+            if (slot.id == itemId) {
+                source = &container;
+                sourceSlot = &slot;
+                break;
+            }
+        }
+        if (sourceSlot) break;
+    }
+
+    if (!requestedContainerOpen)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM","error":"source_container_not_open"})";
+    if (!source || !sourceSlot)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM","error":"item_not_found_in_open_containers"})";
+
+    g_pendingUseTile = 0;
+    g_pendingUseContainer = source->address;
+    g_pendingUseContainerId = source->id;
+    g_pendingUseHolder = sourceSlot->holderAddress;
+    g_pendingUseItem = sourceSlot->itemAddress;
+    g_pendingUseItemId = sourceSlot->id;
+    InterlockedExchange(&g_pendingActionKind, PendingUse);
+
+    DWORD win32{};
+    const bool dispatched = dispatchPendingActionToGameThread(win32);
+    const LONG code = InterlockedCompareExchange(&g_lastActionCode, 0, 0);
+
+    const auto usedContainerId = source->id;
+    const auto usedSlot = sourceSlot->index;
+    const auto usedCount = sourceSlot->count;
+
+    g_pendingUseTile = 0;
+    g_pendingUseContainer = 0;
+    g_pendingUseContainerId = 0;
+    g_pendingUseHolder = 0;
+    g_pendingUseItem = 0;
+    g_pendingUseItemId = 0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_CONTAINER_ITEM\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code == 1 ? "true" : "false")
+      << ",\"cmd\":\"USE_CONTAINER_ITEM\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"sourceContainerId\":" << usedContainerId
+      << ",\"slot\":" << usedSlot
+      << ",\"itemId\":" << itemId
+      << ",\"count\":" << usedCount
+      << ",\"holderAbi\":\"shared_object_ptr_ref\""
+      << ",\"source\":\"open_container\"}";
     return o.str();
 }
 
@@ -2440,6 +2558,19 @@ std::string handleRequest(const std::string& request) {
         if (!id || *id > 0xFFFFu)
             return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"invalid_item_id"})";
         return useLootItemResponse(static_cast<std::uint16_t>(*id));
+    }
+    if (cmd == "USE_CONTAINER_ITEM") {
+        const auto item = uint32FieldFromRequest(request, "itemId");
+        if (!item || *item > 0xFFFFu)
+            return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM","error":"invalid_item_id"})";
+
+        // sourceContainerId is optional. When omitted, search all currently
+        // open containers and use the first matching item.
+        const auto sourceId =
+            uint32FieldAllowZeroFromRequest(request, "sourceContainerId");
+
+        return useContainerItemResponse(
+            sourceId, static_cast<std::uint16_t>(*item));
     }
     if (cmd == "MOVE_CONTAINER_ITEM") {
         const auto sourceId =
