@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V10
+# Crome Ramonia Pipe Bridge V11
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -132,3 +132,21 @@ External test:
 `CromePipeTest_x64.exe tilemon [PID]`
 
 A successful response returns `source:"Tile::things"`, `readOnly:true`, and Monster ID/name/HP/position/distance plus Tile membership diagnostics.
+
+
+## V11 - cached Tile::things Target resolver
+
+Live V10 validation proved that the same Spider creature ID remained stable while HP, position and distance changed, and that two simultaneous Spiders were independently visible through Tile::things.
+
+V11 moves the real Target path onto that validated source.
+
+- GET_VISIBLE_MONSTERS no longer uses the broad Monster heap scan.
+- The bridge performs a broad scan only to discover exact Tile objects and caches their addresses.
+- Normal Target polls traverse only cached Tile::things vectors.
+- Tile vector pointer arrays are copied as one snapshot and the vector header is rechecked before any Thing is trusted.
+- ATTACK_ID first verifies the requested creature ID is currently present in Tile::things on the pipe thread.
+- The game-thread dispatcher resolves the same creature ID again from current cached Tile::things immediately before Game::attack.
+- No Monster pointer from the old broad heap scan is used by ATTACK_ID.
+- Broad Tile discovery is refreshed on cache initialization, large movement/floor change, or a long safety interval; it is never run from the game thread.
+
+GET_TILE_MONSTERS now reports source `Tile::things-cache`, cachedTiles and cacheAgeMs for diagnostics.
