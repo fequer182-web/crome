@@ -688,6 +688,8 @@ std::string visibleMonstersResponse() {
         if (i) o << ",";
         const auto& m = monsters[i];
         o << "{\"id\":" << m.id
+          << ",\"name\":\"" << jsonEscape(m.name) << "\""
+          << ",\"hpPercent\":" << static_cast<unsigned>(m.hpPercent)
           << ",\"x\":" << m.x
           << ",\"y\":" << m.y
           << ",\"z\":" << static_cast<unsigned>(m.z)
@@ -792,7 +794,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":5,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":6,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -883,7 +885,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V5 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V6 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
