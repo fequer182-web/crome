@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V14
+# Crome Ramonia Pipe Bridge V15
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -216,3 +216,15 @@ External test modes:
 - `CromePipeTest_x64.exe movegold <sourceContainerId> <bagContainerId> [itemId=2148] [PID]`
 
 2813 remains a corpse candidate from the Rat/Cave Rat Tile transition, not a permanent profile constant. 2148 is the current gold client ID used for this test.
+
+
+## V15 - stable loot snapshot
+
+The first live V14 loot run exposed two diagnostic issues, not a Game::use failure:
+
+- the Rat was marked on one Tile and died after moving to another Tile, so an exact same-Tile correlation rejected the new corpse candidate;
+- the global Tile cache could refresh between LOOT_MARK and LOOT_DIFF, invalidating the diagnostic generation check.
+
+V15 stores the exact Tile-address snapshot used by LOOT_MARK and LOOT_DIFF rereads those same Tiles directly. A global Target Tile-cache refresh no longer invalidates the loot experiment.
+
+Candidate policy is now `death_window_item_id`: if a tracked monster disappears during the marked window, newly-added Items from that same snapshot become candidates; `USE_LOOT_ITEM` still selects only the requested Item ID (2813 by default). This allows a creature to move several squares before dying without losing the corpse candidate.
