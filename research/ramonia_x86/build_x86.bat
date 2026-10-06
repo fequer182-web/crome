@@ -283,6 +283,7 @@ if errorlevel 1 (
     -static ^
     -static-libgcc ^
     -static-libstdc++ ^
+    -I"%MINIJSON_DIR%" ^
     "%PIPE_TEST_SRC%" ^
     -o "%OUT_PIPE_TEST%"
 
