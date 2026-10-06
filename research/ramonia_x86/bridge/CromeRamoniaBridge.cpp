@@ -14,6 +14,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -35,6 +36,8 @@ constexpr UINT kAttackSelectedMessage = WM_APP + 0x620;
 
 volatile LONG g_lastActionCode{};
 std::uint32_t g_lastActionTargetId{};
+std::uintptr_t g_pendingAttackTarget{};
+std::uint32_t g_pendingAttackRequestedId{};
 
 struct Profile {
     std::string schema;
