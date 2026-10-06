@@ -268,17 +268,24 @@ bool readCurrentImageFingerprint() {
     return true;
 }
 
+struct WindowSearch {
+    DWORD pid{};
+    HWND hwnd{};
+};
+
+BOOL CALLBACK enumCurrentProcessWindow(HWND hwnd, LPARAM lp) {
+    auto* d = reinterpret_cast<WindowSearch*>(lp);
+    DWORD pid{};
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != d->pid || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr)
+        return TRUE;
+    d->hwnd = hwnd;
+    return FALSE;
+}
+
 HWND findCurrentProcessWindow() {
-    struct Search { DWORD pid; HWND hwnd; } data{GetCurrentProcessId(), nullptr};
-    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
-        auto* d = reinterpret_cast<Search*>(lp);
-        DWORD pid{};
-        GetWindowThreadProcessId(hwnd, &pid);
-        if (pid != d->pid || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr)
-            return TRUE;
-        d->hwnd = hwnd;
-        return FALSE;
-    }, reinterpret_cast<LPARAM>(&data));
+    WindowSearch data{GetCurrentProcessId(), nullptr};
+    EnumWindows(&enumCurrentProcessWindow, reinterpret_cast<LPARAM>(&data));
     return data.hwnd;
 }
 
