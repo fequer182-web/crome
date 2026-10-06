@@ -247,3 +247,21 @@ The x64 pipe test exposes:
 For the first live validation, cheese id `2696` is the default food candidate. This path is intentionally independent from Loot: any matching food already present in an open bag/container may be used regardless of whether it came from a corpse, the player, or another container.
 
 V16 keeps the existing safety rule: the selected Container, holder address, Item pointer, and item id are revalidated on the game thread immediately before `Game::use`. Continuous Auto Food scheduling is not enabled until this one-shot container-use path is confirmed live.
+
+
+## V16 live container-use confirmation
+
+Live validation succeeded with cheese id `2696` already inside the player's open Bag:
+
+- `GET_OPEN_CONTAINERS` resolved Bag id=0 and cheese at slot=2;
+- `USE_CONTAINER_ITEM` returned `result=success`;
+- the live Ramonia client consumed the cheese;
+- holder ABI remained `shared_object_ptr_ref`.
+
+This confirms `Game::use` end-to-end for a Container::items holder, not only a Tile::things holder.
+
+The x64 pipe client now also exposes a continuous policy loop:
+
+`autofood [itemId=2696] [successDelayMs=60000] [retryDelayMs=2000] [PID]`
+
+The loop lives outside the x86 bridge. It repeatedly asks the bridge to use the configured food in any open container. After a successful use it waits `successDelayMs`; while food is absent it polls using `retryDelayMs`. This preserves the architecture rule that the x64 Crome layer owns bot policy/scheduling while the x86 bridge remains a validated ABI adapter.
