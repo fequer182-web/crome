@@ -144,3 +144,10 @@ After a live UI test produced an access violation in the Ramonia process, the AT
 Live testing confirmed FPS drops only while Target was active. The cause was the provisional full MEM_PRIVATE/vtable scan being executed multiple times per second.
 
 V8 adds a 1000 ms monster snapshot cache. GET_VISIBLE_MONSTERS reuses the cache, and ATTACK_ID uses the cached address only after game-thread vtable + creature-ID revalidation. This materially reduces scan frequency without changing semantic target selection.
+
+
+## Bridge V9 dispatcher isolation fix
+
+A/B testing established that Ramonia stayed stable when no bridge was injected, but could crash at creature death with the bridge loaded even while Target was disabled. This isolated the permanent WndProc subclass as the leading bridge-level suspect rather than Target selection or ATTACK_ID itself.
+
+V9 removes SetWindowLongPtr/GWLP_WNDPROC entirely. Game-thread execution now uses a thread-specific WH_GETMESSAGE hook + PostThreadMessage + completion event. Dispatches are tokenized to invalidate late messages after timeout. The V8 scan cache is retained.
