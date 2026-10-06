@@ -15,6 +15,11 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <cctype>
+#include <optional>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include <nlohmann/json.hpp>
 
 #include "core/runtime/ClientSession.hpp"
