@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V13
+# Crome Ramonia Pipe Bridge V14
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -185,3 +185,34 @@ External test:
 - `CromePipeTest_x64.exe lootmark`
 - kill exactly one nearby creature without walking far;
 - `CromePipeTest_x64.exe lootdiff`
+
+
+## V14 - experimental corpse use and gold move
+
+V14 keeps the V12 on-demand dispatcher and the V13 corpse transition proof, then adds two deliberately one-shot active tests.
+
+`USE_LOOT_ITEM`:
+- consumes an Item that was correlated by LOOT_MARK -> death -> LOOT_DIFF;
+- revalidates the same Item inside the same live Tile::things vector;
+- passes the ADDRESS OF THE 4-BYTE TILE HOLDER to Game::use, matching the runtime-confirmed `shared_object_ptr_ref` ABI;
+- never sends Item pointers over IPC.
+
+`GET_OPEN_CONTAINERS`:
+- reads the runtime-confirmed Game+0x10 inline registry;
+- requires exact Container RTTI;
+- decodes Container ID/capacity/name and the runtime-confirmed deque at +0x40;
+- exposes only semantic IDs/slots/counts over IPC.
+
+`MOVE_CONTAINER_ITEM`:
+- finds an Item in a currently open source Container;
+- revalidates the actual 4-byte deque holder immediately on the game thread;
+- passes that holder by reference to Game::move;
+- uses the runtime-confirmed Position ABI and count ABI;
+- container destination encoding (x=0xFFFF, y=0x40|containerId, z=slot) is marked EXPERIMENTAL until Ramonia itself confirms the semantic encoding.
+
+External test modes:
+- `CromePipeTest_x64.exe containers`
+- `CromePipeTest_x64.exe usecorpse [itemId=2813] [PID]`
+- `CromePipeTest_x64.exe movegold <sourceContainerId> <bagContainerId> [itemId=2148] [PID]`
+
+2813 remains a corpse candidate from the Rat/Cave Rat Tile transition, not a permanent profile constant. 2148 is the current gold client ID used for this test.
