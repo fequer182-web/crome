@@ -53,7 +53,7 @@ Tile::things:
 ## Rule
 
 The profile is the source of truth for already-confirmed offsets/RVAs.
-V34 promotes only classified runtime evidence into the portable `actions` profile block; active calls remain disabled.
+V34/V37 promote only classified runtime evidence into the portable `actions` profile block. The research probe remains non-calling; active calls now live in the separate Crome pipe bridge/runtime.
 
 
 ## V37 final contract
@@ -75,3 +75,28 @@ All primary actions used by the planned Crome runtime are now represented as `ru
 The last gap, `move.arg2`, was closed from V36 runtime bytes as a direct Position with `u32 x + u32 y + u8 z`, validated against the live LocalPlayer position.
 
 `useWith.arg2` is exposed semantically as generic `Thing` because runtime captures have shown different concrete RTTI targets while preserving the same shared-object holder ABI.
+
+
+## Runtime bridge validation
+
+The Ramonia pipe bridge is now beyond read-only proof-of-concept.
+
+Confirmed end-to-end path:
+
+- external x64 client -> named pipe -> injected x86 bridge;
+- build/profile fingerprint match before enabling actions;
+- WndProc dispatcher executes calls on the game/window thread;
+- `Game::attack` at RVA `0x79190` confirmed with:
+  - `ECX = Game*`
+  - arg1 = `Creature*`
+  - arg2 = `bool Cancel`
+  - `Cancel=false` starts real combat and produces damage.
+
+The canonical profile records the second bool argument. The V37 ABI capture now inspects two attack arguments and persists the observed bool value for future builds.
+
+Bridge V5 adds:
+
+- `GET_VISIBLE_MONSTERS`
+- `ATTACK_ID`
+
+`ATTACK_ID` keeps raw process pointers inside the x86 bridge. The external Crome side sends only a semantic `creatureId`.
