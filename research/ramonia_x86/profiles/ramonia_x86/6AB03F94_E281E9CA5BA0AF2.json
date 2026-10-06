@@ -118,7 +118,7 @@
       "callingConvention": "x86_thiscall_like",
       "this": {"semantic": "Game", "location": "ecx"},
       "status": "runtime_confirmed",
-      "args": [{"index":0,"semantic":"Creature","abiType":"raw_ptr","status":"runtime_confirmed","rtti":"Monster"}]
+      "args": [{"index":0,"semantic":"Creature","abiType":"raw_ptr","status":"runtime_confirmed","rtti":"Monster"}, {"index":1,"semantic":"Cancel","abiType":"bool","status":"runtime_confirmed","observedRequiredValue":false}]
     },
     "follow": {
       "methodRva": "0x79300",
