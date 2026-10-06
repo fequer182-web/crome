@@ -158,3 +158,12 @@ V9 removes SetWindowLongPtr/GWLP_WNDPROC entirely. Game-thread execution now use
 Live testing found a distinct UI/worker bug: with Target enabled, Attack Any disabled, and an empty target-name list, the external worker still polled GET_VISIBLE_MONSTERS and GET_COMBAT_TARGETS even though no monster could ever match.
 
 v0.8.1 treats this configuration as a true idle state. It performs no monster scan/combat-target polling until either at least one target name is configured or Attack Any is enabled. Empty target rules are also ignored during name matching.
+
+
+## Bridge V10 Tile::things read-only proof
+
+The next crash-isolation step does not modify Target behavior. V10 adds GET_TILE_MONSTERS as a one-shot read-only diagnostic.
+
+It scans exact Tile-vtable objects, validates the runtime-confirmed Tile::things vector (+0x24/+0x28/+0x2C, elem 4), requires a stable vector header during the snapshot, and reports only same-floor nearby Monster objects that are actual members of a Tile::things collection.
+
+No attack/follow/internal call is performed by this diagnostic. The existing GET_VISIBLE_MONSTERS heap scanner and ATTACK_ID path remain unchanged until this Tile-membership proof is validated live.
