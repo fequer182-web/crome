@@ -228,3 +228,21 @@ The first live V14 loot run exposed two diagnostic issues, not a Game::use failu
 V15 stores the exact Tile-address snapshot used by LOOT_MARK and LOOT_DIFF rereads those same Tiles directly. A global Target Tile-cache refresh no longer invalidates the loot experiment.
 
 Candidate policy is now `death_window_item_id`: if a tracked monster disappears during the marked window, newly-added Items from that same snapshot become candidates; `USE_LOOT_ITEM` still selects only the requested Item ID (2813 by default). This allows a creature to move several squares before dying without losing the corpse candidate.
+
+
+## V15 live move confirmation
+
+Live validation completed successfully:
+- source Container: id=1, name=`dead rat`
+- destination Container: id=0, name=`bag`
+- moved Item: gold id=2148, count=3
+- before: Bag gold=27, dead rat gold=3
+- after: Bag gold=30, dead rat no longer contained gold
+
+This confirms the active `Game::move` path end-to-end for this build, including:
+- Item `shared_object_ptr_ref` holder ABI;
+- runtime-confirmed Position ABI;
+- runtime-confirmed Count ABI;
+- destination container encoding `x=0xFFFF, y=0x40|containerId, z=slot`.
+
+The bridge now reports `destinationEncoding=otclient_container_position_runtime_confirmed` for this path.
