@@ -151,3 +151,10 @@ V8 adds a 1000 ms monster snapshot cache. GET_VISIBLE_MONSTERS reuses the cache,
 A/B testing established that Ramonia stayed stable when no bridge was injected, but could crash at creature death with the bridge loaded even while Target was disabled. This isolated the permanent WndProc subclass as the leading bridge-level suspect rather than Target selection or ATTACK_ID itself.
 
 V9 removes SetWindowLongPtr/GWLP_WNDPROC entirely. Game-thread execution now uses a thread-specific WH_GETMESSAGE hook + PostThreadMessage + completion event. Dispatches are tokenized to invalidate late messages after timeout. The V8 scan cache is retained.
+
+
+## Crome v0.8.1 empty-target idle guard
+
+Live testing found a distinct UI/worker bug: with Target enabled, Attack Any disabled, and an empty target-name list, the external worker still polled GET_VISIBLE_MONSTERS and GET_COMBAT_TARGETS even though no monster could ever match.
+
+v0.8.1 treats this configuration as a true idle state. It performs no monster scan/combat-target polling until either at least one target name is configured or Attack Any is enabled. Empty target rules are also ignored during name matching.
