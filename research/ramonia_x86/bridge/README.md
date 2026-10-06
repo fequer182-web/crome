@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V12
+# Crome Ramonia Pipe Bridge V13
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -166,3 +166,22 @@ V12 keeps the V11 cached Tile::things target resolver, but removes the permanent
 - timeout/error paths also clean up the temporary hook/event.
 
 HELLO now reports `dispatcherMode:"on_demand"` and `dispatcherHookActive:false` while idle.
+
+
+## V13 - read-only corpse transition probe
+
+V13 starts the Ramonia Loot path without opening containers or moving items.
+
+The bridge now loads the runtime Item contract from the canonical profile (Item vtable, itemId +0x2E and itemCount +0x30) and adds two read-only commands:
+
+- `LOOT_MARK`: snapshots current cached Tile::things Items and nearby Monsters.
+- `LOOT_DIFF`: compares the current Tile::things state with that snapshot.
+
+The diff reports newly appeared Items, their ephemeral tileSlot/stackIndex, and whether the same Tile contained a Monster in the baseline. It also reports baseline Monsters that disappeared. This lets us identify the real corpse client item ID from the transition Monster -> Item without calling use/openContainer or writing game memory.
+
+The snapshot is tied to the current Tile-cache generation. If the Tile cache refreshes between mark and diff, LOOT_DIFF returns tile_cache_changed_recapture instead of comparing unrelated Tile slots.
+
+External test:
+- `CromePipeTest_x64.exe lootmark`
+- kill exactly one nearby creature without walking far;
+- `CromePipeTest_x64.exe lootdiff`
