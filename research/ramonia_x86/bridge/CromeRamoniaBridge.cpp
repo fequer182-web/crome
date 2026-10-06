@@ -72,8 +72,7 @@ struct Profile {
 
 std::optional<Profile> g_profile;
 
-CRITICAL_SECTION g_monsterCacheLock{};
-bool g_monsterCacheLockReady{false};
+SRWLOCK g_monsterCacheLock = SRWLOCK_INIT;
 ULONGLONG g_monsterCacheTick{};
 constexpr ULONGLONG kMonsterCacheTtlMs = 1000;
 
@@ -349,37 +348,34 @@ struct VisibleMonster {
 std::vector<VisibleMonster> g_monsterCache;
 
 std::vector<VisibleMonster> copyMonsterCache() {
-    if (!g_monsterCacheLockReady) return {};
-    EnterCriticalSection(&g_monsterCacheLock);
+    AcquireSRWLockShared(&g_monsterCacheLock);
     auto copy = g_monsterCache;
-    LeaveCriticalSection(&g_monsterCacheLock);
+    ReleaseSRWLockShared(&g_monsterCacheLock);
     return copy;
 }
 
 void storeMonsterCache(std::vector<VisibleMonster> monsters) {
-    if (!g_monsterCacheLockReady) return;
-    EnterCriticalSection(&g_monsterCacheLock);
+    AcquireSRWLockExclusive(&g_monsterCacheLock);
     g_monsterCache = std::move(monsters);
     g_monsterCacheTick = GetTickCount64();
-    LeaveCriticalSection(&g_monsterCacheLock);
+    ReleaseSRWLockExclusive(&g_monsterCacheLock);
 }
 
 std::optional<std::uintptr_t> cachedMonsterAddressById(std::uint32_t id) {
-    if (!id || !g_monsterCacheLockReady) return std::nullopt;
-    EnterCriticalSection(&g_monsterCacheLock);
+    if (!id) return std::nullopt;
+    AcquireSRWLockShared(&g_monsterCacheLock);
     std::optional<std::uintptr_t> result;
     for (const auto& m : g_monsterCache) {
         if (m.id == id) { result = m.address; break; }
     }
-    LeaveCriticalSection(&g_monsterCacheLock);
+    ReleaseSRWLockShared(&g_monsterCacheLock);
     return result;
 }
 
 bool monsterCacheFresh() {
-    if (!g_monsterCacheLockReady) return false;
-    EnterCriticalSection(&g_monsterCacheLock);
+    AcquireSRWLockShared(&g_monsterCacheLock);
     const auto tick = g_monsterCacheTick;
-    LeaveCriticalSection(&g_monsterCacheLock);
+    ReleaseSRWLockShared(&g_monsterCacheLock);
     return tick && (GetTickCount64() - tick) < kMonsterCacheTtlMs;
 }
 
@@ -1019,8 +1015,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_module = instance;
         DisableThreadLibraryCalls(instance);
-        InitializeCriticalSection(&g_monsterCacheLock);
-        g_monsterCacheLockReady = true;
         InterlockedExchange(&g_running, 1);
         if (HANDLE h = CreateThread(nullptr, 0, bridgeThread, nullptr, 0, nullptr)) {
             CloseHandle(h);
@@ -1029,10 +1023,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         InterlockedExchange(&g_running, 0);
-        if (g_monsterCacheLockReady) {
-            g_monsterCacheLockReady = false;
-            DeleteCriticalSection(&g_monsterCacheLock);
-        }
     }
     return TRUE;
 }
