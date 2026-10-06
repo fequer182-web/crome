@@ -183,3 +183,12 @@ The previous broad Monster heap scanner is no longer on the Target/ATTACK_ID exe
 A crash was reproduced in town with no active target/monster interaction, with the same 0x01037419 access-violation signature. Since the V11 Tile target path was idle at the time, the always-installed WH_GETMESSAGE hook became the principal remaining bridge-level suspect.
 
 V12 removes the permanent hook. Startup only resolves the game window/thread. A WH_GETMESSAGE hook and completion event are created only for an ATTACK action and are removed immediately after the action (including timeout/error cleanup). Tile::things caching/Target semantics remain unchanged from V11.
+
+
+## Bridge V13 corpse transition discovery
+
+After V12 remained stable under extended cave combat, Loot discovery starts with a read-only Tile transition probe.
+
+LOOT_MARK captures cached Tile::things Items plus nearby Monster membership. LOOT_DIFF reports new exact-Item objects and Monsters that disappeared, correlated by the same cached Tile address internally and exposed only through ephemeral tileSlot diagnostics.
+
+No corpse is opened and no item is moved in V13. The goal is to identify the real corpse client item ID(s) produced by creature death before validating the Game::use/container-open ABI.
