@@ -100,3 +100,18 @@ Bridge V5 adds:
 - `ATTACK_ID`
 
 `ATTACK_ID` keeps raw process pointers inside the x86 bridge. The external Crome side sends only a semantic `creatureId`.
+
+
+## ATTACK_ID runtime-confirmed
+
+Bridge V5 was validated end-to-end on the live Ramonia client:
+
+- `GET_VISIBLE_MONSTERS` returned Monster ID + position without Follow/manual target;
+- `ATTACK_ID <creatureId>` resolved the Monster pointer inside the x86 bridge;
+- before the action both AttackTarget and FollowTarget were empty;
+- after the action AttackTarget pointed to the requested Monster ID;
+- the call executed through the game-thread dispatcher.
+
+This closes the first semantic Crome action path without raw pointers crossing IPC:
+
+`Crome x64 -> creatureId -> pipe -> x86 resolver -> Game::attack(Creature*, false)`.
