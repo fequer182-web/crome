@@ -262,6 +262,12 @@ int main(int argc, char** argv) {
     std::string mode = "baseline";
     std::uint32_t creatureId = 0;
     std::string wantedName;
+    std::uint32_t lootItemId = 2813;
+    std::uint32_t sourceContainerId = 0;
+    std::uint32_t targetContainerId = 0;
+    std::uint32_t moveItemId = 2148;
+    bool sourceContainerProvided = false;
+    bool targetContainerProvided = false;
 
     if (argc >= 2) {
         const std::string first = argv[1];
@@ -291,6 +297,36 @@ int main(int argc, char** argv) {
         if (argc >= 3) wantedName = argv[2];
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "usecorpse" || mode == "useloot") {
+        if (argc >= 3) {
+            try { lootItemId = static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "movegold" || mode == "moveitem") {
+        if (argc >= 3) {
+            try {
+                sourceContainerId = static_cast<std::uint32_t>(std::stoul(argv[2]));
+                sourceContainerProvided = true;
+            } catch (...) {}
+        }
+        if (argc >= 4) {
+            try {
+                targetContainerId = static_cast<std::uint32_t>(std::stoul(argv[3]));
+                targetContainerProvided = true;
+            } catch (...) {}
+        }
+        if (argc >= 5) {
+            try { moveItemId = static_cast<std::uint32_t>(std::stoul(argv[4])); }
+            catch (...) {}
+        }
+        if (argc >= 6) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[5])); }
             catch (...) {}
         }
     } else if (argc >= 3 && !pid) {
@@ -350,6 +386,47 @@ int main(int argc, char** argv) {
         ok &= request(pid, R"({"cmd":"LOOT_DIFF"})");
         std::cout << "\n" << (ok ? "[OK] Diferenca de Tile::things calculada.\n"
                                    : "[FALHOU] Nao foi possivel comparar o snapshot de loot.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "containers") {
+        std::cout << "[GET_OPEN_CONTAINERS - READ ONLY]\n";
+        ok &= request(pid, R"({"cmd":"GET_OPEN_CONTAINERS"})");
+        std::cout << "\n" << (ok ? "[OK] Containers abertos e itens lidos.\n"
+                                   : "[FALHOU] Nao foi possivel ler containers abertos.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "usecorpse" || mode == "useloot") {
+        if (!lootItemId || lootItemId > 0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe usecorpse [itemId=2813] [PID]\n";
+            return 1;
+        }
+        std::cout << "[USE_LOOT_ITEM - EXPERIMENTAL]\n";
+        const std::string cmd =
+            "{\"cmd\":\"USE_LOOT_ITEM\",\"itemId\":" +
+            std::to_string(lootItemId) + "}";
+        ok &= request(pid, cmd);
+        std::cout << "\n" << (ok ? "[OK] Game::use foi chamado no holder do Item. Confira se o corpse abriu.\n"
+                                   : "[FALHOU] USE_LOOT_ITEM nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "movegold" || mode == "moveitem") {
+        if (!sourceContainerProvided || !targetContainerProvided ||
+            !moveItemId || moveItemId > 0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe movegold <corpseContainerId> <bagContainerId> [itemId=2148] [PID]\n";
+            return 1;
+        }
+        std::cout << "[MOVE_CONTAINER_ITEM - EXPERIMENTAL]\n";
+        const std::string cmd =
+            "{\"cmd\":\"MOVE_CONTAINER_ITEM\",\"sourceContainerId\":" +
+            std::to_string(sourceContainerId) +
+            ",\"targetContainerId\":" + std::to_string(targetContainerId) +
+            ",\"itemId\":" + std::to_string(moveItemId) + "}";
+        ok &= request(pid, cmd);
+        std::cout << "\n" << (ok ? "[OK] Game::move foi chamado. Confira o item na bag.\n"
+                                   : "[FALHOU] MOVE_CONTAINER_ITEM nao foi confirmado.\n");
         return ok ? 0 : 2;
     }
 
