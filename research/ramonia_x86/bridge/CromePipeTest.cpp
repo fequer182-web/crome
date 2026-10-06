@@ -245,6 +245,7 @@ int main(int argc, char** argv) {
     DWORD pid = 0;
     std::string mode = "baseline";
     std::uint32_t creatureId = 0;
+    std::string wantedName;
 
     if (argc >= 2) {
         const std::string first = argv[1];
@@ -270,6 +271,12 @@ int main(int argc, char** argv) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
             catch (...) {}
         }
+    } else if (mode == "target") {
+        if (argc >= 3) wantedName = argv[2];
+        if (argc >= 4) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
     } else if (argc >= 3 && !pid) {
         try { pid = static_cast<DWORD>(std::stoul(argv[2])); }
         catch (...) {}
@@ -289,6 +296,14 @@ int main(int argc, char** argv) {
               << "PIPE : \\\\.\\pipe\\Crome.Ramonia." << pid << "\n\n";
 
     bool ok = true;
+
+    if (mode == "target") {
+        if (wantedName.empty()) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe target <nome|*> [PID]\n";
+            return 1;
+        }
+        return runTargetLoop(pid, wantedName);
+    }
 
     if (mode == "monsters") {
         std::cout << "[GET_VISIBLE_MONSTERS]\n";
