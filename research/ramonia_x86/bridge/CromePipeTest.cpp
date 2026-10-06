@@ -85,6 +85,7 @@ bool request(DWORD pid, const std::string& json) {
 int main(int argc, char** argv) {
     DWORD pid = 0;
     std::string mode = "baseline";
+    std::uint32_t creatureId = 0;
 
     if (argc >= 2) {
         const std::string first = argv[1];
@@ -97,16 +98,28 @@ int main(int argc, char** argv) {
             mode = first;
         }
     }
-    if (argc >= 3 && !pid) {
+
+    for (auto& c : mode)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (mode == "attackid") {
+        if (argc >= 3) {
+            try { creatureId = static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (argc >= 3 && !pid) {
         try { pid = static_cast<DWORD>(std::stoul(argv[2])); }
         catch (...) {}
     }
 
-    for (auto& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (!pid) pid = findRamoniaPid();
 
     if (!pid) {
-        std::cout << "[ERRO] Ramonia nao encontrado. Rode com: CromePipeTest_x64.exe <PID>\n";
+        std::cout << "[ERRO] Ramonia nao encontrado.\n";
         return 1;
     }
 
@@ -117,6 +130,37 @@ int main(int argc, char** argv) {
               << "PIPE : \\\\.\\pipe\\Crome.Ramonia." << pid << "\n\n";
 
     bool ok = true;
+
+    if (mode == "monsters") {
+        std::cout << "[GET_VISIBLE_MONSTERS]\n";
+        ok &= request(pid, R"({"cmd":"GET_VISIBLE_MONSTERS"})");
+        std::cout << "\n" << (ok ? "[OK] Monsters visiveis lidos sem Follow manual.\n"
+                                   : "[FALHOU] Nao foi possivel listar os monsters.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "attackid") {
+        if (!creatureId) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe attackid <creatureId> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[GET_COMBAT_TARGETS - BEFORE]\n";
+        ok &= request(pid, R"({"cmd":"GET_COMBAT_TARGETS"})");
+        if (!ok) return 2;
+
+        std::cout << "\n[ATTACK_ID]\n";
+        const std::string attack =
+            "{\"cmd\":\"ATTACK_ID\",\"creatureId\":" + std::to_string(creatureId) + "}";
+        ok &= request(pid, attack);
+
+        std::cout << "\n[GET_COMBAT_TARGETS - AFTER]\n";
+        ok &= request(pid, R"({"cmd":"GET_COMBAT_TARGETS"})");
+
+        std::cout << "\n" << (ok ? "[OK] ATTACK_ID executado sem Follow manual.\n"
+                                   : "[FALHOU] ATTACK_ID nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
 
     if (mode == "targets") {
         std::cout << "[GET_COMBAT_TARGETS]\n";
