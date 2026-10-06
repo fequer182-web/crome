@@ -58,6 +58,7 @@ struct Profile {
     std::uintptr_t monsterVtableRva{};
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
+    bool attackCancelFalseConfirmed{};
 
     struct Field {
         std::size_t offset{};
@@ -195,6 +196,18 @@ Profile loadProfile(const std::string& path) {
         if (const auto n = integerValue(attack->get("methodRva")))
             p.attackMethodRva = static_cast<std::uintptr_t>(*n);
         p.attackRuntimeConfirmed = stringValue(attack->get("status")) == "runtime_confirmed";
+
+        const auto* args = attack->get("args");
+        if (args && args->isArray() && args->array().size() >= 2) {
+            const auto& cancel = args->array()[1];
+            const auto* required = cancel.isObject() ? cancel.get("observedRequiredValue") : nullptr;
+            p.attackCancelFalseConfirmed =
+                cancel.isObject() &&
+                stringValue(cancel.get("semantic")) == "Cancel" &&
+                stringValue(cancel.get("abiType")) == "bool" &&
+                stringValue(cancel.get("status")) == "runtime_confirmed" &&
+                required && required->isBool() && required->boolean() == false;
+        }
     }
 
     const auto* runtime = root.get("runtime");
@@ -222,7 +235,7 @@ Profile loadProfile(const std::string& path) {
     if (!p.expectedTimestamp || !p.expectedImageSize)
         throw std::runtime_error("build fingerprint incomplete");
     if (!p.monsterVtableRva || !p.creatureIdOffset || !p.attackMethodRva ||
-        !p.attackRuntimeConfirmed)
+        !p.attackRuntimeConfirmed || !p.attackCancelFalseConfirmed)
         throw std::runtime_error("V37 attack contract incomplete");
 
     return p;
