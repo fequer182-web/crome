@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V8
+# Crome Ramonia Pipe Bridge V9
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -96,3 +96,14 @@ The temporary heap/vtable monster discovery is now throttled with a 1000 ms snap
 `GET_VISIBLE_MONSTERS` reuses the fresh snapshot. `ATTACK_ID` no longer triggers a full heap scan on the game thread; it resolves the requested ID from the cached snapshot and revalidates the cached address (Monster vtable + creature ID) immediately before `Game::attack`.
 
 This is an interim performance fix until the confirmed Map/Tile/creature registry path replaces heap scanning entirely.
+
+
+## V9 - no WndProc subclass
+
+Live isolation showed Ramonia remained stable without the bridge, while it could crash on creature death with the bridge loaded even when Target was disabled. The previous bridge permanently replaced the game window WndProc with `SetWindowLongPtr(GWLP_WNDPROC)`.
+
+V9 removes the WndProc subclass completely.
+
+Game-thread actions now use a thread-scoped `WH_GETMESSAGE` hook on the existing game window thread. The pipe thread posts a private thread message, waits on an event, and the hook executes the action on the game thread. Each dispatch uses a token so a timed-out/late message cannot execute a stale pending action.
+
+The V8 1000 ms monster snapshot cache remains in place.
