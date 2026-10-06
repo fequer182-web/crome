@@ -333,11 +333,27 @@ bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
 struct VisibleMonster {
     std::uintptr_t address{};
     std::uint32_t id{};
+    std::string name;
+    std::uint8_t hpPercent{};
     std::uint32_t x{};
     std::uint32_t y{};
     std::uint8_t z{};
     std::uint32_t distance{};
 };
+
+std::string safeReadInlineString(std::uintptr_t address, std::size_t maxLen = 64) {
+    std::string out;
+    out.reserve(maxLen);
+    for (std::size_t i = 0; i < maxLen; ++i) {
+        char c{};
+        if (!safeRead(address + i, c)) return {};
+        if (c == '\0') break;
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 0x20 || uc > 0x7E) return {};
+        out.push_back(c);
+    }
+    return out;
+}
 
 bool readableProtection(DWORD protect) {
     if (protect & PAGE_GUARD) return false;
@@ -403,15 +419,19 @@ std::vector<VisibleMonster> scanVisibleMonsters(std::uint32_t maxRange = 15) {
 
                         const auto candidate = chunkBase + i;
                         std::uint32_t id{}, x{}, y{};
-                        std::uint8_t z{};
+                        std::uint8_t z{}, hpPercent{};
                         if (!safeRead(candidate + g_profile->creatureIdOffset, id) || !id ||
                             !safeRead(candidate + g_profile->posX, x) ||
                             !safeRead(candidate + g_profile->posY, y) ||
-                            !safeRead(candidate + g_profile->posZ, z)) {
+                            !safeRead(candidate + g_profile->posZ, z) ||
+                            !safeRead(candidate + g_profile->creatureHpPercentOffset, hpPercent)) {
                             continue;
                         }
 
-                        if (!x || !y || z != pz) continue;
+                        const auto name = safeReadInlineString(
+                            candidate + g_profile->creatureNameOffset, 48);
+
+                        if (!x || !y || z != pz || hpPercent > 100 || name.empty()) continue;
                         const auto dx = x > px ? x - px : px - x;
                         const auto dy = y > py ? y - py : py - y;
                         const auto dist = std::max(dx, dy);
@@ -421,7 +441,8 @@ std::vector<VisibleMonster> scanVisibleMonsters(std::uint32_t maxRange = 15) {
                         for (const auto& m : out) {
                             if (m.address == candidate) { duplicate = true; break; }
                         }
-                        if (!duplicate) out.push_back({candidate, id, x, y, z, dist});
+                        if (!duplicate)
+                            out.push_back({candidate, id, name, hpPercent, x, y, z, dist});
                     }
                 }
                 chunkBase += want ? want : 1;
