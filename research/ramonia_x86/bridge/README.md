@@ -67,3 +67,16 @@ Atacar pelo ID retornado:
 O modo antigo continua disponivel:
 
 `CromePipeTest_x64.exe attack`
+
+
+## Target loop externo
+
+O primeiro loop automatico fica no cliente externo x64, mantendo regra de bot fora da bridge:
+
+`CromePipeTest_x64.exe target Rat`
+
+Wildcard:
+
+`CromePipeTest_x64.exe target *`
+
+O loop preserva o alvo atual enquanto ele continuar vivo e corresponder ao filtro. Quando morrer ou desaparecer, escolhe o mais proximo entre os monsters compatíveis e chama `ATTACK_ID`. Use `CTRL+C` para encerrar o teste.
