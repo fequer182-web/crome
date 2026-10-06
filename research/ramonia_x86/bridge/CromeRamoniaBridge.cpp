@@ -1961,6 +1961,19 @@ std::optional<std::uint32_t> uint32FieldFromRequest(
     }
 }
 
+std::optional<std::uint32_t> uint32FieldAllowZeroFromRequest(
+    const std::string& request, const char* field) {
+    try {
+        const auto root = crome::json::parse(request);
+        if (!root.isObject()) return std::nullopt;
+        const auto n = integerValue(root.get(field));
+        if (!n || *n > 0xFFFFFFFFull) return std::nullopt;
+        return static_cast<std::uint32_t>(*n);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::string commandFromRequest(const std::string& request) {
     try {
         const auto root = crome::json::parse(request);
@@ -2051,6 +2064,205 @@ std::string visibleMonstersResponse() {
     return o.str();
 }
 
+
+std::string openContainersResponse() {
+    if (!g_profile || !g_profile->containerContractReady)
+        return R"({"ok":false,"cmd":"GET_OPEN_CONTAINERS","error":"container_contract_not_ready"})";
+
+    const auto containers = scanOpenContainers();
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"GET_OPEN_CONTAINERS\",\"count\":"
+      << containers.size() << ",\"containers\":[";
+
+    for (std::size_t i = 0; i < containers.size() && i < 32; ++i) {
+        if (i) o << ",";
+        const auto& c = containers[i];
+        o << "{\"id\":" << c.id
+          << ",\"name\":\"" << jsonEscape(c.name) << "\""
+          << ",\"capacity\":" << c.capacity
+          << ",\"itemCount\":" << c.items.size()
+          << ",\"items\":[";
+
+        for (std::size_t j = 0; j < c.items.size() && j < 100; ++j) {
+            if (j) o << ",";
+            const auto& item = c.items[j];
+            o << "{\"slot\":" << item.index
+              << ",\"id\":" << item.id
+              << ",\"count\":" << item.count << "}";
+        }
+        o << "]}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+std::string useLootItemResponse(std::uint16_t itemId) {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"build_not_validated"})";
+    if (!g_profile->useRuntimeConfirmed ||
+        !g_profile->useItemSharedRefConfirmed ||
+        !g_profile->itemContractReady)
+        return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"use_contract_not_ready"})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"dispatcher_not_ready"})";
+
+    std::vector<TileItemDiagnostic> candidates;
+    AcquireSRWLockShared(&g_lootCandidateLock);
+    candidates = g_lastLootCandidates;
+    ReleaseSRWLockShared(&g_lootCandidateLock);
+
+    std::optional<TileItemDiagnostic> chosen;
+    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+        if (it->id == itemId) {
+            chosen = *it;
+            break;
+        }
+    }
+    if (!chosen)
+        return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"loot_candidate_missing","hint":"run_LOOT_MARK_then_LOOT_DIFF"})";
+
+    std::uintptr_t holder{}, item{};
+    if (!resolveTileItemHolder(chosen->tileAddress,
+                               itemId,
+                               chosen->address,
+                               holder,
+                               item) ||
+        !holder || !item)
+        return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"loot_item_not_visible"})";
+
+    const auto before = scanOpenContainers();
+
+    g_pendingUseTile = chosen->tileAddress;
+    g_pendingUseHolder = holder;
+    g_pendingUseItem = item;
+    g_pendingUseItemId = itemId;
+    InterlockedExchange(&g_pendingActionKind, PendingUse);
+
+    DWORD win32{};
+    const bool dispatched = dispatchPendingActionToGameThread(win32);
+    const LONG code = InterlockedCompareExchange(&g_lastActionCode, 0, 0);
+
+    g_pendingUseTile = 0;
+    g_pendingUseHolder = 0;
+    g_pendingUseItem = 0;
+    g_pendingUseItemId = 0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_LOOT_ITEM\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    Sleep(250);
+    const auto after = scanOpenContainers();
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code == 1 ? "true" : "false")
+      << ",\"cmd\":\"USE_LOOT_ITEM\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"itemId\":" << itemId
+      << ",\"tileSlot\":" << chosen->tileSlot
+      << ",\"openContainersBefore\":" << before.size()
+      << ",\"openContainersAfter\":" << after.size()
+      << ",\"holderAbi\":\"shared_object_ptr_ref\"}";
+    return o.str();
+}
+
+std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
+                                      std::uint32_t targetContainerId,
+                                      std::uint16_t itemId) {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"build_not_validated"})";
+    if (!g_profile->moveRuntimeConfirmed ||
+        !g_profile->moveItemSharedRefConfirmed ||
+        !g_profile->movePositionRefConfirmed ||
+        !g_profile->moveCountConfirmed ||
+        !g_profile->containerContractReady)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"move_contract_not_ready"})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"dispatcher_not_ready"})";
+
+    const auto containers = scanOpenContainers();
+
+    const ContainerSnapshot* source = nullptr;
+    const ContainerSnapshot* target = nullptr;
+    for (const auto& c : containers) {
+        if (c.id == sourceContainerId && !source) source = &c;
+        if (c.id == targetContainerId && !target) target = &c;
+    }
+
+    if (!source)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"source_container_not_open"})";
+    if (!target)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"target_container_not_open"})";
+    if (sourceContainerId == targetContainerId)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"source_equals_target"})";
+
+    const ContainerItemSlot* sourceSlot = nullptr;
+    for (const auto& item : source->items) {
+        if (item.id == itemId) {
+            sourceSlot = &item;
+            break;
+        }
+    }
+    if (!sourceSlot)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"item_not_found_in_source"})";
+
+    const std::uint32_t targetSlot =
+        static_cast<std::uint32_t>(target->items.size());
+    if (target->capacity && targetSlot >= target->capacity)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"target_container_full"})";
+    if (targetSlot > 255u)
+        return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"target_slot_out_of_range"})";
+
+    g_pendingMoveSourceContainer = source->address;
+    g_pendingMoveHolder = sourceSlot->holderAddress;
+    g_pendingMoveItem = sourceSlot->itemAddress;
+    g_pendingMoveItemId = sourceSlot->id;
+    g_pendingMoveCount = sourceSlot->count ? sourceSlot->count : 1u;
+    g_pendingMoveTargetContainer = target->address;
+    g_pendingMoveTargetContainerId = target->id;
+    g_pendingMoveTargetSlot = static_cast<std::uint8_t>(targetSlot);
+    InterlockedExchange(&g_pendingActionKind, PendingMove);
+
+    DWORD win32{};
+    const bool dispatched = dispatchPendingActionToGameThread(win32);
+    const LONG code = InterlockedCompareExchange(&g_lastActionCode, 0, 0);
+
+    const auto movedCount = g_pendingMoveCount;
+    const auto destinationSlot = g_pendingMoveTargetSlot;
+
+    g_pendingMoveSourceContainer = 0;
+    g_pendingMoveHolder = 0;
+    g_pendingMoveItem = 0;
+    g_pendingMoveItemId = 0;
+    g_pendingMoveCount = 0;
+    g_pendingMoveTargetContainer = 0;
+    g_pendingMoveTargetContainerId = 0;
+    g_pendingMoveTargetSlot = 0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"MOVE_CONTAINER_ITEM\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code == 1 ? "true" : "false")
+      << ",\"cmd\":\"MOVE_CONTAINER_ITEM\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"sourceContainerId\":" << sourceContainerId
+      << ",\"targetContainerId\":" << targetContainerId
+      << ",\"itemId\":" << itemId
+      << ",\"count\":" << movedCount
+      << ",\"destinationSlot\":" << static_cast<unsigned>(destinationSlot)
+      << ",\"holderAbi\":\"shared_object_ptr_ref\""
+      << ",\"destinationEncoding\":\"otclient_container_position_experimental\"}";
+    return o.str();
+}
+
 std::string attackIdResponse(std::uint32_t creatureId) {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"build_not_validated"})";
@@ -2068,8 +2280,9 @@ std::string attackIdResponse(std::uint32_t creatureId) {
     g_pendingAttackTarget = 0;
     g_pendingAttackRequestedId = creatureId;
 
+    InterlockedExchange(&g_pendingActionKind, PendingAttack);
     DWORD win32{};
-    const bool dispatched = dispatchAttackToGameThread(win32);
+    const bool dispatched = dispatchPendingActionToGameThread(win32);
 
     g_pendingAttackTarget = 0;
     g_pendingAttackRequestedId = 0;
@@ -2101,8 +2314,9 @@ std::string attackSelectedResponse() {
     g_pendingAttackTarget = 0;
     g_pendingAttackRequestedId = 0;
 
+    InterlockedExchange(&g_pendingActionKind, PendingAttack);
     DWORD win32{};
-    const bool dispatched = dispatchAttackToGameThread(win32);
+    const bool dispatched = dispatchPendingActionToGameThread(win32);
     if (!dispatched) {
         InterlockedExchange(&g_lastActionCode, 8);
         std::ostringstream o;
@@ -2124,7 +2338,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":13,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":14,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -2164,6 +2378,25 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "GET_TILE_MONSTERS") return tileMonstersResponse();
     if (cmd == "LOOT_MARK") return lootMarkResponse();
     if (cmd == "LOOT_DIFF") return lootDiffResponse();
+    if (cmd == "GET_OPEN_CONTAINERS") return openContainersResponse();
+    if (cmd == "USE_LOOT_ITEM") {
+        const auto id = uint32FieldFromRequest(request, "itemId");
+        if (!id || *id > 0xFFFFu)
+            return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"invalid_item_id"})";
+        return useLootItemResponse(static_cast<std::uint16_t>(*id));
+    }
+    if (cmd == "MOVE_CONTAINER_ITEM") {
+        const auto sourceId =
+            uint32FieldAllowZeroFromRequest(request, "sourceContainerId");
+        const auto targetId =
+            uint32FieldAllowZeroFromRequest(request, "targetContainerId");
+        const auto item =
+            uint32FieldFromRequest(request, "itemId");
+        if (!sourceId || !targetId || !item || *item > 0xFFFFu)
+            return R"({"ok":false,"cmd":"MOVE_CONTAINER_ITEM","error":"invalid_arguments"})";
+        return moveContainerItemResponse(
+            *sourceId, *targetId, static_cast<std::uint16_t>(*item));
+    }
     if (cmd == "ATTACK_SELECTED") return attackSelectedResponse();
     if (cmd == "ATTACK_ID") {
         const auto id = uint32FieldFromRequest(request, "creatureId");
@@ -2220,7 +2453,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V13 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V14 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
