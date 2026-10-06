@@ -329,6 +329,14 @@ int main(int argc, char** argv) {
         return ok ? 0 : 2;
     }
 
+    if (mode == "tilemon" || mode == "tilemonsters") {
+        std::cout << "[GET_TILE_MONSTERS - READ ONLY]\n";
+        ok &= request(pid, R"({"cmd":"GET_TILE_MONSTERS"})");
+        std::cout << "\n" << (ok ? "[OK] Tile::things lido sem ataque e sem Follow manual.\n"
+                                   : "[FALHOU] Nao foi possivel ler Monsters via Tile::things.\n");
+        return ok ? 0 : 2;
+    }
+
     if (mode == "attackid") {
         if (!creatureId) {
             std::cout << "[ERRO] Uso: CromePipeTest_x64.exe attackid <creatureId> [PID]\n";
