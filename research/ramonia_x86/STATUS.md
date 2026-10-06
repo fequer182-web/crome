@@ -226,3 +226,24 @@ This confirms the active `Game::move` path end-to-end for this build, including:
 - destination container encoding `x=0xFFFF, y=0x40|containerId, z=slot`.
 
 The bridge now reports `destinationEncoding=otclient_container_position_runtime_confirmed` for this path.
+
+
+## V16 container use / Auto Food foundation
+
+The live V15 `Game::move` confirmation also validated the 4-byte `Container::items` holder representation. V16 reuses the already runtime-confirmed `Game::use(Item shared_object_ptr_ref)` ABI for items that are already inside open containers.
+
+New bridge command:
+
+`USE_CONTAINER_ITEM`
+
+Arguments:
+- `itemId` — required u16 item id;
+- `sourceContainerId` — optional. If omitted, the bridge searches every currently open container and uses the first matching item.
+
+The x64 pipe test exposes:
+- `useitem <containerId|any> [itemId] [PID]`
+- `usefood <containerId|any> [itemId=2696] [PID]`
+
+For the first live validation, cheese id `2696` is the default food candidate. This path is intentionally independent from Loot: any matching food already present in an open bag/container may be used regardless of whether it came from a corpse, the player, or another container.
+
+V16 keeps the existing safety rule: the selected Container, holder address, Item pointer, and item id are revalidated on the game thread immediately before `Game::use`. Continuous Auto Food scheduling is not enabled until this one-shot container-use path is confirmed live.
