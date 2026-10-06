@@ -1023,6 +1023,8 @@ std::string lootDiffResponse() {
     if (!baseline.valid)
         return R"({"ok":false,"cmd":"LOOT_DIFF","error":"no_baseline","hint":"run_LOOT_MARK_first"})";
 
+    const auto items = scanCachedTileItems();
+    const auto monsters = scanCachedTileMonsters(15);
     const auto cache = tileCacheInfo();
     if (cache.generation != baseline.tileGeneration) {
         std::ostringstream o;
@@ -1032,9 +1034,6 @@ std::string lootDiffResponse() {
           << ",\"currentGeneration\":" << cache.generation << "}";
         return o.str();
     }
-
-    const auto items = scanCachedTileItems();
-    const auto monsters = scanCachedTileMonsters(15);
     const auto tiles = copyTileCache();
 
     std::vector<TileItemDiagnostic> added;
