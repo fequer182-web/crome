@@ -8938,6 +8938,13 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
         out.semantic="Creature"; out.abiType="raw_ptr"; out.status="runtime_confirmed"; out.rtti=direct; return out;
     }
 
+    if(token=="attack" && idx==1 && raw<=1u) {
+        out.semantic="Cancel";
+        out.abiType="bool";
+        out.status="runtime_confirmed";
+        return out;
+    }
+
     if(token=="autoWalk" && idx==0) {
         uint32_t count=0,sampled=0;
         if(V35LooksDirectionVector(snap,n0s,count,sampled)) {
