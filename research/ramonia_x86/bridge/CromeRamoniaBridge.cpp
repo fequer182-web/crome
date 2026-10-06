@@ -1030,6 +1030,7 @@ struct TileItemDiagnostic {
 struct LootBaselineState {
     bool valid{};
     std::uint64_t tileGeneration{};
+    std::vector<std::uintptr_t> tiles;
     std::vector<TileItemDiagnostic> items;
     std::vector<TileMonsterDiagnostic> monsters;
 };
@@ -1302,18 +1303,13 @@ std::uint32_t tileSlotOf(const std::vector<std::uintptr_t>& tiles,
     return 0xFFFFFFFFu;
 }
 
-std::vector<TileItemDiagnostic> scanCachedTileItems() {
+std::vector<TileItemDiagnostic> scanTileItemsFromSnapshot(
+    const std::vector<std::uintptr_t>& tiles) {
     std::vector<TileItemDiagnostic> out;
     if (!g_profile || !g_profile->itemContractReady ||
         !g_profile->tileThingsRuntimeConfirmed)
         return out;
 
-    std::uint32_t px{}, py{};
-    std::uint8_t pz{};
-    if (!localPlayerPosition(px, py, pz)) return out;
-    if (!ensureTileCache(px, py, pz)) return out;
-
-    const auto tiles = copyTileCache();
     const auto wantedItemVtable = g_base + g_profile->itemVtableRva;
 
     for (std::size_t tileIndex = 0; tileIndex < tiles.size(); ++tileIndex) {
@@ -1348,6 +1344,69 @@ std::vector<TileItemDiagnostic> scanCachedTileItems() {
     return out;
 }
 
+std::vector<TileMonsterDiagnostic> scanTileMonstersFromSnapshot(
+    const std::vector<std::uintptr_t>& tiles,
+    std::uint32_t maxRange = 15) {
+    std::vector<TileMonsterDiagnostic> out;
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed)
+        return out;
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz))
+        return out;
+
+    for (const auto tile : tiles) {
+        std::vector<std::uintptr_t> things;
+        bool containsLocalPlayer = false;
+        if (!readStableTileThings(tile, things, containsLocalPlayer))
+            continue;
+
+        for (const auto thing : things) {
+            VisibleMonster monster;
+            if (!snapshotMonsterFromThing(
+                    thing, px, py, pz, maxRange, monster))
+                continue;
+
+            bool duplicate = false;
+            for (const auto& existing : out) {
+                if (existing.monster.address == monster.address ||
+                    existing.monster.id == monster.id) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+
+            TileMonsterDiagnostic d;
+            d.monster = std::move(monster);
+            d.tileAddress = tile;
+            d.tileThingCount = static_cast<std::uint32_t>(things.size());
+            d.tileContainsLocalPlayer = containsLocalPlayer;
+            out.push_back(std::move(d));
+        }
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.monster.distance != b.monster.distance)
+            return a.monster.distance < b.monster.distance;
+        return a.monster.id < b.monster.id;
+    });
+    return out;
+}
+
+std::vector<TileItemDiagnostic> scanCachedTileItems() {
+    if (!g_profile || !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed)
+        return {};
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz)) return {};
+    if (!ensureTileCache(px, py, pz)) return {};
+
+    return scanTileItemsFromSnapshot(copyTileCache());
+}
 bool sameItemIdentity(const TileItemDiagnostic& a, const TileItemDiagnostic& b) {
     return a.address == b.address && a.id == b.id;
 }
@@ -1371,14 +1430,15 @@ std::string lootMarkResponse() {
     if (!ensureTileCache(px, py, pz))
         return R"({"ok":false,"cmd":"LOOT_MARK","error":"tile_cache_unavailable"})";
 
-    const auto items = scanCachedTileItems();
-    const auto monsters = scanCachedTileMonsters(15);
     const auto cache = tileCacheInfo();
     const auto tiles = copyTileCache();
+    const auto items = scanTileItemsFromSnapshot(tiles);
+    const auto monsters = scanTileMonstersFromSnapshot(tiles, 15);
 
     AcquireSRWLockExclusive(&g_lootBaselineLock);
     g_lootBaseline.valid = true;
     g_lootBaseline.tileGeneration = cache.generation;
+    g_lootBaseline.tiles = tiles;
     g_lootBaseline.items = items;
     g_lootBaseline.monsters = monsters;
     ReleaseSRWLockExclusive(&g_lootBaselineLock);
@@ -1416,18 +1476,13 @@ std::string lootDiffResponse() {
     if (!baseline.valid)
         return R"({"ok":false,"cmd":"LOOT_DIFF","error":"no_baseline","hint":"run_LOOT_MARK_first"})";
 
-    const auto items = scanCachedTileItems();
-    const auto monsters = scanCachedTileMonsters(15);
+    if (baseline.tiles.empty())
+        return R"({"ok":false,"cmd":"LOOT_DIFF","error":"baseline_tile_snapshot_empty"})";
+
+    const auto items = scanTileItemsFromSnapshot(baseline.tiles);
+    const auto monsters = scanTileMonstersFromSnapshot(baseline.tiles, 15);
     const auto cache = tileCacheInfo();
-    if (cache.generation != baseline.tileGeneration) {
-        std::ostringstream o;
-        o << "{\"ok\":false,\"cmd\":\"LOOT_DIFF\","
-          << "\"error\":\"tile_cache_changed_recapture\","
-          << "\"baselineGeneration\":" << baseline.tileGeneration
-          << ",\"currentGeneration\":" << cache.generation << "}";
-        return o.str();
-    }
-    const auto tiles = copyTileCache();
+    const auto& tiles = baseline.tiles;
 
     std::vector<TileItemDiagnostic> added;
     for (const auto& now : items) {
@@ -1438,26 +1493,25 @@ std::string lootDiffResponse() {
         if (!existed) added.push_back(now);
     }
 
-    std::vector<TileItemDiagnostic> correlatedAdded;
-    for (const auto& item : added) {
-        bool hadMonster = false;
-        for (const auto& oldMonster : baseline.monsters) {
-            if (oldMonster.tileAddress == item.tileAddress) {
-                hadMonster = true;
-                break;
-            }
-        }
-        if (hadMonster) correlatedAdded.push_back(item);
+    std::vector<TileMonsterDiagnostic> removed;
+    for (const auto& oldMonster : baseline.monsters) {
+        if (!currentMonsterContainsId(monsters, oldMonster.monster.id))
+            removed.push_back(oldMonster);
     }
 
     AcquireSRWLockExclusive(&g_lootCandidateLock);
-    g_lastLootCandidates = correlatedAdded;
+    g_lastLootCandidates = removed.empty()
+        ? std::vector<TileItemDiagnostic>{}
+        : added;
     ReleaseSRWLockExclusive(&g_lootCandidateLock);
 
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"LOOT_DIFF\",\"readOnly\":true,"
-      << "\"tileGeneration\":" << cache.generation
-      << ",\"addedCount\":" << added.size()
+      << "\"baselineGeneration\":" << baseline.tileGeneration
+      << ",\"currentGlobalGeneration\":" << cache.generation
+      << ",\"snapshotTiles\":" << baseline.tiles.size()
+      << ",\"candidatePolicy\":\"death_window_item_id\","
+      << "\"addedCount\":" << added.size()
       << ",\"addedItems\":[";
 
     for (std::size_t i = 0; i < added.size() && i < 64; ++i) {
@@ -1494,9 +1548,7 @@ std::string lootDiffResponse() {
 
     o << "],\"removedMonsters\":[";
     bool firstRemoved = true;
-    for (const auto& oldMonster : baseline.monsters) {
-        if (currentMonsterContainsId(monsters, oldMonster.monster.id))
-            continue;
+    for (const auto& oldMonster : removed) {
         if (!firstRemoved) o << ",";
         firstRemoved = false;
         o << "{\"id\":" << oldMonster.monster.id
@@ -2342,7 +2394,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":14,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":15,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -2457,7 +2509,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V14 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V15 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
