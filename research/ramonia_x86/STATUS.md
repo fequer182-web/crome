@@ -137,3 +137,10 @@ A transient pipe reconnect race was observed between one-request pipe instances.
 ## Bridge V7 game-thread target resolution
 
 After a live UI test produced an access violation in the Ramonia process, the ATTACK_ID handoff was hardened. The pipe side no longer stores a resolved Monster pointer. It stores only creatureId; the game-thread dispatcher resolves the current Monster pointer and validates it immediately before the native attack call. This specifically reduces stale-pointer risk when a creature dies/despawns during retargeting.
+
+
+## Bridge V8 targeting performance
+
+Live testing confirmed FPS drops only while Target was active. The cause was the provisional full MEM_PRIVATE/vtable scan being executed multiple times per second.
+
+V8 adds a 1000 ms monster snapshot cache. GET_VISIBLE_MONSTERS reuses the cache, and ATTACK_ID uses the cached address only after game-thread vtable + creature-ID revalidation. This materially reduces scan frequency without changing semantic target selection.
