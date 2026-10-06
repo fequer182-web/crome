@@ -72,6 +72,11 @@ struct Profile {
 
 std::optional<Profile> g_profile;
 
+CRITICAL_SECTION g_monsterCacheLock{};
+bool g_monsterCacheLockReady{false};
+ULONGLONG g_monsterCacheTick{};
+constexpr ULONGLONG kMonsterCacheTtlMs = 1000;
+
 std::string moduleDirectory();
 
 std::filesystem::path bridgeLogPath() {
@@ -341,6 +346,43 @@ struct VisibleMonster {
     std::uint32_t distance{};
 };
 
+std::vector<VisibleMonster> g_monsterCache;
+
+std::vector<VisibleMonster> copyMonsterCache() {
+    if (!g_monsterCacheLockReady) return {};
+    EnterCriticalSection(&g_monsterCacheLock);
+    auto copy = g_monsterCache;
+    LeaveCriticalSection(&g_monsterCacheLock);
+    return copy;
+}
+
+void storeMonsterCache(std::vector<VisibleMonster> monsters) {
+    if (!g_monsterCacheLockReady) return;
+    EnterCriticalSection(&g_monsterCacheLock);
+    g_monsterCache = std::move(monsters);
+    g_monsterCacheTick = GetTickCount64();
+    LeaveCriticalSection(&g_monsterCacheLock);
+}
+
+std::optional<std::uintptr_t> cachedMonsterAddressById(std::uint32_t id) {
+    if (!id || !g_monsterCacheLockReady) return std::nullopt;
+    EnterCriticalSection(&g_monsterCacheLock);
+    std::optional<std::uintptr_t> result;
+    for (const auto& m : g_monsterCache) {
+        if (m.id == id) { result = m.address; break; }
+    }
+    LeaveCriticalSection(&g_monsterCacheLock);
+    return result;
+}
+
+bool monsterCacheFresh() {
+    if (!g_monsterCacheLockReady) return false;
+    EnterCriticalSection(&g_monsterCacheLock);
+    const auto tick = g_monsterCacheTick;
+    LeaveCriticalSection(&g_monsterCacheLock);
+    return tick && (GetTickCount64() - tick) < kMonsterCacheTtlMs;
+}
+
 std::string safeReadInlineString(std::uintptr_t address, std::size_t maxLen = 64) {
     std::string out;
     out.reserve(maxLen);
@@ -461,10 +503,12 @@ std::vector<VisibleMonster> scanVisibleMonsters(std::uint32_t maxRange = 15) {
 
 std::uintptr_t resolveVisibleMonsterById(std::uint32_t id) {
     if (!id) return 0;
-    const auto monsters = scanVisibleMonsters();
-    for (const auto& m : monsters)
-        if (m.id == id) return m.address;
-    return 0;
+    const auto cached = cachedMonsterAddressById(id);
+    if (!cached) return 0;
+
+    std::uint32_t liveId{};
+    if (!targetSnapshot(*cached, liveId) || liveId != id) return 0;
+    return *cached;
 }
 
 bool executeAttackSelectedOnGameThread() {
@@ -694,7 +738,9 @@ std::string combatTargetsResponse(const Profile& p) {
 }
 
 std::string visibleMonstersResponse() {
-    const auto monsters = scanVisibleMonsters();
+    if (!monsterCacheFresh())
+        storeMonsterCache(scanVisibleMonsters());
+    const auto monsters = copyMonsterCache();
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"GET_VISIBLE_MONSTERS\",\"count\":" << monsters.size()
       << ",\"monsters\":[";
@@ -800,7 +846,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":7,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":8,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -891,7 +937,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V7 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V8 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -973,6 +1019,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_module = instance;
         DisableThreadLibraryCalls(instance);
+        InitializeCriticalSection(&g_monsterCacheLock);
+        g_monsterCacheLockReady = true;
         InterlockedExchange(&g_running, 1);
         if (HANDLE h = CreateThread(nullptr, 0, bridgeThread, nullptr, 0, nullptr)) {
             CloseHandle(h);
@@ -981,6 +1029,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         InterlockedExchange(&g_running, 0);
+        if (g_monsterCacheLockReady) {
+            g_monsterCacheLockReady = false;
+            DeleteCriticalSection(&g_monsterCacheLock);
+        }
     }
     return TRUE;
 }
