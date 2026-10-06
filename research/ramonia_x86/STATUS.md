@@ -176,3 +176,10 @@ V10 live proof succeeded with moving/damaged creatures and multiple same-name Sp
 GET_VISIBLE_MONSTERS now reads Monsters only as members of cached Tile::things. ATTACK_ID prevalidates the semantic ID against Tile membership on the pipe thread and then resolves the ID again from current Tile::things on the game thread before Game::attack.
 
 The previous broad Monster heap scanner is no longer on the Target/ATTACK_ID execution path. Broad memory scanning remains only as an occasional Tile-address discovery step and is not executed on the game thread.
+
+
+## Bridge V12 on-demand dispatcher isolation
+
+A crash was reproduced in town with no active target/monster interaction, with the same 0x01037419 access-violation signature. Since the V11 Tile target path was idle at the time, the always-installed WH_GETMESSAGE hook became the principal remaining bridge-level suspect.
+
+V12 removes the permanent hook. Startup only resolves the game window/thread. A WH_GETMESSAGE hook and completion event are created only for an ATTACK action and are removed immediately after the action (including timeout/error cleanup). Tile::things caching/Target semantics remain unchanged from V11.
