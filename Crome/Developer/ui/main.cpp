@@ -281,7 +281,7 @@ static void RamoniaTargetWorker() {
         g_ramoniaBridgeReady.store(true);
         const auto cfg = GetRamoniaTargetConfig();
         if (!cfg.enabled) {
-            SetRamoniaStatus("Ramonia Bridge V9 pronta");
+            SetRamoniaStatus("Ramonia Bridge V10 pronta");
             Sleep(300);
             continue;
         }
