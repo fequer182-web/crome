@@ -86,6 +86,16 @@ SRWLOCK g_monsterCacheLock = SRWLOCK_INIT;
 ULONGLONG g_monsterCacheTick{};
 constexpr ULONGLONG kMonsterCacheTtlMs = 1000;
 
+SRWLOCK g_tileCacheLock = SRWLOCK_INIT;
+std::vector<std::uintptr_t> g_tileCache;
+ULONGLONG g_tileCacheTick{};
+std::uint32_t g_tileCacheOriginX{};
+std::uint32_t g_tileCacheOriginY{};
+std::uint8_t g_tileCacheOriginZ{};
+constexpr ULONGLONG kTileCacheMaxAgeMs = 15000;
+constexpr ULONGLONG kTileCacheMinRefreshMs = 4000;
+constexpr std::uint32_t kTileCacheMoveRefresh = 8;
+
 std::string moduleDirectory();
 std::string jsonEscape(const std::string& s);
 
@@ -535,6 +545,41 @@ struct TileMonsterDiagnostic {
     bool tileContainsLocalPlayer{};
 };
 
+bool readTileVectorHeader(std::uintptr_t tile,
+                          std::uint32_t& begin,
+                          std::uint32_t& end,
+                          std::uint32_t& cap,
+                          std::uint32_t& count) {
+    begin = end = cap = count = 0;
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed || !tile) return false;
+
+    const auto& p = *g_profile;
+    std::uintptr_t vt{};
+    if (!safeRead(tile, vt) || vt != g_base + p.tileVtableRva) return false;
+
+    if (!safeRead(tile + p.tileThingsOffset, begin) ||
+        !safeRead(tile + p.tileThingsEndOffset, end) ||
+        !safeRead(tile + p.tileThingsCapOffset, cap))
+        return false;
+
+    if (p.tileThingsElemSize != 4) return false;
+
+    // A default-constructed empty std::vector is allowed to be all zeros.
+    if (!begin && !end && !cap) {
+        count = 0;
+        return true;
+    }
+
+    if (!begin || end < begin || cap < end) return false;
+    const std::uint32_t bytes = end - begin;
+    const std::uint32_t capBytes = cap - begin;
+    if (bytes % 4 || capBytes % 4) return false;
+
+    count = bytes / 4;
+    const std::uint32_t capacity = capBytes / 4;
+    return count <= 80 && capacity >= count && capacity <= 160;
+}
+
 bool readStableTileThings(std::uintptr_t tile,
                           std::vector<std::uintptr_t>& things,
                           bool& containsLocalPlayer) {
@@ -543,36 +588,31 @@ bool readStableTileThings(std::uintptr_t tile,
     if (!g_profile || !g_profile->tileThingsRuntimeConfirmed || !tile) return false;
 
     const auto& p = *g_profile;
-    std::uintptr_t vt{};
-    if (!safeRead(tile, vt) || vt != g_base + p.tileVtableRva) return false;
+    std::uint32_t begin1{}, end1{}, cap1{}, count1{};
+    if (!readTileVectorHeader(tile, begin1, end1, cap1, count1)) return false;
+    if (count1 == 0) return true;
 
-    std::uint32_t begin1{}, end1{}, cap1{};
-    if (!safeRead(tile + p.tileThingsOffset, begin1) ||
-        !safeRead(tile + p.tileThingsEndOffset, end1) ||
-        !safeRead(tile + p.tileThingsCapOffset, cap1))
+    std::vector<std::uint32_t> raw(count1);
+    SIZE_T got{};
+    if (!ReadProcessMemory(GetCurrentProcess(),
+                           reinterpret_cast<LPCVOID>(static_cast<std::uintptr_t>(begin1)),
+                           raw.data(), raw.size() * sizeof(std::uint32_t), &got) ||
+        got != raw.size() * sizeof(std::uint32_t))
         return false;
 
-    if (!begin1 || end1 < begin1 || cap1 < end1 || p.tileThingsElemSize != 4)
+    // Reject the snapshot if the vector changed while its pointer array was copied.
+    std::uint32_t begin2{}, end2{}, cap2{}, count2{};
+    if (!readTileVectorHeader(tile, begin2, end2, cap2, count2) ||
+        begin1 != begin2 || end1 != end2 || cap1 != cap2 || count1 != count2)
         return false;
-
-    const std::uint32_t bytes = end1 - begin1;
-    const std::uint32_t capBytes = cap1 - begin1;
-    if (bytes % 4 || capBytes % 4) return false;
-
-    const std::uint32_t count = bytes / 4;
-    const std::uint32_t capacity = capBytes / 4;
-    if (count > 80 || capacity < count || capacity > 160) return false;
 
     std::uintptr_t localPlayer{};
     const auto game = g_base + p.gameRva;
     safeRead(game + p.localPlayerOffset, localPlayer);
 
-    things.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        std::uint32_t raw{};
-        if (!safeRead(static_cast<std::uintptr_t>(begin1) + i * 4, raw))
-            return false;
-        const auto thing = static_cast<std::uintptr_t>(raw);
+    things.reserve(count1);
+    for (const auto rawPtr : raw) {
+        const auto thing = static_cast<std::uintptr_t>(rawPtr);
         if (!thing) return false;
 
         std::uintptr_t thingVtable{};
@@ -583,30 +623,15 @@ bool readStableTileThings(std::uintptr_t tile,
         if (localPlayer && thing == localPlayer) containsLocalPlayer = true;
         things.push_back(thing);
     }
-
-    // Tile vectors can change while creatures/items move. Require the header
-    // to remain identical for the whole snapshot; otherwise discard this Tile.
-    std::uint32_t begin2{}, end2{}, cap2{};
-    if (!safeRead(tile + p.tileThingsOffset, begin2) ||
-        !safeRead(tile + p.tileThingsEndOffset, end2) ||
-        !safeRead(tile + p.tileThingsCapOffset, cap2))
-        return false;
-
-    return begin1 == begin2 && end1 == end2 && cap1 == cap2;
+    return true;
 }
 
-std::vector<TileMonsterDiagnostic> scanTileMonstersReadOnly(std::uint32_t maxRange = 15) {
-    std::vector<TileMonsterDiagnostic> out;
-    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed) return out;
-
-    std::uint32_t px{}, py{};
-    std::uint8_t pz{};
-    if (!localPlayerPosition(px, py, pz)) return out;
+std::vector<std::uintptr_t> discoverTileAddresses() {
+    std::vector<std::uintptr_t> tiles;
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed) return tiles;
 
     const std::uint32_t wantedTileVtable =
         static_cast<std::uint32_t>(g_base + g_profile->tileVtableRva);
-    const std::uintptr_t wantedMonsterVtable =
-        g_base + g_profile->monsterVtableRva;
 
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
@@ -640,67 +665,161 @@ std::vector<TileMonsterDiagnostic> scanTileMonstersReadOnly(std::uint32_t maxRan
                         if (vt != wantedTileVtable) continue;
 
                         const auto tile = chunkBase + i;
-                        std::vector<std::uintptr_t> things;
-                        bool containsLocalPlayer = false;
-                        if (!readStableTileThings(tile, things, containsLocalPlayer))
+                        std::uint32_t begin{}, finish{}, cap{}, count{};
+                        if (!readTileVectorHeader(tile, begin, finish, cap, count))
                             continue;
-
-                        for (const auto thing : things) {
-                            std::uintptr_t thingVtable{};
-                            if (!safeRead(thing, thingVtable) ||
-                                thingVtable != wantedMonsterVtable)
-                                continue;
-
-                            std::uint32_t id{}, x{}, y{};
-                            std::uint8_t z{}, hpPercent{};
-                            if (!safeRead(thing + g_profile->creatureIdOffset, id) || !id ||
-                                !safeRead(thing + g_profile->posX, x) ||
-                                !safeRead(thing + g_profile->posY, y) ||
-                                !safeRead(thing + g_profile->posZ, z) ||
-                                !safeRead(thing + g_profile->creatureHpPercentOffset, hpPercent))
-                                continue;
-
-                            if (!x || !y || z != pz || hpPercent > 100) continue;
-                            const auto name = safeReadInlineString(
-                                thing + g_profile->creatureNameOffset, 48);
-                            if (name.empty()) continue;
-
-                            const auto dx = x > px ? x - px : px - x;
-                            const auto dy = y > py ? y - py : py - y;
-                            const auto dist = std::max(dx, dy);
-                            if (dist > maxRange) continue;
-
-                            bool duplicate = false;
-                            for (const auto& existing : out) {
-                                if (existing.monster.address == thing ||
-                                    existing.monster.id == id) {
-                                    duplicate = true;
-                                    break;
-                                }
-                            }
-                            if (duplicate) continue;
-
-                            TileMonsterDiagnostic d;
-                            d.monster.address = thing;
-                            d.monster.id = id;
-                            d.monster.name = name;
-                            d.monster.hpPercent = hpPercent;
-                            d.monster.x = x;
-                            d.monster.y = y;
-                            d.monster.z = z;
-                            d.monster.distance = dist;
-                            d.tileAddress = tile;
-                            d.tileThingCount = static_cast<std::uint32_t>(things.size());
-                            d.tileContainsLocalPlayer = containsLocalPlayer;
-                            out.push_back(std::move(d));
-                        }
+                        tiles.push_back(tile);
                     }
                 }
-                chunkBase += want;
+                chunkBase += want ? want : 1;
             }
         }
-
         address = regionEnd;
+    }
+
+    std::sort(tiles.begin(), tiles.end());
+    tiles.erase(std::unique(tiles.begin(), tiles.end()), tiles.end());
+    return tiles;
+}
+
+std::vector<std::uintptr_t> copyTileCache() {
+    AcquireSRWLockShared(&g_tileCacheLock);
+    auto copy = g_tileCache;
+    ReleaseSRWLockShared(&g_tileCacheLock);
+    return copy;
+}
+
+struct TileCacheInfo {
+    std::size_t count{};
+    ULONGLONG ageMs{};
+    std::uint32_t originX{};
+    std::uint32_t originY{};
+    std::uint8_t originZ{};
+};
+
+TileCacheInfo tileCacheInfo() {
+    TileCacheInfo info;
+    AcquireSRWLockShared(&g_tileCacheLock);
+    info.count = g_tileCache.size();
+    info.originX = g_tileCacheOriginX;
+    info.originY = g_tileCacheOriginY;
+    info.originZ = g_tileCacheOriginZ;
+    const auto tick = g_tileCacheTick;
+    ReleaseSRWLockShared(&g_tileCacheLock);
+    info.ageMs = tick ? GetTickCount64() - tick : 0;
+    return info;
+}
+
+bool refreshTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz) {
+    const auto discovered = discoverTileAddresses();
+    if (discovered.empty()) return false;
+
+    AcquireSRWLockExclusive(&g_tileCacheLock);
+    g_tileCache = discovered;
+    g_tileCacheTick = GetTickCount64();
+    g_tileCacheOriginX = px;
+    g_tileCacheOriginY = py;
+    g_tileCacheOriginZ = pz;
+    ReleaseSRWLockExclusive(&g_tileCacheLock);
+
+    logLine("[TILE CACHE] refreshed tiles=" + std::to_string(discovered.size()) +
+            " origin=" + std::to_string(px) + "," + std::to_string(py) + "," +
+            std::to_string(static_cast<unsigned>(pz)));
+    return true;
+}
+
+bool ensureTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz,
+                     bool force = false) {
+    const auto info = tileCacheInfo();
+    const auto dx = px > info.originX ? px - info.originX : info.originX - px;
+    const auto dy = py > info.originY ? py - info.originY : info.originY - py;
+    const auto moved = std::max(dx, dy);
+
+    bool refresh = force || info.count == 0;
+    if (!refresh && info.ageMs >= kTileCacheMaxAgeMs) refresh = true;
+    if (!refresh && info.originZ != pz && info.ageMs >= 1000) refresh = true;
+    if (!refresh && moved >= kTileCacheMoveRefresh &&
+        info.ageMs >= kTileCacheMinRefreshMs)
+        refresh = true;
+
+    return !refresh || refreshTileCache(px, py, pz);
+}
+
+bool snapshotMonsterFromThing(std::uintptr_t thing,
+                              std::uint32_t px, std::uint32_t py, std::uint8_t pz,
+                              std::uint32_t maxRange,
+                              VisibleMonster& out) {
+    out = {};
+    if (!g_profile || !thing) return false;
+
+    std::uintptr_t thingVtable{};
+    if (!safeRead(thing, thingVtable) ||
+        thingVtable != g_base + g_profile->monsterVtableRva)
+        return false;
+
+    std::uint32_t id{}, x{}, y{};
+    std::uint8_t z{}, hpPercent{};
+    if (!safeRead(thing + g_profile->creatureIdOffset, id) || !id ||
+        !safeRead(thing + g_profile->posX, x) ||
+        !safeRead(thing + g_profile->posY, y) ||
+        !safeRead(thing + g_profile->posZ, z) ||
+        !safeRead(thing + g_profile->creatureHpPercentOffset, hpPercent))
+        return false;
+
+    if (!x || !y || z != pz || hpPercent > 100) return false;
+    const auto name = safeReadInlineString(
+        thing + g_profile->creatureNameOffset, 48);
+    if (name.empty()) return false;
+
+    const auto dx = x > px ? x - px : px - x;
+    const auto dy = y > py ? y - py : py - y;
+    const auto dist = std::max(dx, dy);
+    if (dist > maxRange) return false;
+
+    out = {thing, id, name, hpPercent, x, y, z, dist};
+    return true;
+}
+
+std::vector<TileMonsterDiagnostic> scanCachedTileMonsters(
+    std::uint32_t maxRange = 15,
+    bool forceTileRefresh = false) {
+    std::vector<TileMonsterDiagnostic> out;
+    if (!g_profile || !g_profile->tileThingsRuntimeConfirmed) return out;
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz)) return out;
+    if (!ensureTileCache(px, py, pz, forceTileRefresh)) return out;
+
+    const auto tiles = copyTileCache();
+    for (const auto tile : tiles) {
+        std::vector<std::uintptr_t> things;
+        bool containsLocalPlayer = false;
+        if (!readStableTileThings(tile, things, containsLocalPlayer))
+            continue;
+
+        for (const auto thing : things) {
+            VisibleMonster monster;
+            if (!snapshotMonsterFromThing(thing, px, py, pz, maxRange, monster))
+                continue;
+
+            bool duplicate = false;
+            for (const auto& existing : out) {
+                if (existing.monster.address == monster.address ||
+                    existing.monster.id == monster.id) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+
+            TileMonsterDiagnostic d;
+            d.monster = std::move(monster);
+            d.tileAddress = tile;
+            d.tileThingCount = static_cast<std::uint32_t>(things.size());
+            d.tileContainsLocalPlayer = containsLocalPlayer;
+            out.push_back(std::move(d));
+        }
     }
 
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
@@ -711,15 +830,49 @@ std::vector<TileMonsterDiagnostic> scanTileMonstersReadOnly(std::uint32_t maxRan
     return out;
 }
 
+std::uintptr_t resolveTileMonsterById(std::uint32_t id) {
+    if (!id || !g_profile || !g_profile->tileThingsRuntimeConfirmed) return 0;
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz)) return 0;
+
+    // Never perform a broad discovery scan from the game thread.
+    // ATTACK_ID can use only the current Tile cache and revalidates the Thing
+    // membership immediately before Game::attack.
+    const auto tiles = copyTileCache();
+    for (const auto tile : tiles) {
+        std::vector<std::uintptr_t> things;
+        bool containsLocalPlayer = false;
+        if (!readStableTileThings(tile, things, containsLocalPlayer))
+            continue;
+
+        for (const auto thing : things) {
+            VisibleMonster monster;
+            if (!snapshotMonsterFromThing(thing, px, py, pz, 15, monster))
+                continue;
+            if (monster.id == id) return thing;
+        }
+    }
+    return 0;
+}
+
+std::vector<TileMonsterDiagnostic> scanTileMonstersReadOnly(std::uint32_t maxRange = 15) {
+    return scanCachedTileMonsters(maxRange);
+}
 std::string tileMonstersResponse() {
     if (!g_profile || !g_profile->tileThingsRuntimeConfirmed)
         return R"({"ok":false,"cmd":"GET_TILE_MONSTERS","error":"tile_contract_not_ready"})";
 
-    const auto monsters = scanTileMonstersReadOnly(15);
+    const auto monsters = scanCachedTileMonsters(15);
+    const auto cache = tileCacheInfo();
+
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"GET_TILE_MONSTERS\","
-      << "\"source\":\"Tile::things\",\"readOnly\":true,"
-      << "\"count\":" << monsters.size() << ",\"monsters\":[";
+      << "\"source\":\"Tile::things-cache\",\"readOnly\":true,"
+      << "\"cachedTiles\":" << cache.count
+      << ",\"cacheAgeMs\":" << cache.ageMs
+      << ",\"count\":" << monsters.size() << ",\"monsters\":[";
 
     for (std::size_t i = 0; i < monsters.size() && i < 64; ++i) {
         if (i) o << ",";
@@ -742,13 +895,7 @@ std::string tileMonstersResponse() {
 }
 
 std::uintptr_t resolveVisibleMonsterById(std::uint32_t id) {
-    if (!id) return 0;
-    const auto cached = cachedMonsterAddressById(id);
-    if (!cached) return 0;
-
-    std::uint32_t liveId{};
-    if (!targetSnapshot(*cached, liveId) || liveId != id) return 0;
-    return *cached;
+    return resolveTileMonsterById(id);
 }
 
 bool executeAttackSelectedOnGameThread() {
@@ -766,9 +913,9 @@ bool executeAttackSelectedOnGameThread() {
     std::uintptr_t target = 0;
 
     // ATTACK_ID carries only the semantic creature ID across threads.
-    // Resolve Monster* on the actual game/window thread immediately before
-    // validation + Game::attack so a heap pointer is not kept alive across
-    // the pipe-thread -> game-thread handoff.
+    // Resolve Monster* from the CURRENT cached Tile::things membership on the
+    // actual game/window thread immediately before validation + Game::attack.
+    // No Monster pointer discovered by the old broad heap scan is used here.
     if (g_pendingAttackRequestedId) {
         target = resolveVisibleMonsterById(g_pendingAttackRequestedId);
         if (!target) {
@@ -1046,15 +1193,14 @@ std::string combatTargetsResponse(const Profile& p) {
 }
 
 std::string visibleMonstersResponse() {
-    if (!monsterCacheFresh())
-        storeMonsterCache(scanVisibleMonsters());
-    const auto monsters = copyMonsterCache();
+    const auto tileMonsters = scanCachedTileMonsters(15);
     std::ostringstream o;
-    o << "{\"ok\":true,\"cmd\":\"GET_VISIBLE_MONSTERS\",\"count\":" << monsters.size()
+    o << "{\"ok\":true,\"cmd\":\"GET_VISIBLE_MONSTERS\","
+      << "\"source\":\"Tile::things-cache\",\"count\":" << tileMonsters.size()
       << ",\"monsters\":[";
-    for (std::size_t i = 0; i < monsters.size() && i < 32; ++i) {
+    for (std::size_t i = 0; i < tileMonsters.size() && i < 32; ++i) {
         if (i) o << ",";
-        const auto& m = monsters[i];
+        const auto& m = tileMonsters[i].monster;
         o << "{\"id\":" << m.id
           << ",\"name\":\"" << jsonEscape(m.name) << "\""
           << ",\"hpPercent\":" << static_cast<unsigned>(m.hpPercent)
@@ -1133,7 +1279,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":10,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":11,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -1225,7 +1371,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V10 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V11 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
