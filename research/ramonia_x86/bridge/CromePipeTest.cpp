@@ -44,18 +44,30 @@ DWORD findRamoniaPid() {
 bool requestRaw(DWORD pid, const std::string& json, std::string& response, bool printResponse = true) {
     const std::string pipeName = "\\\\.\\pipe\\Crome.Ramonia." + std::to_string(pid);
 
-    if (!WaitNamedPipeA(pipeName.c_str(), 2500)) {
-        if (printResponse)
-            std::cout << "[ERRO] Pipe nao encontrado: " << pipeName
-                      << " Win32=" << GetLastError() << "\n";
-        return false;
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    DWORD lastError = ERROR_SUCCESS;
+
+    // The bridge serves one request per pipe instance. Between Disconnect/Close
+    // and the next CreateNamedPipe there is a tiny window where Windows reports
+    // FILE_NOT_FOUND instead of waiting. Retry that transport-only race locally.
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        pipe = CreateFileA(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+
+        lastError = GetLastError();
+        if (lastError != ERROR_PIPE_BUSY && lastError != ERROR_FILE_NOT_FOUND) break;
+
+        if (lastError == ERROR_PIPE_BUSY)
+            WaitNamedPipeA(pipeName.c_str(), 100);
+
+        Sleep(25);
     }
 
-    HANDLE pipe = CreateFileA(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
-                              0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) {
         if (printResponse)
-            std::cout << "[ERRO] CreateFile pipe Win32=" << GetLastError() << "\n";
+            std::cout << "[ERRO] Pipe indisponivel: " << pipeName
+                      << " Win32=" << lastError << "\n";
         return false;
     }
 
