@@ -31,7 +31,7 @@ if errorlevel 1 (
     goto :error
 )
 
-set "SRC_DIR=%CROME_SRC_DRIVE%\"
+set "SRC_DIR=%CROME_SRC_DRIVE%/"
 
 echo [PATH] Source real : %REAL_DEV_DIR%
 echo [PATH] Source CMake: %SRC_DIR%
@@ -39,7 +39,7 @@ echo [PATH] Build       : %BUILD_DIR%
 echo.
 
 if exist "%BUILD_DIR%\CMakeCache.txt" (
-    findstr /I /C:"CMAKE_HOME_DIRECTORY:INTERNAL=%CROME_SRC_DRIVE%/" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+    findstr /I /C:"CMAKE_HOME_DIRECTORY:INTERNAL=%SRC_DIR%" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
     if errorlevel 1 (
         echo [INFO] Cache CMake antigo detectado. Limpando somente o build externo...
         rmdir /S /Q "%BUILD_DIR%"
@@ -48,7 +48,7 @@ if exist "%BUILD_DIR%\CMakeCache.txt" (
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
-cmake -S "%SRC_DIR%" -B "%BUILD_DIR%" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCROME_BUILD_DEV_TOOLS=OFF
+cmake -S %SRC_DIR% -B "%BUILD_DIR%" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCROME_BUILD_DEV_TOOLS=OFF
 if errorlevel 1 goto :error
 
 cmake --build "%BUILD_DIR%" --target Crome CromeRuntime --config Release -j 1
