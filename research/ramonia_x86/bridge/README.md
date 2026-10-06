@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V6
+# Crome Ramonia Pipe Bridge V7
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -80,3 +80,10 @@ Wildcard:
 `CromePipeTest_x64.exe target *`
 
 O loop preserva o alvo atual enquanto ele continuar vivo e corresponder ao filtro. Quando morrer ou desaparecer, escolhe o mais proximo entre os monsters compatíveis e chama `ATTACK_ID`. Use `CTRL+C` para encerrar o teste.
+
+
+## V7 - safer ATTACK_ID handoff
+
+`ATTACK_ID` now carries only the semantic `creatureId` from the pipe thread to the game thread. The live `Monster*` is resolved and revalidated on the game/window thread immediately before `Game::attack`.
+
+This removes the previous cross-thread raw-pointer lifetime window where a creature could die/despawn after the pipe-thread scan but before the native attack call.
