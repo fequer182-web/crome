@@ -500,10 +500,22 @@ HWND findCurrentProcessWindow() {
     return data.hwnd;
 }
 
+struct MovePosition {
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint8_t z{};
+    std::uint8_t pad[3]{};
+};
+static_assert(sizeof(MovePosition) == 12, "MovePosition ABI must be 12 bytes");
+
 #if defined(__GNUC__)
 typedef void (__attribute__((thiscall)) *GameAttackFn)(void*, void*, bool);
+typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
+typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
+typedef void (__thiscall *GameUseFn)(void*, void*);
+typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 #endif
 
 bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
@@ -1611,18 +1623,169 @@ bool executeAttackSelectedOnGameThread() {
     return false;
 }
 
+
+bool executeUseOnGameThread() {
+    InterlockedExchange(&g_lastActionCode, 0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode, 5);
+        return false;
+    }
+
+    const auto& p = *g_profile;
+    if (!p.useRuntimeConfirmed || !p.useItemSharedRefConfirmed ||
+        !p.useMethodRva || !p.itemContractReady) {
+        InterlockedExchange(&g_lastActionCode, 14);
+        return false;
+    }
+
+    std::uintptr_t holder{}, item{};
+    if (!resolveTileItemHolder(g_pendingUseTile,
+                               g_pendingUseItemId,
+                               g_pendingUseItem,
+                               holder,
+                               item) ||
+        !holder || !item) {
+        InterlockedExchange(&g_lastActionCode, 11);
+        return false;
+    }
+
+    if (holder != g_pendingUseHolder || item != g_pendingUseItem) {
+        InterlockedExchange(&g_lastActionCode, 12);
+        return false;
+    }
+
+    const auto functionAddress = g_base + p.useMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode, 13);
+        return false;
+    }
+
+    const auto game = g_base + p.gameRva;
+    const auto fn = reinterpret_cast<GameUseFn>(functionAddress);
+
+    logLine("[ACTION] USE_ITEM game-thread itemId=" +
+            std::to_string(static_cast<unsigned>(g_pendingUseItemId)));
+
+    // Runtime ABI capture says Game::use takes Item shared_object_ptr_ref.
+    // The 4-byte Tile::things element is the actual holder; pass its address,
+    // never the raw Item*.
+    fn(reinterpret_cast<void*>(game),
+       reinterpret_cast<void*>(holder));
+
+    InterlockedExchange(&g_lastActionCode, 1);
+    return true;
+}
+
+bool executeMoveOnGameThread() {
+    InterlockedExchange(&g_lastActionCode, 0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode, 5);
+        return false;
+    }
+
+    const auto& p = *g_profile;
+    if (!p.moveRuntimeConfirmed || !p.moveItemSharedRefConfirmed ||
+        !p.movePositionRefConfirmed || !p.moveCountConfirmed ||
+        !p.moveMethodRva || !p.containerContractReady) {
+        InterlockedExchange(&g_lastActionCode, 18);
+        return false;
+    }
+
+    ContainerSnapshot source;
+    if (!readContainerSnapshot(g_pendingMoveSourceContainer, source)) {
+        InterlockedExchange(&g_lastActionCode, 15);
+        return false;
+    }
+
+    const ContainerItemSlot* sourceSlot = nullptr;
+    for (const auto& slot : source.items) {
+        if (slot.holderAddress == g_pendingMoveHolder &&
+            slot.itemAddress == g_pendingMoveItem &&
+            slot.id == g_pendingMoveItemId) {
+            sourceSlot = &slot;
+            break;
+        }
+    }
+    if (!sourceSlot) {
+        InterlockedExchange(&g_lastActionCode, 15);
+        return false;
+    }
+
+    ContainerSnapshot target;
+    if (!readContainerSnapshot(g_pendingMoveTargetContainer, target) ||
+        target.id != g_pendingMoveTargetContainerId) {
+        InterlockedExchange(&g_lastActionCode, 16);
+        return false;
+    }
+
+    if (target.capacity && g_pendingMoveTargetSlot >= target.capacity) {
+        InterlockedExchange(&g_lastActionCode, 19);
+        return false;
+    }
+
+    const auto functionAddress = g_base + p.moveMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode, 17);
+        return false;
+    }
+
+    // OTClient container position convention. The ABI layout itself
+    // (u32,u32,u8 ref) is runtime-confirmed for this build. The semantic
+    // container encoding is deliberately kept isolated in this experiment.
+    MovePosition dest{};
+    dest.x = 0xFFFFu;
+    dest.y = 0x40u | (g_pendingMoveTargetContainerId & 0xFFu);
+    dest.z = g_pendingMoveTargetSlot;
+
+    std::uint32_t moveCount = g_pendingMoveCount;
+    if (!moveCount) moveCount = sourceSlot->count ? sourceSlot->count : 1u;
+
+    const auto game = g_base + p.gameRva;
+    const auto fn = reinterpret_cast<GameMoveFn>(functionAddress);
+
+    logLine("[ACTION] MOVE_ITEM game-thread itemId=" +
+            std::to_string(static_cast<unsigned>(g_pendingMoveItemId)) +
+            " count=" + std::to_string(moveCount) +
+            " targetContainer=" + std::to_string(g_pendingMoveTargetContainerId) +
+            " targetSlot=" + std::to_string(static_cast<unsigned>(g_pendingMoveTargetSlot)));
+
+    // Runtime ABI capture says arg1 is shared_object_ptr_ref. Container::items
+    // is a deque of 4-byte holders, so the deque element address is the
+    // reference object expected by Game::move.
+    fn(reinterpret_cast<void*>(game),
+       reinterpret_cast<void*>(sourceSlot->holderAddress),
+       &dest,
+       moveCount);
+
+    InterlockedExchange(&g_lastActionCode, 1);
+    return true;
+}
+
 LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         auto* msg = reinterpret_cast<MSG*>(lParam);
-        if (msg->message == kAttackSelectedMessage) {
+        if (msg->message == kActionMessage) {
             const LONG token = static_cast<LONG>(msg->wParam);
-            const LONG expected = InterlockedCompareExchange(&g_pendingActionToken, 0, 0);
-            if (token != 0 && token == expected) {
-                executeAttackSelectedOnGameThread();
+            const LONG expected =
+                InterlockedCompareExchange(&g_pendingActionToken, 0, 0);
 
-                // Preserve the normal hook chain first, then remove our hook
-                // from inside the target thread itself. No permanent hook is
-                // left installed after the action message is consumed.
+            if (token != 0 && token == expected) {
+                const LONG kind =
+                    InterlockedCompareExchange(&g_pendingActionKind, 0, 0);
+
+                if (kind == PendingAttack)
+                    executeAttackSelectedOnGameThread();
+                else if (kind == PendingUse)
+                    executeUseOnGameThread();
+                else if (kind == PendingMove)
+                    executeMoveOnGameThread();
+                else
+                    InterlockedExchange(&g_lastActionCode, 7);
+
+                // Keep the V12 safety property: preserve the hook chain and
+                // remove this hook immediately after the one action.
                 const HHOOK hook = g_gameThreadHook;
                 const LRESULT next = CallNextHookEx(hook, code, wParam, lParam);
                 if (hook) {
@@ -1674,7 +1837,7 @@ void cleanupOnDemandDispatcher() {
     }
 }
 
-bool dispatchAttackToGameThread(DWORD& win32Error) {
+bool dispatchPendingActionToGameThread(DWORD& win32Error) {
     win32Error = ERROR_SUCCESS;
 
     if (!prepareGameThreadDispatcher()) {
@@ -1688,6 +1851,7 @@ bool dispatchAttackToGameThread(DWORD& win32Error) {
     g_actionEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!g_actionEvent) {
         win32Error = GetLastError();
+        InterlockedExchange(&g_pendingActionKind, PendingNone);
         return false;
     }
 
@@ -1699,6 +1863,7 @@ bool dispatchAttackToGameThread(DWORD& win32Error) {
         g_gameThreadId);
     if (!g_gameThreadHook) {
         win32Error = GetLastError();
+        InterlockedExchange(&g_pendingActionKind, PendingNone);
         cleanupOnDemandDispatcher();
         return false;
     }
@@ -1713,11 +1878,12 @@ bool dispatchAttackToGameThread(DWORD& win32Error) {
     SetLastError(0);
     if (!PostThreadMessageW(
             g_gameThreadId,
-            kAttackSelectedMessage,
+            kActionMessage,
             static_cast<WPARAM>(static_cast<ULONG_PTR>(token)),
             0)) {
         win32Error = GetLastError();
         InterlockedCompareExchange(&g_pendingActionToken, 0, token);
+        InterlockedExchange(&g_pendingActionKind, PendingNone);
         cleanupOnDemandDispatcher();
         return false;
     }
@@ -1735,6 +1901,7 @@ bool dispatchAttackToGameThread(DWORD& win32Error) {
     // The hook normally removes itself in the callback. This is only a safety
     // cleanup for unexpected paths.
     cleanupOnDemandDispatcher();
+    InterlockedExchange(&g_pendingActionKind, PendingNone);
     return true;
 }
 
@@ -1750,6 +1917,16 @@ std::string actionCodeText(LONG code) {
         case 8: return "dispatcher_timeout";
         case 9: return "creature_id_mismatch";
         case 10: return "creature_id_not_visible";
+        case 11: return "loot_item_not_visible";
+        case 12: return "item_holder_changed";
+        case 13: return "use_function_not_executable";
+        case 14: return "use_contract_not_ready";
+        case 15: return "move_source_invalid";
+        case 16: return "move_target_invalid";
+        case 17: return "move_function_not_executable";
+        case 18: return "move_contract_not_ready";
+        case 19: return "move_target_full";
+        case 20: return "loot_candidate_missing";
         default: return "unknown_action_result";
     }
 }
