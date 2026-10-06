@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V7
+# Crome Ramonia Pipe Bridge V8
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -87,3 +87,12 @@ O loop preserva o alvo atual enquanto ele continuar vivo e corresponder ao filtr
 `ATTACK_ID` now carries only the semantic `creatureId` from the pipe thread to the game thread. The live `Monster*` is resolved and revalidated on the game/window thread immediately before `Game::attack`.
 
 This removes the previous cross-thread raw-pointer lifetime window where a creature could die/despawn after the pipe-thread scan but before the native attack call.
+
+
+## V8 - monster snapshot cache
+
+The temporary heap/vtable monster discovery is now throttled with a 1000 ms snapshot cache instead of rescanning process memory on every Target poll.
+
+`GET_VISIBLE_MONSTERS` reuses the fresh snapshot. `ATTACK_ID` no longer triggers a full heap scan on the game thread; it resolves the requested ID from the cached snapshot and revalidates the cached address (Monster vtable + creature ID) immediately before `Game::attack`.
+
+This is an interim performance fix until the confirmed Map/Tile/creature registry path replaces heap scanning entirely.
