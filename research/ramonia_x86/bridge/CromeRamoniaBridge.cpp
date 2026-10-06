@@ -1227,7 +1227,9 @@ std::vector<std::uintptr_t> discoverOpenContainerAddresses() {
         }
     };
 
-    scan(scan, rootAddress, 0x60, 0, true);
+    // V25 profile evidence requires the first hop from Game+openContainers
+    // to be exactly +0 of the inline registry root.
+    scan(scan, rootAddress, 0x04, 0, true);
     for (std::size_t i = 0; i < queue.size() && i < 600; ++i)
         scan(scan, queue[i].address, 0xA0, queue[i].depth, true);
 
@@ -1842,6 +1844,7 @@ bool dispatchPendingActionToGameThread(DWORD& win32Error) {
 
     if (!prepareGameThreadDispatcher()) {
         win32Error = ERROR_INVALID_WINDOW_HANDLE;
+        InterlockedExchange(&g_pendingActionKind, PendingNone);
         return false;
     }
 
