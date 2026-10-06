@@ -1,4 +1,4 @@
-# Crome Ramonia Pipe Bridge V9
+# Crome Ramonia Pipe Bridge V10
 
 IPC oficial do Crome para Ramonia x86.
 
@@ -107,3 +107,28 @@ V9 removes the WndProc subclass completely.
 Game-thread actions now use a thread-scoped `WH_GETMESSAGE` hook on the existing game window thread. The pipe thread posts a private thread message, waits on an event, and the hook executes the action on the game thread. Each dispatch uses a token so a timed-out/late message cannot execute a stale pending action.
 
 The V8 1000 ms monster snapshot cache remains in place.
+
+
+## V10 - read-only Tile::things monster proof
+
+V10 adds a diagnostic command only:
+
+`GET_TILE_MONSTERS`
+
+It does not attack, follow, write game memory, or call an internal game function.
+
+The diagnostic reuses the V37 runtime-confirmed Tile contract:
+
+- Tile vtable RVA `0x774208`;
+- `Tile::things` vector at `+0x24`;
+- vector end/cap at `+0x28/+0x2C`;
+- element size `4`;
+- Monster vtable and Creature ID/name/HP/position fields already confirmed by the profile.
+
+For this proof, the bridge scans for exact live-looking Tile objects, snapshots each Tile::things vector only when the vector header remains stable for the whole read, and reports nearby same-floor Monsters found as members of Tile::things. The command is intentionally one-shot/manual and is NOT wired into the Crome Target loop yet.
+
+External test:
+
+`CromePipeTest_x64.exe tilemon [PID]`
+
+A successful response returns `source:"Tile::things"`, `readOnly:true`, and Monster ID/name/HP/position/distance plus Tile membership diagnostics.
