@@ -4,11 +4,18 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include "MiniJson.hpp"
+
 #include <cstdint>
 #include <cctype>
 #include <cwctype>
 #include <iostream>
 #include <string>
+#include <vector>
+#include <thread>
+#include <optional>
+#include <chrono>
+#include <algorithm>
 
 namespace {
 
