@@ -703,14 +703,14 @@ static void RamoniaTargetWorker() {
             bridgeVersion >= 19 &&
             HasRamoniaTargetPolicy(targetCfg);
         const bool lootActive =
-            lootCfg.enabled && bridgeVersion >= 20;
+            lootCfg.enabled && bridgeVersion >= 21;
 
         if (!lootActive) {
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
             SetRamoniaLootStatus(lootCfg.enabled
-                ? "Loot: requer Bridge V20+"
+                ? "Loot: requer Bridge V21+"
                 : "Loot: desligado");
         }
 
@@ -824,7 +824,7 @@ static void RamoniaTargetWorker() {
             if (currentAttackId) {
                 const bool newTarget = lootMarkedTargetId != currentAttackId;
                 const bool refreshDue =
-                    !lootLastTargetMarkMs || nowMs - lootLastTargetMarkMs >= 450;
+                    !lootLastTargetMarkMs || nowMs - lootLastTargetMarkMs >= 250;
 
                 if (newTarget || refreshDue) {
                     nlohmann::json mark;
@@ -918,7 +918,7 @@ static bool FoodRuntimeReady() {
 
 static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
-           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 20);
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 21);
 }
 
 static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
@@ -1889,7 +1889,7 @@ static void DrawLoot(const Theme& t) {
 
     const bool lootRuntimeReady=LootRuntimeReady();
     const bool ramoniaLootReady=
-        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=20;
+        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=21;
 
     CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),125,t);
 
@@ -2078,7 +2078,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.8 Death-Tile Loot");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.9 Rolling Loot");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
