@@ -979,6 +979,7 @@ static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
     std::uint64_t nextLightRefreshMs = 0;
     std::uint64_t nextHealAttemptMs = 0;
+    std::uint64_t nextRuneAttemptMs = 0;
     bool lightApplied = false;
     std::uint32_t lootMarkedTargetId = 0;
     std::uint64_t lootLastTargetMarkMs = 0;
@@ -997,6 +998,7 @@ static void RamoniaTargetWorker() {
             nextFoodAttemptMs = 0;
             nextLightRefreshMs = 0;
             nextHealAttemptMs = 0;
+            nextRuneAttemptMs = 0;
             lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
@@ -1006,6 +1008,7 @@ static void RamoniaTargetWorker() {
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
             SetRamoniaHealingStatus("Healing: Ramonia fechado");
+            SetRamoniaRuneStatus("Trainer: Ramonia fechado");
             SetRamoniaLootStatus("Loot: Ramonia fechado");
             Sleep(700);
             continue;
@@ -1024,6 +1027,7 @@ static void RamoniaTargetWorker() {
             nextFoodAttemptMs = 0;
             nextLightRefreshMs = 0;
             nextHealAttemptMs = 0;
+            nextRuneAttemptMs = 0;
             lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
@@ -1033,6 +1037,7 @@ static void RamoniaTargetWorker() {
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
             SetRamoniaHealingStatus("Healing: bridge aguardando");
+            SetRamoniaRuneStatus("Trainer: bridge aguardando");
             SetRamoniaLootStatus("Loot: bridge aguardando");
             Sleep(500);
             continue;
@@ -1087,6 +1092,8 @@ static void RamoniaTargetWorker() {
             }
             nextLightRefreshMs=nowMs+500;
         }
+
+        bool healingActionThisCycle=false;
 
         // Ramonia Healing: spell rules use SAY/talkChannel; item rules use
         // USE_CONTAINER_ITEM_ON_SELF from Bridge V24+ (V25 inherits it).
@@ -1155,6 +1162,7 @@ static void RamoniaTargetWorker() {
 
                 if (used) {
                     acted=true;
+                    healingActionThisCycle=true;
                     SetRamoniaHealingStatus(
                         "Healing: " + selectedItem->name +
                         " ID=" + std::to_string(selectedItem->itemId));
@@ -1191,6 +1199,7 @@ static void RamoniaTargetWorker() {
 
                 if (cast) {
                     acted=true;
+                    healingActionThisCycle=true;
                     SetRamoniaHealingStatus(
                         "Healing: " + selectedSpell->spell +
                         " HP=" + std::to_string(
@@ -1216,6 +1225,7 @@ static void RamoniaTargetWorker() {
 
                 if (used) {
                     acted=true;
+                    healingActionThisCycle=true;
                     SetRamoniaHealingStatus(
                         "Healing: " + selectedItem->name +
                         " ID=" + std::to_string(selectedItem->itemId));
@@ -1232,6 +1242,78 @@ static void RamoniaTargetWorker() {
 
                 nextHealAttemptMs=nowMs+100;
             }
+        }
+
+        // Rune Maker / Mana Trainer. Mana is a >= threshold. Soul is
+        // enforced only when the current build exposes a valid Soul field.
+        const auto runeCfg=GetRamoniaRuneConfig();
+        if (!runeCfg.enabled) {
+            nextRuneAttemptMs=0;
+            SetRamoniaRuneStatus("Trainer: desligado");
+        } else if (bridgeVersion<26) {
+            nextRuneAttemptMs=0;
+            SetRamoniaRuneStatus("Trainer: requer Bridge V26+");
+        } else if (!healingActionThisCycle &&
+                   (!nextRuneAttemptMs || nowMs>=nextRuneAttemptMs)) {
+
+            nlohmann::json playerJson;
+            const bool playerOk=
+                RamoniaPipeRequest(pid,{{"cmd","GET_PLAYER"}},playerJson);
+            const auto vitals=playerOk ? ParseRamoniaVitals(playerJson) : RamoniaVitalsUi{};
+
+            if (!vitals.valid) {
+                SetRamoniaRuneStatus("Trainer: aguardando player");
+                nextRuneAttemptMs=nowMs+150;
+            } else {
+                const int manaPct=
+                    static_cast<int>(vitals.manaPercent());
+                const bool manaReady=
+                    manaPct>=std::clamp(runeCfg.manaPercent,0,100);
+                const bool soulReady=
+                    !vitals.soulAvailable ||
+                    vitals.soul>=static_cast<double>(std::max(0,runeCfg.soulMin));
+
+                std::ostringstream status;
+                status << "Trainer: Mana " << manaPct << "%";
+                if (vitals.soulAvailable)
+                    status << " | Soul " << static_cast<int>(vitals.soul);
+                else
+                    status << " | Soul N/A";
+
+                if (!manaReady) {
+                    status << " | aguardando mana";
+                    SetRamoniaRuneStatus(status.str());
+                    nextRuneAttemptMs=nowMs+150;
+                } else if (!soulReady) {
+                    status << " | aguardando soul";
+                    SetRamoniaRuneStatus(status.str());
+                    nextRuneAttemptMs=nowMs+250;
+                } else if (runeCfg.spell.empty() || runeCfg.spell.size()>15) {
+                    SetRamoniaRuneStatus("Trainer: spell invalida (1-15 chars)");
+                    nextRuneAttemptMs=nowMs+500;
+                } else {
+                    nlohmann::json sayJson;
+                    const bool cast=
+                        RamoniaPipeRequest(
+                            pid,
+                            {{"cmd","SAY"},{"message",runeCfg.spell}},
+                            sayJson) &&
+                        sayJson.value("ok",false);
+
+                    if (cast) {
+                        status << " | cast " << runeCfg.spell;
+                        SetRamoniaRuneStatus(status.str());
+                        nextRuneAttemptMs=
+                            nowMs+std::max<std::uint32_t>(
+                                300u,runeCfg.cooldownMs);
+                    } else {
+                        SetRamoniaRuneStatus("Trainer: SAY pendente");
+                        nextRuneAttemptMs=nowMs+250;
+                    }
+                }
+            }
+        } else if (healingActionThisCycle) {
+            SetRamoniaRuneStatus("Trainer: Healing teve prioridade");
         }
 
         // Auto Food stays independent from Target and Loot.
