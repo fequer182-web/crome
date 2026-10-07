@@ -347,3 +347,31 @@ These changes are safety hardening based on the observed transition crash. They 
 Target name filtering remains policy-driven: a list containing only `Rat` intentionally excludes `Cave Rat` and `Spider`. Those names must be added explicitly or Attack Any (`*`) must be enabled.
 
 Loot corpse id `2813` is confirmed only for the tested Rat corpse. Other creature types should have their death-window corpse item id captured before being added to continuous Loot.
+
+
+## Pre-V17 A/B isolation: transition crash points to Target/Tile cache
+
+Live A/B testing on the previous version narrowed the crash significantly.
+
+Stable case:
+- Auto Food enabled;
+- Loot enabled;
+- Target disabled;
+- Rat and Cave Rat corpses opened and looted correctly;
+- no crash, including leaving the cave.
+
+Crash case:
+- Target enabled for Rat and Cave Rat;
+- Loot enabled;
+- Auto Food enabled;
+- all configured monsters were killed and looted correctly inside the cave;
+- shortly after climbing the stairs and changing floor/route, the client crashed.
+
+This indicates the validated container use/move path is not the primary trigger. The failure correlates with Target/Tile::things activity across a floor transition.
+
+Additional V17 hardening:
+- Crome v0.8.4 pauses Target/Loot for 1600 ms after a z change or large position jump;
+- the bridge re-resolves the game window/thread before every on-demand action;
+- the bridge now invalidates the cached Tile* list immediately when LocalPlayer z differs from the cache origin z, rather than allowing the previous-floor cache to survive for up to 1000 ms.
+
+Rat and Cave Rat both opened successfully under corpse item id `2813` on this Ramonia build.
