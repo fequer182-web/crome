@@ -44,7 +44,8 @@ enum PendingActionKind : LONG {
     PendingAttack = 1,
     PendingUse = 2,
     PendingMove = 3,
-    PendingTalk = 4
+    PendingTalk = 4,
+    PendingUseWithSelf = 5
 };
 
 volatile LONG g_lastActionCode{};
@@ -93,6 +94,7 @@ struct Profile {
     std::size_t creatureNameOffset{};
     std::size_t creatureHpPercentOffset{};
     std::uintptr_t monsterVtableRva{};
+    std::uintptr_t localPlayerVtableRva{};
     std::uintptr_t itemVtableRva{};
     std::uintptr_t containerVtableRva{};
     std::size_t itemIdOffset{};
@@ -110,6 +112,12 @@ struct Profile {
     std::uintptr_t useMethodRva{};
     bool useRuntimeConfirmed{};
     bool useItemSharedRefConfirmed{};
+
+    std::uintptr_t useWithMethodRva{};
+    bool useWithRuntimeConfirmed{};
+    bool useWithItemSharedRefConfirmed{};
+    bool useWithThingSharedRefConfirmed{};
+
     std::uintptr_t moveMethodRva{};
     bool moveRuntimeConfirmed{};
     bool moveItemSharedRefConfirmed{};
@@ -300,6 +308,14 @@ Profile loadProfile(const std::string& path) {
         if (n) p.monsterVtableRva = static_cast<std::uintptr_t>(*n);
     }
 
+    const auto* localPlayer = child(rtti, "LocalPlayer");
+    const auto* localPlayerVtables = child(localPlayer, "vtables");
+    if (localPlayerVtables && localPlayerVtables->isArray() &&
+        !localPlayerVtables->array().empty()) {
+        const auto n=integerValue(&localPlayerVtables->array().front());
+        if (n) p.localPlayerVtableRva=static_cast<std::uintptr_t>(*n);
+    }
+
     const auto* item = child(rtti, "Item");
     const auto* itemVtables = child(item, "vtables");
     if (itemVtables && itemVtables->isArray() && !itemVtables->array().empty()) {
@@ -374,6 +390,30 @@ Profile loadProfile(const std::string& path) {
                 stringValue(a0.get("semantic")) == "Item" &&
                 stringValue(a0.get("abiType")) == "shared_object_ptr_ref" &&
                 stringValue(a0.get("status")) == "runtime_confirmed";
+        }
+    }
+
+    const auto* useWith = child(actions, "useWith");
+    if (useWith && useWith->isObject()) {
+        if (const auto n=integerValue(useWith->get("methodRva")))
+            p.useWithMethodRva=static_cast<std::uintptr_t>(*n);
+        p.useWithRuntimeConfirmed=
+            stringValue(useWith->get("status"))=="runtime_confirmed";
+
+        const auto* args=useWith->get("args");
+        if (args && args->isArray() && args->array().size()>=2) {
+            const auto& a0=args->array()[0];
+            const auto& a1=args->array()[1];
+            p.useWithItemSharedRefConfirmed=
+                a0.isObject() &&
+                stringValue(a0.get("semantic"))=="Item" &&
+                stringValue(a0.get("abiType"))=="shared_object_ptr_ref" &&
+                stringValue(a0.get("status"))=="runtime_confirmed";
+            p.useWithThingSharedRefConfirmed=
+                a1.isObject() &&
+                stringValue(a1.get("semantic"))=="Thing" &&
+                stringValue(a1.get("abiType"))=="shared_object_ptr_ref" &&
+                stringValue(a1.get("status"))=="runtime_confirmed";
         }
     }
 
@@ -657,11 +697,13 @@ static_assert(sizeof(MovePosition) == 12, "MovePosition ABI must be 12 bytes");
 #if defined(__GNUC__)
 typedef void (__attribute__((thiscall)) *GameAttackFn)(void*, void*, bool);
 typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
+typedef void (__attribute__((thiscall)) *GameUseWithFn)(void*, void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
+typedef void (__thiscall *GameUseWithFn)(void*, void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
 #endif
