@@ -629,3 +629,17 @@ Pipe diagnostic:
 CromePipeTest_x64.exe useself <containerId|any> <itemId> [PID]
 
 Automatic item Healing must remain disabled until one live self-use is confirmed. After confirmation, the existing Healing HP/Mana rule engine can route UH/Life Fluid/Mana Fluid through this backend.
+
+
+## Crome v0.9.5 Look IDs
+
+The user preferred an item-ID inspector over exposing more manual ID fields in Healing.
+
+Crome now adds a Ramonia Look / IDs popup driven by GET_OPEN_CONTAINERS:
+- open a bag or corpse in the game;
+- press Look IDs from Healing or Loot;
+- the popup lists Container ID, container name, slot, Item ID and count;
+- each row has a one-click ID copy button;
+- Refresh rereads the currently open containers.
+
+This intentionally avoids a permanent Game::look hook. It is meant for calibration of UH, potions, nested corpse bags and other container items while preserving the stable on-demand bridge design.
