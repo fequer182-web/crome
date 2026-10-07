@@ -101,6 +101,13 @@ struct RamoniaContainerUi {
     std::vector<RamoniaContainerItemUi> items;
 };
 
+struct RamoniaPositionUi {
+    bool valid{};
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t z{};
+};
+
 static std::atomic<bool> g_ramoniaWorkerRun{true};
 static std::atomic<bool> g_ramoniaBridgeReady{false};
 static std::atomic<int> g_ramoniaBridgeVersion{0};
@@ -326,6 +333,27 @@ static std::optional<RamoniaMonsterUi> ChooseRamoniaTarget(
 }
 
 
+static RamoniaPositionUi ParseRamoniaPlayerPosition(const nlohmann::json& j) {
+    RamoniaPositionUi out;
+    if (!j.is_object() || !j.value("ok",false) ||
+        !j.contains("player") || !j["player"].is_object())
+        return out;
+
+    const auto& player=j["player"];
+    if (!player.contains("position") || !player["position"].is_object())
+        return out;
+
+    const auto& p=player["position"];
+    if (!p.contains("x") || !p.contains("y") || !p.contains("z"))
+        return out;
+
+    out.x=p.value("x",0u);
+    out.y=p.value("y",0u);
+    out.z=p.value("z",0u);
+    out.valid=out.x!=0u && out.y!=0u;
+    return out;
+}
+
 static std::vector<RamoniaContainerUi> ParseRamoniaContainers(const nlohmann::json& j) {
     std::vector<RamoniaContainerUi> out;
     if (!j.is_object() || !j.value("ok",false) ||
@@ -521,6 +549,9 @@ static void RamoniaTargetWorker() {
     std::uint32_t lootMarkedTargetId = 0;
     std::uint64_t lootDiffDeadlineMs = 0;
 
+    RamoniaPositionUi lastPosition{};
+    std::uint64_t mapTransitionUntilMs = 0;
+
     while (g_ramoniaWorkerRun.load()) {
         const DWORD pid = FindRamoniaProcess();
         g_ramoniaPid.store(pid);
@@ -530,6 +561,8 @@ static void RamoniaTargetWorker() {
             nextFoodAttemptMs = 0;
             lootMarkedTargetId = 0;
             lootDiffDeadlineMs = 0;
+            lastPosition = {};
+            mapTransitionUntilMs = 0;
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
             SetRamoniaLootStatus("Loot: Ramonia fechado");
@@ -550,6 +583,8 @@ static void RamoniaTargetWorker() {
             nextFoodAttemptMs = 0;
             lootMarkedTargetId = 0;
             lootDiffDeadlineMs = 0;
+            lastPosition = {};
+            mapTransitionUntilMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
             SetRamoniaLootStatus("Loot: bridge aguardando");
@@ -621,6 +656,41 @@ static void RamoniaTargetWorker() {
             SetRamoniaLootStatus(lootCfg.enabled
                 ? "Loot: requer Bridge V16+"
                 : "Loot: desligado");
+        }
+
+        // Tile::things must not be queried while the client is changing
+        // floor/map. A floor transition can destroy/rebuild Tile objects while
+        // Target/Loot still hold a snapshot from the previous floor.
+        if (targetPolicyActive || lootActive) {
+            nlohmann::json playerJson;
+            if (RamoniaPipeRequest(pid, {{"cmd","GET_PLAYER"}}, playerJson)) {
+                const auto pos = ParseRamoniaPlayerPosition(playerJson);
+                if (pos.valid) {
+                    if (lastPosition.valid) {
+                        const auto dx = pos.x > lastPosition.x ? pos.x-lastPosition.x : lastPosition.x-pos.x;
+                        const auto dy = pos.y > lastPosition.y ? pos.y-lastPosition.y : lastPosition.y-pos.y;
+                        const bool floorChanged = pos.z != lastPosition.z;
+                        const bool largeJump = std::max(dx,dy) > 12u;
+
+                        if (floorChanged || largeJump) {
+                            mapTransitionUntilMs = nowMs + 1600;
+                            lootMarkedTargetId = 0;
+                            lootDiffDeadlineMs = 0;
+                            SetRamoniaStatus("Mapa mudou - aguardando estabilizar");
+                            if (lootActive)
+                                SetRamoniaLootStatus("Loot pausado durante troca de mapa");
+                        }
+                    }
+                    lastPosition = pos;
+                }
+            }
+
+            if (mapTransitionUntilMs && nowMs < mapTransitionUntilMs) {
+                Sleep(120);
+                continue;
+            }
+            if (mapTransitionUntilMs && nowMs >= mapTransitionUntilMs)
+                mapTransitionUntilMs = 0;
         }
 
         if (!targetPolicyActive && !lootActive) {
@@ -1916,7 +1986,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.3 Ramonia Loot");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.4 Ramonia Safety");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
