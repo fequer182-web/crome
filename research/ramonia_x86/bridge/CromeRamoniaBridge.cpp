@@ -1554,6 +1554,274 @@ std::string setWorldLightResponse(bool enabled) {
     return worldLightStatusResponse("SET_LIGHT");
 }
 
+bool writeCodeByte(std::uintptr_t address,std::uint8_t value) {
+    if (!address) return false;
+    DWORD oldProtect{};
+    if (!VirtualProtect(
+            reinterpret_cast<void*>(address),
+            1,
+            PAGE_EXECUTE_READWRITE,
+            &oldProtect))
+        return false;
+
+    *reinterpret_cast<volatile std::uint8_t*>(address)=value;
+    FlushInstructionCache(
+        GetCurrentProcess(),
+        reinterpret_cast<void*>(address),
+        1);
+
+    DWORD ignored{};
+    VirtualProtect(
+        reinterpret_cast<void*>(address),
+        1,
+        oldProtect,
+        &ignored);
+    return true;
+}
+
+void restoreLookCaptureBreakpointLocked() {
+    if (!g_lookCaptureArmed || !g_lookCaptureAddress)
+        return;
+    writeCodeByte(g_lookCaptureAddress,g_lookCaptureOriginalByte);
+    InterlockedExchange(&g_lookCaptureArmed,0);
+}
+
+LONG CALLBACK lookCaptureVeh(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (ep->ExceptionRecord->ExceptionCode!=EXCEPTION_BREAKPOINT)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    AcquireSRWLockExclusive(&g_lookCaptureLock);
+
+    if (!g_lookCaptureArmed ||
+        ep->ExceptionRecord->ExceptionAddress !=
+            reinterpret_cast<void*>(g_lookCaptureAddress)) {
+        ReleaseSRWLockExclusive(&g_lookCaptureLock);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // One-shot: restore original byte immediately before resuming Game::look.
+    restoreLookCaptureBreakpointLocked();
+
+    std::uintptr_t holderRef{};
+    std::uintptr_t item{};
+    std::uint16_t itemId{};
+    std::uintptr_t itemVtable{};
+
+    const auto esp=static_cast<std::uintptr_t>(ep->ContextRecord->Esp);
+    const bool ok=
+        g_profile &&
+        g_profile->lookRuntimeConfirmed &&
+        g_profile->lookItemSharedRefConfirmed &&
+        safeRead(esp+sizeof(std::uintptr_t),holderRef) &&
+        holderRef &&
+        safeRead(holderRef,item) &&
+        item &&
+        safeRead(item,itemVtable) &&
+        itemVtable>=g_base &&
+        itemVtable<g_base+g_imageSize &&
+        safeRead(item+g_profile->itemIdOffset,itemId) &&
+        itemId!=0;
+
+    if (ok) {
+        g_lookCapturedHolder=holderRef;
+        g_lookCapturedItem=item;
+        g_lookCapturedId=itemId;
+        g_lookCapturedTick=GetTickCount64();
+        InterlockedExchange(&g_lookCaptureCaptured,1);
+        logLine("[LOOK] captured itemId="+
+                std::to_string(static_cast<unsigned>(itemId)));
+    } else {
+        g_lookCapturedHolder=0;
+        g_lookCapturedItem=0;
+        g_lookCapturedId=0;
+        g_lookCapturedTick=GetTickCount64();
+        InterlockedExchange(&g_lookCaptureCaptured,0);
+        logLine("[LOOK] Game::look fired but ItemPtr validation failed");
+    }
+
+    // INT3 advances EIP by one byte. Rewind so the restored original first
+    // instruction executes normally.
+    ep->ContextRecord->Eip=
+        static_cast<DWORD>(g_lookCaptureAddress);
+
+    if (g_lookCaptureEvent)
+        SetEvent(g_lookCaptureEvent);
+
+    ReleaseSRWLockExclusive(&g_lookCaptureLock);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+DWORD WINAPI lookCaptureTimeoutThread(void*) {
+    HANDLE event{};
+    AcquireSRWLockShared(&g_lookCaptureLock);
+    event=g_lookCaptureEvent;
+    ReleaseSRWLockShared(&g_lookCaptureLock);
+
+    if (event)
+        WaitForSingleObject(event,8000);
+
+    // Let the VEH finish returning before unregistering it.
+    Sleep(40);
+
+    AcquireSRWLockExclusive(&g_lookCaptureLock);
+    restoreLookCaptureBreakpointLocked();
+
+    if (g_lookVehHandle) {
+        RemoveVectoredExceptionHandler(g_lookVehHandle);
+        g_lookVehHandle=nullptr;
+    }
+
+    if (g_lookCaptureEvent) {
+        CloseHandle(g_lookCaptureEvent);
+        g_lookCaptureEvent=nullptr;
+    }
+
+    InterlockedExchange(&g_lookCaptureWorkerActive,0);
+    ReleaseSRWLockExclusive(&g_lookCaptureLock);
+    return 0;
+}
+
+void cleanupLookCapture(bool clearResult=false) {
+    // Avoid closing the wait handle underneath an active timeout worker.
+    AcquireSRWLockExclusive(&g_lookCaptureLock);
+    restoreLookCaptureBreakpointLocked();
+
+    if (!g_lookCaptureWorkerActive) {
+        if (g_lookVehHandle) {
+            RemoveVectoredExceptionHandler(g_lookVehHandle);
+            g_lookVehHandle=nullptr;
+        }
+        if (g_lookCaptureEvent) {
+            CloseHandle(g_lookCaptureEvent);
+            g_lookCaptureEvent=nullptr;
+        }
+    }
+
+    if (clearResult) {
+        InterlockedExchange(&g_lookCaptureCaptured,0);
+        g_lookCapturedId=0;
+        g_lookCapturedHolder=0;
+        g_lookCapturedItem=0;
+        g_lookCapturedTick=0;
+    }
+    ReleaseSRWLockExclusive(&g_lookCaptureLock);
+}
+
+std::string armLookCaptureResponse() {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"build_not_validated"})";
+    if (!g_profile->lookRuntimeConfirmed ||
+        !g_profile->lookItemSharedRefConfirmed ||
+        !g_profile->lookMethodRva ||
+        !g_profile->itemContractReady)
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"look_contract_not_ready"})";
+
+    if (InterlockedCompareExchange(
+            &g_lookCaptureWorkerActive,1,0)!=0)
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"capture_busy"})";
+
+    const auto lookAddress=g_base+g_profile->lookMethodRva;
+    if (!isExecutableAddress(lookAddress)) {
+        InterlockedExchange(&g_lookCaptureWorkerActive,0);
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"look_function_not_executable"})";
+    }
+
+    std::uint8_t original{};
+    if (!safeRead(lookAddress,original) || original==0xCC) {
+        InterlockedExchange(&g_lookCaptureWorkerActive,0);
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"look_first_byte_unavailable"})";
+    }
+
+    AcquireSRWLockExclusive(&g_lookCaptureLock);
+
+    g_lookCaptureAddress=lookAddress;
+    g_lookCaptureOriginalByte=original;
+    g_lookCapturedId=0;
+    g_lookCapturedHolder=0;
+    g_lookCapturedItem=0;
+    g_lookCapturedTick=0;
+    InterlockedExchange(&g_lookCaptureCaptured,0);
+
+    g_lookCaptureEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    if (!g_lookCaptureEvent) {
+        InterlockedExchange(&g_lookCaptureWorkerActive,0);
+        ReleaseSRWLockExclusive(&g_lookCaptureLock);
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"event_create_failed"})";
+    }
+
+    g_lookVehHandle=AddVectoredExceptionHandler(1,&lookCaptureVeh);
+    if (!g_lookVehHandle) {
+        CloseHandle(g_lookCaptureEvent);
+        g_lookCaptureEvent=nullptr;
+        InterlockedExchange(&g_lookCaptureWorkerActive,0);
+        ReleaseSRWLockExclusive(&g_lookCaptureLock);
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"veh_install_failed"})";
+    }
+
+    if (!writeCodeByte(lookAddress,0xCC)) {
+        RemoveVectoredExceptionHandler(g_lookVehHandle);
+        g_lookVehHandle=nullptr;
+        CloseHandle(g_lookCaptureEvent);
+        g_lookCaptureEvent=nullptr;
+        InterlockedExchange(&g_lookCaptureWorkerActive,0);
+        ReleaseSRWLockExclusive(&g_lookCaptureLock);
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"breakpoint_install_failed"})";
+    }
+
+    InterlockedExchange(&g_lookCaptureArmed,1);
+    ReleaseSRWLockExclusive(&g_lookCaptureLock);
+
+    HANDLE thread=CreateThread(
+        nullptr,0,&lookCaptureTimeoutThread,nullptr,0,nullptr);
+    if (!thread) {
+        AcquireSRWLockExclusive(&g_lookCaptureLock);
+        restoreLookCaptureBreakpointLocked();
+        if (g_lookVehHandle) {
+            RemoveVectoredExceptionHandler(g_lookVehHandle);
+            g_lookVehHandle=nullptr;
+        }
+        if (g_lookCaptureEvent) {
+            CloseHandle(g_lookCaptureEvent);
+            g_lookCaptureEvent=nullptr;
+        }
+        InterlockedExchange(&g_lookCaptureWorkerActive,0);
+        ReleaseSRWLockExclusive(&g_lookCaptureLock);
+        return R"({"ok":false,"cmd":"ARM_LOOK_ID","error":"timeout_thread_failed"})";
+    }
+    CloseHandle(thread);
+
+    logLine("[LOOK] one-shot capture armed for 8s");
+    return R"({"ok":true,"cmd":"ARM_LOOK_ID","armed":true,"timeoutMs":8000})";
+}
+
+std::string getLookCaptureResponse() {
+    const bool captured=
+        InterlockedCompareExchange(&g_lookCaptureCaptured,0,0)!=0;
+    const bool armed=
+        InterlockedCompareExchange(&g_lookCaptureArmed,0,0)!=0;
+    const bool busy=
+        InterlockedCompareExchange(&g_lookCaptureWorkerActive,0,0)!=0;
+
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"GET_LOOK_ID\""
+      << ",\"armed\":" << (armed?"true":"false")
+      << ",\"busy\":" << (busy?"true":"false")
+      << ",\"captured\":" << (captured?"true":"false");
+
+    if (captured) {
+        o << ",\"id\":" << g_lookCapturedId
+          << ",\"ageMs\":"
+          << (GetTickCount64()>=g_lookCapturedTick
+                ? GetTickCount64()-g_lookCapturedTick
+                : 0);
+    }
+
+    o << "}";
+    return o.str();
+}
+
 bool readMsvcString32(std::uintptr_t address, std::string& out) {
     out.clear();
     std::uint32_t len{}, cap{};
