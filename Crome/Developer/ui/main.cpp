@@ -1714,6 +1714,7 @@ static void DrawHealing(const Theme& t) {
     static int lifeFluidHp = 50;
     static int lifeFluidId = 0;
     static std::uint64_t seenProfileLoadGeneration=~0ull;
+
     if(seenProfileLoadGeneration!=g_profileLoadGeneration){
         seenProfileLoadGeneration=g_profileLoadGeneration;
         nlohmann::json hj;
@@ -1721,89 +1722,188 @@ static void DrawHealing(const Theme& t) {
             healingMaster=hj.value("enabled",false);
             if(hj.contains("rules")&&hj["rules"].is_array()){
                 for(auto& r:hj["rules"]){
-                    if(!r.is_object()) continue; const auto name=r.value("name",std::string());
+                    if(!r.is_object()) continue;
+                    const auto name=r.value("name",std::string());
                     if(name=="light_heal"||name=="mid_heal"||name=="high_heal"){
                         const int i=name=="light_heal"?0:(name=="mid_heal"?1:2);
-                        enabled[i]=r.value("enabled",false); hp[i]=r.value("below_or_equal",hp[i]); mana[i]=r.value("min_mana",mana[i]);
-                        const auto sp=r.value("spell",std::string(spells[i])); std::snprintf(spells[i],sizeof(spells[i]),"%s",sp.c_str());
-                    } else if(name=="uh"){ uhEnabled=r.value("enabled",false); uhHp=r.value("below_or_equal",uhHp); uhId=r.value("item_id",uhId); }
-                    else if(name=="mana_fluid"){ manaFluidEnabled=r.value("enabled",false); manaFluidMp=r.value("below_or_equal",manaFluidMp); manaFluidId=r.value("item_id",manaFluidId); }
-                    else if(name=="life_fluid"){ lifeFluidEnabled=r.value("enabled",false); lifeFluidHp=r.value("below_or_equal",lifeFluidHp); lifeFluidId=r.value("item_id",lifeFluidId); }
+                        enabled[i]=r.value("enabled",false);
+                        hp[i]=r.value("below_or_equal",hp[i]);
+                        mana[i]=r.value("min_mana",mana[i]);
+                        const auto sp=r.value("spell",std::string(spells[i]));
+                        std::snprintf(spells[i],sizeof(spells[i]),"%s",sp.c_str());
+                    } else if(name=="uh"){
+                        uhEnabled=r.value("enabled",false);
+                        uhHp=r.value("below_or_equal",uhHp);
+                        uhId=r.value("item_id",uhId);
+                    } else if(name=="mana_fluid"){
+                        manaFluidEnabled=r.value("enabled",false);
+                        manaFluidMp=r.value("below_or_equal",manaFluidMp);
+                        manaFluidId=r.value("item_id",manaFluidId);
+                    } else if(name=="life_fluid"){
+                        lifeFluidEnabled=r.value("enabled",false);
+                        lifeFluidHp=r.value("below_or_equal",lifeFluidHp);
+                        lifeFluidId=r.value("item_id",lifeFluidId);
+                    }
                 }
             }
         }
     }
 
-    CardBegin("healing", "Healing", CardIcon::Heart, ImVec4(1.0f,0.20f,0.36f,1), 140, t);
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    const bool healingRuntimeReady=HealingRuntimeReady();
+    const bool ramoniaSpellReady=
+        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=23;
 
-    ImGui::Checkbox("##healing_master", &healingMaster);
-    ImGui::SameLine(); ImGui::TextUnformatted("Healing");
+    CardBegin("healing", "Healing", CardIcon::Heart,
+              ImVec4(1.0f,0.20f,0.36f,1), 140, t);
+
+    if(!healingRuntimeReady) ImGui::BeginDisabled();
+    ImGui::Checkbox("##healing_master",&healingMaster);
+    if(!healingRuntimeReady) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Healing");
     ImGui::SameLine(92);
-    if (g_livePlayer.valid) {
-        ImGui::TextDisabled("HP %.0f%%  Mana %.0f", g_livePlayer.healthPercent(), g_livePlayer.mana);
-    } else ImGui::TextDisabled("aguardando player");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x > 80 ? ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x-48 : ImGui::GetCursorPosX());
-    if (ImGui::SmallButton("IDs")) ImGui::OpenPopup("heal_ids");
-    if (ImGui::BeginPopup("heal_ids")) {
-        ImGui::TextUnformatted("Item IDs"); ImGui::Separator();
-        ImGui::TextUnformatted("UH"); ImGui::SameLine(90); SmallInt("##uh_id_popup", &uhId, 90);
-        ImGui::TextUnformatted("Mana Fluid"); ImGui::SameLine(90); SmallInt("##mf_id_popup", &manaFluidId, 90);
-        ImGui::TextUnformatted("Life Fluid"); ImGui::SameLine(90); SmallInt("##lf_id_popup", &lifeFluidId, 90);
+    if(g_nativeRuntimeLoaded && g_livePlayer.valid) {
+        ImGui::TextDisabled(
+            "HP %.0f%%  Mana %.0f",
+            g_livePlayer.healthPercent(),
+            g_livePlayer.mana);
+    } else if(ramoniaSpellReady) {
+        ImGui::TextDisabled("%s",RamoniaHealingStatusText().c_str());
+    } else {
+        ImGui::TextDisabled("aguardando backend");
+    }
+
+    ImGui::SameLine(
+        ImGui::GetContentRegionAvail().x>80
+            ? ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x-48
+            : ImGui::GetCursorPosX());
+
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("heal_ids");
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    if(ImGui::BeginPopup("heal_ids")){
+        ImGui::TextUnformatted("Item IDs");
+        ImGui::Separator();
+        ImGui::TextUnformatted("UH"); ImGui::SameLine(90);
+        SmallInt("##uh_id_popup",&uhId,90);
+        ImGui::TextUnformatted("Mana Fluid"); ImGui::SameLine(90);
+        SmallInt("##mf_id_popup",&manaFluidId,90);
+        ImGui::TextUnformatted("Life Fluid"); ImGui::SameLine(90);
+        SmallInt("##lf_id_popup",&lifeFluidId,90);
         ImGui::EndPopup();
     }
 
-    const char* names[3] = {"Light", "Mid", "High"};
-    if (ImGui::BeginTable("heal_compact", 5, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("##name", 0, 0.62f);
-        ImGui::TableSetupColumn("##hp", 0, 0.62f);
-        ImGui::TableSetupColumn("##mana", 0, 0.86f);
-        ImGui::TableSetupColumn("##spell", 0, 2.10f);
-        ImGui::TableSetupColumn("##on", 0, 0.35f);
-        for (int i=0;i<3;++i) {
-            ImGui::TableNextRow(); ImGui::PushID(i);
+    const char* names[3]={"Light","Mid","High"};
+    if(!healingRuntimeReady) ImGui::BeginDisabled();
+    if(ImGui::BeginTable("heal_compact",5,ImGuiTableFlags_SizingStretchProp)){
+        ImGui::TableSetupColumn("##name",0,0.62f);
+        ImGui::TableSetupColumn("##hp",0,0.62f);
+        ImGui::TableSetupColumn("##mana",0,0.86f);
+        ImGui::TableSetupColumn("##spell",0,2.10f);
+        ImGui::TableSetupColumn("##on",0,0.35f);
+        for(int i=0;i<3;++i){
+            ImGui::TableNextRow();
+            ImGui::PushID(i);
             ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(names[i]);
-            ImGui::TableSetColumnIndex(1); SmallInt("##hpv", &hp[i], -1); ImGui::SameLine(0,2); ImGui::TextDisabled("%%");
-            ImGui::TableSetColumnIndex(2); SmallInt("##manav", &mana[i], -1); ImGui::SameLine(0,2); ImGui::TextDisabled("Mana");
-            ImGui::TableSetColumnIndex(3); SmallInput("##spellv", spells[i], 32, -1);
-            ImGui::TableSetColumnIndex(4); ImGui::Checkbox("##onv", &enabled[i]);
+            ImGui::TableSetColumnIndex(1);
+            SmallInt("##hpv",&hp[i],-1); ImGui::SameLine(0,2); ImGui::TextDisabled("%%");
+            ImGui::TableSetColumnIndex(2);
+            SmallInt("##manav",&mana[i],-1); ImGui::SameLine(0,2); ImGui::TextDisabled("Mana");
+            ImGui::TableSetColumnIndex(3); SmallInput("##spellv",spells[i],32,-1);
+            ImGui::TableSetColumnIndex(4); ImGui::Checkbox("##onv",&enabled[i]);
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
+    if(!healingRuntimeReady) ImGui::EndDisabled();
 
     ImGui::Separator();
-    ImGui::Checkbox("UH", &uhEnabled); ImGui::SameLine(); SmallInt("##uh_hp", &uhHp, 42); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::SameLine(128); ImGui::Checkbox("MF", &manaFluidEnabled); ImGui::SameLine(); SmallInt("##mf_mp", &manaFluidMp, 42); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::SameLine(250); ImGui::Checkbox("LF", &lifeFluidEnabled); ImGui::SameLine(); SmallInt("##lf_hp", &lifeFluidHp, 42); ImGui::SameLine(); ImGui::TextDisabled("%%");
 
-    // Trigger preview uses the same semantics as the engine. It helps validate rules independently from the action bridge.
-    if (healingMaster && g_livePlayer.valid) {
-        const double php=g_livePlayer.healthPercent(), pmana=g_livePlayer.mana, pmp=g_livePlayer.manaPercent();
+    // Item-on-self actions remain native-only. Ramonia V23 enables spell
+    // healing only, through Game::talkChannel.
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("UH",&uhEnabled); ImGui::SameLine();
+    SmallInt("##uh_hp",&uhHp,42); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::SameLine(128);
+    ImGui::Checkbox("MF",&manaFluidEnabled); ImGui::SameLine();
+    SmallInt("##mf_mp",&manaFluidMp,42); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    ImGui::SameLine(250);
+    ImGui::Checkbox("LF",&lifeFluidEnabled); ImGui::SameLine();
+    SmallInt("##lf_hp",&lifeFluidHp,42); ImGui::SameLine(); ImGui::TextDisabled("%%");
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    if(healingMaster && g_nativeRuntimeLoaded && g_livePlayer.valid){
+        const double php=g_livePlayer.healthPercent();
+        const double pmana=g_livePlayer.mana;
+        const double pmp=g_livePlayer.manaPercent();
         const char* trigger="none";
-        if (uhEnabled && uhId>0 && php<=uhHp) trigger="UH";
-        else if (manaFluidEnabled && manaFluidId>0 && pmp<=manaFluidMp) trigger="MF";
-        else if (lifeFluidEnabled && lifeFluidId>0 && php<=lifeFluidHp) trigger="LF";
-        else for(int i=0;i<3;++i) if(enabled[i] && php<=hp[i] && pmana>=mana[i]) { trigger=names[i]; break; }
-        ImGui::TextDisabled("Rule trigger: %s", trigger);
+        if(uhEnabled && uhId>0 && php<=uhHp) trigger="UH";
+        else if(manaFluidEnabled && manaFluidId>0 && pmp<=manaFluidMp) trigger="MF";
+        else if(lifeFluidEnabled && lifeFluidId>0 && php<=lifeFluidHp) trigger="LF";
+        else {
+            for(int i=2;i>=0;--i)
+                if(enabled[i] && php<=hp[i] && pmana>=mana[i]) {
+                    trigger=names[i];
+                    break;
+                }
+        }
+        ImGui::TextDisabled("Rule trigger: %s",trigger);
     }
 
+    const int spellPriority[3]={600,700,800};
+    const char* ruleNames[3]={"light_heal","mid_heal","high_heal"};
+
+    RamoniaHealingConfigUi ramHeal;
+    ramHeal.enabled=ramoniaSpellReady && healingMaster;
+    for(int i=0;i<3;++i){
+        RamoniaHealingSpellRuleUi rule;
+        rule.enabled=enabled[i];
+        rule.hpPercent=std::clamp(hp[i],0,100);
+        rule.minMana=std::max(0,mana[i]);
+        rule.spell=spells[i];
+        rule.cooldownMs=850;
+        rule.priority=spellPriority[i];
+        ramHeal.spells.push_back(std::move(rule));
+    }
+    SetRamoniaHealingConfig(ramHeal);
+
     nlohmann::json hcfg;
-    hcfg["enabled"] = g_nativeRuntimeLoaded && healingMaster;
-    hcfg["poll_ms"] = 100;
-    hcfg["rules"] = nlohmann::json::array();
-    const int spellPriority[3] = {600,700,800};
-    const char* ruleNames[3] = {"light_heal","mid_heal","high_heal"};
-    for (int i=0;i<3;++i) hcfg["rules"].push_back({
-        {"name",ruleNames[i]},{"enabled",enabled[i]},{"trigger","health_percent"},
-        {"below_or_equal",hp[i]},{"min_mana",mana[i]},{"action","spell"},{"spell",spells[i]},
-        {"cooldown_ms",850},{"priority",spellPriority[i]}
+    hcfg["enabled"]=healingRuntimeReady && healingMaster;
+    hcfg["poll_ms"]=100;
+    hcfg["ramonia_spell_backend"]=ramoniaSpellReady ? "bridge_v23_talkChannel" : "unavailable";
+    hcfg["rules"]=nlohmann::json::array();
+
+    for(int i=0;i<3;++i) hcfg["rules"].push_back({
+        {"name",ruleNames[i]},
+        {"enabled",enabled[i]},
+        {"trigger","health_percent"},
+        {"below_or_equal",hp[i]},
+        {"min_mana",mana[i]},
+        {"action","spell"},
+        {"spell",spells[i]},
+        {"cooldown_ms",850},
+        {"priority",spellPriority[i]}
     });
-    hcfg["rules"].push_back({{"name","uh"},{"enabled",uhEnabled},{"trigger","health_percent"},{"below_or_equal",uhHp},{"min_mana",0},{"action","item_on_self"},{"item_id",uhId},{"cooldown_ms",650},{"priority",1000}});
-    hcfg["rules"].push_back({{"name","life_fluid"},{"enabled",lifeFluidEnabled},{"trigger","health_percent"},{"below_or_equal",lifeFluidHp},{"min_mana",0},{"action","item_on_self"},{"item_id",lifeFluidId},{"cooldown_ms",650},{"priority",900}});
-    hcfg["rules"].push_back({{"name","mana_fluid"},{"enabled",manaFluidEnabled},{"trigger","mana_percent"},{"below_or_equal",manaFluidMp},{"min_mana",0},{"action","item_on_self"},{"item_id",manaFluidId},{"cooldown_ms",650},{"priority",500}});
-    WriteJsonIfChanged("healing.json", hcfg);
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    hcfg["rules"].push_back({
+        {"name","uh"},{"enabled",g_nativeRuntimeLoaded&&uhEnabled},
+        {"trigger","health_percent"},{"below_or_equal",uhHp},{"min_mana",0},
+        {"action","item_on_self"},{"item_id",uhId},{"cooldown_ms",650},{"priority",1000}
+    });
+    hcfg["rules"].push_back({
+        {"name","life_fluid"},{"enabled",g_nativeRuntimeLoaded&&lifeFluidEnabled},
+        {"trigger","health_percent"},{"below_or_equal",lifeFluidHp},{"min_mana",0},
+        {"action","item_on_self"},{"item_id",lifeFluidId},{"cooldown_ms",650},{"priority",900}
+    });
+    hcfg["rules"].push_back({
+        {"name","mana_fluid"},{"enabled",g_nativeRuntimeLoaded&&manaFluidEnabled},
+        {"trigger","mana_percent"},{"below_or_equal",manaFluidMp},{"min_mana",0},
+        {"action","item_on_self"},{"item_id",manaFluidId},{"cooldown_ms",650},{"priority",500}
+    });
+
+    WriteJsonIfChanged("healing.json",hcfg);
     CardEnd();
 }
 
