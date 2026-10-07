@@ -3067,11 +3067,14 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":21,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":22,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
           << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
+          << ",\"lightReady\":"
+          << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
+          << ",\"lightEnabled\":" << (g_worldLightEnabled ? "true" : "false")
           << ",\"dispatcherReady\":" << (dispatcherReady() ? "true" : "false")
           << ",\"dispatcherMode\":\"on_demand\""
           << ",\"dispatcherHookActive\":" << (g_gameThreadHook ? "true" : "false");
@@ -3102,6 +3105,13 @@ std::string handleRequest(const std::string& request) {
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
+    if (cmd == "GET_LIGHT") return worldLightStatusResponse("GET_LIGHT");
+    if (cmd == "SET_LIGHT") {
+        const auto enabled=uint32FieldAllowZeroFromRequest(request,"enabled");
+        if (!enabled || *enabled > 1u)
+            return R"({"ok":false,"cmd":"SET_LIGHT","error":"invalid_enabled"})";
+        return setWorldLightResponse(*enabled != 0u);
+    }
     if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
     if (cmd == "GET_TILE_MONSTERS") return tileMonstersResponse();
@@ -3201,7 +3211,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V15 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V22 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -3275,6 +3285,8 @@ DWORD WINAPI bridgeThread(LPVOID) {
         writeStatusFile();
     }
 
+    if (g_worldLightEnabled)
+        restoreWorldLightHack();
     cleanupOnDemandDispatcher();
     g_gameThreadId = 0;
     g_gameWindow = nullptr;
