@@ -409,7 +409,7 @@ static bool RamoniaLootMarkTracksTarget(const nlohmann::json& mark,
 static std::vector<std::uint32_t> RamoniaLootCorpseCandidates(
     const nlohmann::json& diff,
     std::uint32_t targetId,
-    std::uint32_t fallbackCorpseItemId) {
+    const std::vector<std::uint32_t>& preferredCorpseIds) {
 
     std::vector<std::uint32_t> out;
     if (!diff.is_object() || !diff.value("ok",false)) return out;
@@ -440,10 +440,10 @@ static std::vector<std::uint32_t> RamoniaLootCorpseCandidates(
         }
     }
 
-    if (fallbackCorpseItemId &&
-        std::find(strictIds.begin(),strictIds.end(),fallbackCorpseItemId)!=strictIds.end())
-        pushUnique(out,fallbackCorpseItemId);
-
+    for (const auto knownId:preferredCorpseIds) {
+        if (std::find(strictIds.begin(),strictIds.end(),knownId)!=strictIds.end())
+            pushUnique(out,knownId);
+    }
     for (const auto id:strictIds) pushUnique(out,id);
     return out;
 }
@@ -463,7 +463,8 @@ static bool SameRamoniaContainerSnapshot(
 
 static bool RamoniaLootOpenAndMove(DWORD pid,
                                    const RamoniaLootConfigUi& cfg,
-                                   std::uint32_t corpseItemId) {
+                                   std::uint32_t corpseItemId,
+                                   std::uint32_t openWaitMs) {
     nlohmann::json beforeJson;
     if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, beforeJson))
         return false;
@@ -487,11 +488,14 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
     std::vector<RamoniaContainerUi> containers;
     std::optional<std::uint32_t> sourceIdOpt;
 
-    // Opening a corpse is asynchronous from the external worker's point of
-    // view. Give the client/server up to ~1.2 s to create OR reuse/update the
-    // corpse container instead of assuming 350 ms is always enough.
-    for (int attempt=0; attempt<10 && !sourceIdOpt; ++attempt) {
-        Sleep(attempt==0 ? 220 : 110);
+    // Known corpse IDs get the full async-open budget. Unknown death-tile
+    // items get only a short probe so blood/splash/field items cannot consume
+    // the whole death window in crowded fights.
+    const std::uint32_t budget=std::max<std::uint32_t>(180u,openWaitMs);
+    const ULONGLONG openDeadline=GetTickCount64()+budget;
+    int attempt=0;
+    while(!sourceIdOpt && GetTickCount64()<openDeadline) {
+        Sleep(attempt++==0 ? std::min<std::uint32_t>(180u,budget) : 70u);
 
         nlohmann::json afterJson;
         if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, afterJson))
@@ -599,6 +603,7 @@ static void RamoniaTargetWorker() {
     std::uint32_t lootMarkedTargetId = 0;
     std::uint64_t lootLastTargetMarkMs = 0;
     std::uint64_t lootDiffDeadlineMs = 0;
+    std::vector<std::uint32_t> lootKnownCorpseIds{2813};
 
     RamoniaPositionUi lastPosition{};
     std::uint64_t mapTransitionUntilMs = 0;
@@ -698,6 +703,10 @@ static void RamoniaTargetWorker() {
 
         const auto targetCfg = GetRamoniaTargetConfig();
         const auto lootCfg = GetRamoniaLootConfig();
+        if (lootCfg.corpseItemId &&
+            std::find(lootKnownCorpseIds.begin(),lootKnownCorpseIds.end(),
+                      lootCfg.corpseItemId)==lootKnownCorpseIds.end())
+            lootKnownCorpseIds.push_back(lootCfg.corpseItemId);
         const bool targetPolicyActive =
             targetCfg.enabled &&
             bridgeVersion >= 19 &&
@@ -778,23 +787,42 @@ static void RamoniaTargetWorker() {
         // present in the tracked tile snapshot.
         if (lootActive) {
             if (lootMarkedTargetId && currentAttackId != lootMarkedTargetId) {
-                if (!lootDiffDeadlineMs) lootDiffDeadlineMs = nowMs + 4000;
+                if (!lootDiffDeadlineMs) lootDiffDeadlineMs = nowMs + 5500;
 
                 nlohmann::json diff;
                 if (RamoniaPipeRequest(pid, {{"cmd","LOOT_DIFF"}}, diff)) {
                     const auto corpseCandidates=
                         RamoniaLootCorpseCandidates(
-                            diff,lootMarkedTargetId,lootCfg.corpseItemId);
+                            diff,lootMarkedTargetId,lootKnownCorpseIds);
 
                     if (!corpseCandidates.empty()) {
                         bool opened=false;
+                        int unknownProbes=0;
                         for (const auto corpseId:corpseCandidates) {
+                            const bool knownCorpse =
+                                std::find(
+                                    lootKnownCorpseIds.begin(),
+                                    lootKnownCorpseIds.end(),
+                                    corpseId) != lootKnownCorpseIds.end();
+
+                            if (!knownCorpse && unknownProbes++ >= 6)
+                                break;
+
                             SetRamoniaLootStatus(
-                                "Loot: tentando corpse auto ID " +
+                                std::string("Loot: ") +
+                                (knownCorpse ? "corpse conhecido " : "probe corpse ") +
                                 std::to_string(corpseId));
+
                             if (RamoniaLootOpenAndMove(
-                                    pid,lootCfg,corpseId)) {
+                                    pid,lootCfg,corpseId,
+                                    knownCorpse ? 1250u : 320u)) {
                                 opened=true;
+                                if (!knownCorpse) {
+                                    lootKnownCorpseIds.push_back(corpseId);
+                                    SetRamoniaLootStatus(
+                                        "Loot: aprendeu corpse ID " +
+                                        std::to_string(corpseId));
+                                }
                                 break;
                             }
                         }
@@ -2078,7 +2106,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.9 Rolling Loot");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.0 Learned Loot");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
