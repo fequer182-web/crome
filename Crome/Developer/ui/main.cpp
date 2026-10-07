@@ -308,7 +308,8 @@ static void RamoniaTargetWorker() {
             !hello.value("dispatcherReady",false) ||
             hello.value("bridgeVersion",0) < 6) {
             g_ramoniaBridgeReady.store(false);
-            g_ramoniaBridgeVersion.store(hello.value("bridgeVersion",0));
+            g_ramoniaBridgeVersion.store(
+                hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
@@ -1349,8 +1350,6 @@ static void DrawTools(const Theme& t) {
       {"reammo",{{"enabled",g_nativeRuntimeLoaded&&reAmmo},{"item_ids",nlohmann::json::array({ammo})},{"min_count",1},{"status","requires_move_equip_backend"}}}
     };
     WriteJsonIfChanged("tools.json",tcfg);
-    if(g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16)
-        ImGui::TextDisabled("%s", RamoniaFoodStatusText().c_str());
     CardEnd();
 }
 
