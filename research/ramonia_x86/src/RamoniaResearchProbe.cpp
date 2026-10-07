@@ -1786,6 +1786,9 @@ struct ActionAbiArgV34 {
     std::string rtti;
     bool hasObservedBool = false;
     bool observedBool = false;
+    bool hasRefCountOffset = false;
+    uint32_t refCountOffset = 0;
+    std::string ownership;
 };
 
 struct ActionAbiV34 {
@@ -4542,6 +4545,10 @@ std::string SaveJson(const Report& r) {
             if (!arg.rtti.empty()) o << ",\"rtti\":\"" << JsonEscape(arg.rtti) << "\"";
             if (arg.hasObservedBool)
                 o << ",\"observedRequiredValue\":" << (arg.observedBool?"true":"false");
+            if (arg.hasRefCountOffset)
+                o << ",\"refCountOffset\":\"" << HexU32(arg.refCountOffset) << "\"";
+            if (!arg.ownership.empty())
+                o << ",\"ownership\":\"" << JsonEscape(arg.ownership) << "\"";
             o << "}";
         }
         o << "]\n"
@@ -8948,6 +8955,11 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
         out.abiType="shared_object_ptr_value";
         out.status="runtime_confirmed";
         out.rtti=direct;
+        // This OTC family uses stdext::shared_object as LuaObject base:
+        // x86 primary vptr at +0x0, intrusive refcount at +0x4.
+        out.hasRefCountOffset=true;
+        out.refCountOffset=0x4;
+        out.ownership="caller_add_ref_callee_release";
         return out;
     }
 
