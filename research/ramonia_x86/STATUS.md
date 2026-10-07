@@ -671,3 +671,21 @@ Pipe diagnostics:
 - CromePipeTest_x64.exe lookget
 
 Crome v0.9.6 changes the Healing/Loot Look ID button to arm this real one-shot capture and displays the captured Item ID with a copy button.
+
+
+## Crome v0.9.7 Passive Look ID
+
+UI correction after live feedback:
+- removed Look ID buttons from Healing;
+- removed Look ID buttons from Loot;
+- removed the Look ID popup entirely;
+- the only user-facing Look result is the existing Runtime / Build footer line: `Look ID: ...`.
+
+With Ramonia Bridge V25+ ready, Crome now passively maintains the one-shot Game::look capture:
+- polls GET_LOOK_ID roughly every 150 ms;
+- when no capture is armed/busy, automatically sends ARM_LOOK_ID;
+- after the user performs a normal Look in Ramonia, the captured item ID is copied into the existing `g_lastLook` display state;
+- once the one-shot completes, Crome automatically re-arms after a short delay;
+- the legacy look_result.json path is not allowed to overwrite the Ramonia V25 captured ID.
+
+There is no manual Look button in the module cards anymore. Normal workflow is simply: perform Look in Ramonia -> Runtime / Build shows the last captured item ID.
