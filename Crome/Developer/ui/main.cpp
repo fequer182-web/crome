@@ -2431,6 +2431,7 @@ static void DrawLoot(const Theme& t) {
     static bool items=false,onScreen=false,only=true,dropEnabled=false;
     static int radius=3,maxWeight=3155,corpseId=2813,targetBagId=0;
     static char lootIds[256]="2148";
+    static char nestedIds[256]="";
     static char dropIds[256]="";
     static std::uint64_t seenProfileLoadGeneration=0;
 
@@ -2474,6 +2475,14 @@ static void DrawLoot(const Theme& t) {
             };
             const auto li=toCsv(lj.value("item_ids",nlohmann::json::array()));
             std::snprintf(lootIds,sizeof(lootIds),"%s",li.c_str());
+
+            auto ni=toCsv(lj.value("nested_container_ids",nlohmann::json::array()));
+            if(ni.empty()){
+                EnsureWalkerIdCatalog();
+                ni=CatalogCsv("corpseBag");
+            }
+            std::snprintf(nestedIds,sizeof(nestedIds),"%s",ni.c_str());
+
             if(lj.contains("drop_item")&&lj["drop_item"].is_object()){
                 dropEnabled=lj["drop_item"].value("enabled",false);
                 const auto di=toCsv(lj["drop_item"].value("item_ids",nlohmann::json::array()));
@@ -2486,7 +2495,7 @@ static void DrawLoot(const Theme& t) {
     const bool ramoniaLootReady=
         g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=21;
 
-    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),125,t);
+    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),148,t);
 
     if(!lootRuntimeReady) ImGui::BeginDisabled();
     ImGui::Checkbox("Loot Items",&items);
@@ -2530,6 +2539,12 @@ static void DrawLoot(const Theme& t) {
     ImGui::InputText("##lootids",lootIds,sizeof(lootIds));
     if(!lootRuntimeReady) ImGui::EndDisabled();
 
+    ImGui::TextDisabled("Nested bag IDs (abre bags dentro do corpse)");
+    ImGui::SetNextItemWidth(-1);
+    if(!ramoniaLootReady) ImGui::BeginDisabled();
+    ImGui::InputText("##nestedbagids",nestedIds,sizeof(nestedIds));
+    if(!ramoniaLootReady) ImGui::EndDisabled();
+
     ImGui::TextDisabled("DropItem IDs: itens retirados do corpse e jogados no chao para lootbag");
     ImGui::SetNextItemWidth(-1);
     if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
@@ -2537,6 +2552,7 @@ static void DrawLoot(const Theme& t) {
     if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
 
     const auto lootJsonIds=csvIds(lootIds);
+    const auto nestedJsonIds=csvIds(nestedIds);
 
     RamoniaLootConfigUi ramLoot;
     ramLoot.enabled=ramoniaLootReady&&items;
@@ -2547,6 +2563,12 @@ static void DrawLoot(const Theme& t) {
         for(const auto& v:lootJsonIds)
             if(v.is_number_integer() && v.get<int>()>0)
                 ramLoot.itemIds.push_back(static_cast<std::uint32_t>(v.get<int>()));
+
+    if(nestedJsonIds.is_array())
+        for(const auto& v:nestedJsonIds)
+            if(v.is_number_integer() && v.get<int>()>0)
+                ramLoot.nestedContainerIds.push_back(
+                    static_cast<std::uint32_t>(v.get<int>()));
 
     ramLoot.learnedCorpseIds=GetRamoniaLootConfig().learnedCorpseIds;
     if(std::find(ramLoot.learnedCorpseIds.begin(),ramLoot.learnedCorpseIds.end(),2813u)
@@ -2569,6 +2591,8 @@ static void DrawLoot(const Theme& t) {
       {"auto_detect_corpse",true},
       {"corpse_item_ids",nlohmann::json::array({std::max(1,corpseId)})},
       {"learned_corpse_ids",learnedCorpseIds},
+      {"nested_container_ids",nestedJsonIds},
+      {"recursive_container_depth",3},
       {"item_ids",lootJsonIds},
       {"drop_item",{
           {"enabled",g_nativeRuntimeLoaded&&dropEnabled},
