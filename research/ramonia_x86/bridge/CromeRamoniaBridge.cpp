@@ -141,6 +141,16 @@ struct Profile {
 
 std::optional<Profile> g_profile;
 
+struct WorldLightTargetState {
+    std::uintptr_t uiMap{};
+    std::uintptr_t mapView{};
+    float originalAmbient{};
+    bool originalSaved{};
+};
+std::vector<WorldLightTargetState> g_worldLightTargets;
+bool g_worldLightEnabled{};
+constexpr float kWorldLightHackAmbient = 1.0f;
+
 SRWLOCK g_monsterCacheLock = SRWLOCK_INIT;
 ULONGLONG g_monsterCacheTick{};
 constexpr ULONGLONG kMonsterCacheTtlMs = 1000;
@@ -541,6 +551,19 @@ bool isWritableAddress(std::uintptr_t address) {
     const DWORD p = mbi.Protect & 0xFFu;
     return p == PAGE_READWRITE || p == PAGE_WRITECOPY ||
            p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+}
+
+template<class T>
+bool safeWrite(std::uintptr_t address, const T& value) {
+    if (!isWritableAddress(address)) return false;
+    SIZE_T written{};
+    return WriteProcessMemory(
+               GetCurrentProcess(),
+               reinterpret_cast<LPVOID>(address),
+               &value,
+               sizeof(value),
+               &written) &&
+           written == sizeof(value);
 }
 
 bool readCurrentImageFingerprint() {
@@ -1176,6 +1199,225 @@ bool exactObjectVtable(std::uintptr_t object, std::uintptr_t vtableRva) {
     if (!object || !vtableRva) return false;
     std::uintptr_t vt{};
     return safeRead(object, vt) && vt == g_base + vtableRva;
+}
+
+bool validateWorldLightTarget(std::uintptr_t uiMap,
+                              std::uintptr_t& mapViewOut,
+                              float* ambientOut = nullptr) {
+    mapViewOut = 0;
+    if (!g_profile || !g_profile->worldLightContractReady ||
+        !uiMap || !exactObjectVtable(uiMap,g_profile->uiMapVtableRva))
+        return false;
+
+    std::uintptr_t mapView{};
+    if (!safeRead(uiMap + g_profile->uiMapToMapViewOffset,mapView) ||
+        !mapView ||
+        !exactObjectVtable(mapView,g_profile->mapViewVtableRva))
+        return false;
+
+    float ambient{};
+    if (!safeRead(mapView + g_profile->mapViewMinimumAmbientOffset,ambient) ||
+        !std::isfinite(ambient) || ambient < -0.01f || ambient > 2.0f)
+        return false;
+
+    if (g_profile->mapViewDrawLightsOffset) {
+        std::uint8_t draw{};
+        if (!safeRead(mapView + g_profile->mapViewDrawLightsOffset,draw) || draw > 1u)
+            return false;
+    }
+
+    mapViewOut=mapView;
+    if (ambientOut) *ambientOut=ambient;
+    return true;
+}
+
+std::vector<WorldLightTargetState> discoverWorldLightTargets() {
+    std::vector<WorldLightTargetState> found;
+    if (!g_profile || !g_profile->worldLightContractReady)
+        return found;
+
+    const std::uint32_t wantedUiMapVtable =
+        static_cast<std::uint32_t>(g_base + g_profile->uiMapVtableRva);
+
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    auto address = reinterpret_cast<std::uintptr_t>(si.lpMinimumApplicationAddress);
+    const auto maxAddress =
+        reinterpret_cast<std::uintptr_t>(si.lpMaximumApplicationAddress);
+
+    constexpr SIZE_T kChunk = 1u << 20;
+    std::vector<std::uint8_t> buffer(kChunk);
+
+    while (address < maxAddress) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!VirtualQuery(reinterpret_cast<LPCVOID>(address),&mbi,sizeof(mbi)))
+            break;
+
+        const auto regionBase=
+            reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        const auto regionEnd=regionBase+mbi.RegionSize;
+        if (regionEnd<=address) break;
+
+        if (mbi.State==MEM_COMMIT &&
+            mbi.Type==MEM_PRIVATE &&
+            readableProtection(mbi.Protect)) {
+
+            for (auto chunkBase=regionBase; chunkBase<regionEnd;) {
+                const SIZE_T want=static_cast<SIZE_T>(
+                    std::min<std::uintptr_t>(kChunk,regionEnd-chunkBase));
+                SIZE_T got{};
+                if (ReadProcessMemory(
+                        GetCurrentProcess(),
+                        reinterpret_cast<LPCVOID>(chunkBase),
+                        buffer.data(),want,&got) &&
+                    got>=sizeof(std::uint32_t)) {
+
+                    for (SIZE_T i=0;i+sizeof(std::uint32_t)<=got;i+=4) {
+                        std::uint32_t vt{};
+                        std::memcpy(&vt,buffer.data()+i,sizeof(vt));
+                        if (vt!=wantedUiMapVtable) continue;
+
+                        const auto uiMap=chunkBase+i;
+                        std::uintptr_t mapView{};
+                        float ambient{};
+                        if (!validateWorldLightTarget(uiMap,mapView,&ambient))
+                            continue;
+
+                        bool duplicate=false;
+                        for (const auto& existing:found)
+                            if (existing.mapView==mapView) {
+                                duplicate=true;
+                                break;
+                            }
+                        if (duplicate) continue;
+
+                        WorldLightTargetState state;
+                        state.uiMap=uiMap;
+                        state.mapView=mapView;
+                        state.originalAmbient=ambient;
+                        state.originalSaved=false;
+                        found.push_back(state);
+                    }
+                }
+                chunkBase += want ? want : 1;
+            }
+        }
+        address=regionEnd;
+    }
+
+    return found;
+}
+
+bool ensureWorldLightTargets() {
+    if (!g_profile || !g_profile->worldLightContractReady)
+        return false;
+
+    bool valid=!g_worldLightTargets.empty();
+    if (valid) {
+        for (const auto& target:g_worldLightTargets) {
+            std::uintptr_t currentMapView{};
+            if (!validateWorldLightTarget(target.uiMap,currentMapView,nullptr) ||
+                currentMapView!=target.mapView) {
+                valid=false;
+                break;
+            }
+        }
+    }
+
+    if (!valid)
+        g_worldLightTargets=discoverWorldLightTargets();
+
+    return !g_worldLightTargets.empty();
+}
+
+bool applyWorldLightHack() {
+    if (!ensureWorldLightTargets())
+        return false;
+
+    bool wroteAny=false;
+    for (auto& target:g_worldLightTargets) {
+        std::uintptr_t currentMapView{};
+        float currentAmbient{};
+        if (!validateWorldLightTarget(
+                target.uiMap,currentMapView,&currentAmbient) ||
+            currentMapView!=target.mapView)
+            continue;
+
+        if (!target.originalSaved) {
+            target.originalAmbient=currentAmbient;
+            target.originalSaved=true;
+        }
+
+        if (safeWrite(
+                target.mapView + g_profile->mapViewMinimumAmbientOffset,
+                kWorldLightHackAmbient))
+            wroteAny=true;
+    }
+
+    g_worldLightEnabled=wroteAny;
+    return wroteAny;
+}
+
+bool restoreWorldLightHack() {
+    bool restoredAny=false;
+    for (auto& target:g_worldLightTargets) {
+        if (!target.originalSaved) continue;
+
+        std::uintptr_t currentMapView{};
+        if (!validateWorldLightTarget(
+                target.uiMap,currentMapView,nullptr) ||
+            currentMapView!=target.mapView)
+            continue;
+
+        if (safeWrite(
+                target.mapView + g_profile->mapViewMinimumAmbientOffset,
+                target.originalAmbient))
+            restoredAny=true;
+
+        target.originalSaved=false;
+    }
+
+    g_worldLightEnabled=false;
+    return restoredAny || g_worldLightTargets.empty();
+}
+
+std::string worldLightStatusResponse(const char* cmd) {
+    std::ostringstream o;
+    const bool resolved=ensureWorldLightTargets();
+    o << "{\"ok\":" << (resolved ? "true" : "false")
+      << ",\"cmd\":\"" << cmd << "\""
+      << ",\"contractReady\":"
+      << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
+      << ",\"enabled\":" << (g_worldLightEnabled ? "true" : "false")
+      << ",\"targets\":" << g_worldLightTargets.size()
+      << ",\"forcedAmbient\":" << kWorldLightHackAmbient;
+
+    if (resolved && !g_worldLightTargets.empty()) {
+        float ambient{};
+        safeRead(
+            g_worldLightTargets.front().mapView +
+                g_profile->mapViewMinimumAmbientOffset,
+            ambient);
+        o << ",\"ambient\":" << ambient;
+    }
+
+    if (!resolved)
+        o << ",\"error\":\"world_light_target_not_found\"";
+
+    o << "}";
+    return o.str();
+}
+
+std::string setWorldLightResponse(bool enabled) {
+    if (!g_profile || !g_profile->worldLightContractReady)
+        return R"({"ok":false,"cmd":"SET_LIGHT","error":"world_light_contract_not_ready"})";
+
+    const bool ok=enabled ? applyWorldLightHack() : restoreWorldLightHack();
+    logLine(std::string("[LIGHT] ") +
+            (enabled ? "enable" : "restore") +
+            " ok=" + (ok ? "true" : "false") +
+            " targets=" + std::to_string(g_worldLightTargets.size()));
+    return worldLightStatusResponse("SET_LIGHT");
 }
 
 bool readMsvcString32(std::uintptr_t address, std::string& out) {
