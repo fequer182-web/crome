@@ -643,3 +643,31 @@ Crome now adds a Ramonia Look / IDs popup driven by GET_OPEN_CONTAINERS:
 - Refresh rereads the currently open containers.
 
 This intentionally avoids a permanent Game::look hook. It is meant for calibration of UH, potions, nested corpse bags and other container items while preserving the stable on-demand bridge design.
+
+
+## Bridge V25 / Crome v0.9.6 Real Look ID
+
+The first v0.9.5 Look IDs implementation only listed item IDs from currently open containers. Live feedback showed this was not the intended workflow.
+
+V25 now implements a one-shot capture of the player's normal Game::look action:
+- Crome arms Look ID for up to 8 seconds;
+- Bridge installs a temporary INT3 only on the runtime-confirmed Game::look entry;
+- a temporary VEH captures the shared_object_ptr_ref Item argument from the real look call;
+- the Item object is validated and itemId is read from the profile-confirmed Item layout;
+- the original first byte is restored immediately on the first Game::look;
+- EIP is rewound so the game's original Game::look executes normally;
+- the breakpoint and VEH are also removed automatically on timeout;
+- shutdown forcibly restores/cleans any pending capture.
+
+No Game::look hook/breakpoint remains active while idle.
+
+Bridge commands:
+- ARM_LOOK_ID
+- GET_LOOK_ID
+
+Pipe diagnostics:
+- CromePipeTest_x64.exe lookarm
+- perform normal Look on one item in Ramonia
+- CromePipeTest_x64.exe lookget
+
+Crome v0.9.6 changes the Healing/Loot Look ID button to arm this real one-shot capture and displays the captured Item ID with a copy button.
