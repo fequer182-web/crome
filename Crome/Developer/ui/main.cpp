@@ -1053,9 +1053,8 @@ static void RamoniaTargetWorker() {
             nextLightRefreshMs=nowMs+500;
         }
 
-        // Spell Healing for Ramonia uses the runtime-confirmed talkChannel
-        // route. Item heals remain native-only until their self-use ABI is
-        // validated for this build.
+        // Ramonia Healing: spell rules use SAY/talkChannel; item rules use
+        // USE_CONTAINER_ITEM_ON_SELF from Bridge V24+ (V25 inherits it).
         const auto healingCfg=GetRamoniaHealingConfig();
         if (!healingCfg.enabled) {
             nextHealAttemptMs=0;
@@ -1069,43 +1068,133 @@ static void RamoniaTargetWorker() {
                 RamoniaPipeRequest(pid,{{"cmd","GET_PLAYER"}},playerJson);
             const auto vitals=playerOk ? ParseRamoniaVitals(playerJson) : RamoniaVitalsUi{};
 
-            const RamoniaHealingSpellRuleUi* selected=nullptr;
+            const RamoniaHealingSpellRuleUi* selectedSpell=nullptr;
+            const RamoniaHealingItemRuleUi* selectedItem=nullptr;
+
             if (vitals.valid) {
                 const double hpPct=vitals.healthPercent();
+                const double mpPct=vitals.manaPercent();
+
                 for (const auto& rule:healingCfg.spells) {
                     if (!rule.enabled || rule.spell.empty() || rule.spell.size()>15)
                         continue;
                     if (hpPct>static_cast<double>(rule.hpPercent) ||
                         vitals.mana<rule.minMana)
                         continue;
-                    if (!selected || rule.priority>selected->priority)
-                        selected=&rule;
+                    if (!selectedSpell || rule.priority>selectedSpell->priority)
+                        selectedSpell=&rule;
+                }
+
+                if (bridgeVersion>=24) {
+                    for (const auto& rule:healingCfg.items) {
+                        if (!rule.enabled || !rule.itemId || rule.itemId>0xFFFFu)
+                            continue;
+
+                        const double current =
+                            rule.manaTrigger ? mpPct : hpPct;
+                        if (current>static_cast<double>(rule.triggerPercent))
+                            continue;
+
+                        if (!selectedItem || rule.priority>selectedItem->priority)
+                            selectedItem=&rule;
+                    }
                 }
             }
 
-            if (selected) {
+            bool acted=false;
+            bool itemUnavailable=false;
+
+            const bool itemHasPriority=
+                selectedItem &&
+                (!selectedSpell || selectedItem->priority>selectedSpell->priority);
+
+            if (itemHasPriority) {
+                nlohmann::json useJson;
+                const bool used=
+                    RamoniaPipeRequest(
+                        pid,
+                        {{"cmd","USE_CONTAINER_ITEM_ON_SELF"},
+                         {"itemId",selectedItem->itemId}},
+                        useJson) &&
+                    useJson.value("ok",false);
+
+                if (used) {
+                    acted=true;
+                    SetRamoniaHealingStatus(
+                        "Healing: " + selectedItem->name +
+                        " ID=" + std::to_string(selectedItem->itemId));
+                    nextHealAttemptMs=
+                        nowMs+std::max<std::uint32_t>(250u,selectedItem->cooldownMs);
+                } else {
+                    const auto error=
+                        useJson.is_object()
+                            ? useJson.value("error",std::string())
+                            : std::string();
+
+                    itemUnavailable=
+                        error=="item_not_found_in_open_containers" ||
+                        error=="source_container_not_open";
+
+                    SetRamoniaHealingStatus(
+                        itemUnavailable
+                            ? "Healing: "+selectedItem->name+" nao encontrado na bag aberta"
+                            : "Healing: "+selectedItem->name+" useWith pendente");
+                }
+            }
+
+            // If a higher-priority item was configured but is unavailable,
+            // fall back to the best matching spell instead of leaving the
+            // player without healing.
+            if (!acted && selectedSpell) {
                 nlohmann::json sayJson;
                 const bool cast=
                     RamoniaPipeRequest(
                         pid,
-                        {{"cmd","SAY"},{"message",selected->spell}},
+                        {{"cmd","SAY"},{"message",selectedSpell->spell}},
                         sayJson) &&
                     sayJson.value("ok",false);
 
                 if (cast) {
+                    acted=true;
                     SetRamoniaHealingStatus(
-                        "Healing: " + selected->spell +
+                        "Healing: " + selectedSpell->spell +
                         " HP=" + std::to_string(
                             static_cast<int>(vitals.healthPercent())) + "%");
                     nextHealAttemptMs=
-                        nowMs+std::max<std::uint32_t>(250u,selected->cooldownMs);
+                        nowMs+std::max<std::uint32_t>(250u,selectedSpell->cooldownMs);
                 } else {
                     SetRamoniaHealingStatus("Healing: SAY pendente");
-                    nextHealAttemptMs=nowMs+250;
                 }
-            } else {
-                SetRamoniaHealingStatus(
-                    vitals.valid ? "Healing: monitorando" : "Healing: aguardando player");
+            }
+
+            // Mana Fluid has lower priority than the spell rules by design.
+            // If no spell fired, allow the matching item rule now.
+            if (!acted && selectedItem && !itemHasPriority) {
+                nlohmann::json useJson;
+                const bool used=
+                    RamoniaPipeRequest(
+                        pid,
+                        {{"cmd","USE_CONTAINER_ITEM_ON_SELF"},
+                         {"itemId",selectedItem->itemId}},
+                        useJson) &&
+                    useJson.value("ok",false);
+
+                if (used) {
+                    acted=true;
+                    SetRamoniaHealingStatus(
+                        "Healing: " + selectedItem->name +
+                        " ID=" + std::to_string(selectedItem->itemId));
+                    nextHealAttemptMs=
+                        nowMs+std::max<std::uint32_t>(250u,selectedItem->cooldownMs);
+                }
+            }
+
+            if (!acted) {
+                if (!vitals.valid)
+                    SetRamoniaHealingStatus("Healing: aguardando player");
+                else if (!selectedSpell && !selectedItem)
+                    SetRamoniaHealingStatus("Healing: monitorando");
+
                 nextHealAttemptMs=nowMs+100;
             }
         }
