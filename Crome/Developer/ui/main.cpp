@@ -2422,7 +2422,7 @@ static void DrawFriends(const Theme& t) {
     }
 
     CardBegin("friends","Friends / Party",CardIcon::Users,
-              ImVec4(0.12f,0.62f,1.0f,1),88,t);
+              ImVec4(0.12f,0.62f,1.0f,1),100,t);
 
     ImGui::TextUnformatted("Friend HP:");
     ImGui::SameLine();
@@ -2447,6 +2447,7 @@ static void DrawFriends(const Theme& t) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##flist",list,sizeof(list));
+    ImGui::TextDisabled("Prep: exura sio / UH friend / follow aguardando teste live");
 
     nlohmann::json fcfg={
         {"friend_hp",std::clamp(friendHp,0,100)},
