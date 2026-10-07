@@ -689,3 +689,28 @@ With Ramonia Bridge V25+ ready, Crome now passively maintains the one-shot Game:
 - the legacy look_result.json path is not allowed to overwrite the Ramonia V25 captured ID.
 
 There is no manual Look button in the module cards anymore. Normal workflow is simply: perform Look in Ramonia -> Runtime / Build shows the last captured item ID.
+
+
+## Crome v0.9.8 Editable Item Healing
+
+Ramonia item-on-self Healing is now exposed in the normal Healing UI using the Bridge V24+ backend (Bridge V25 includes it).
+
+UI:
+- UH row: HP trigger %, editable Item ID, enable checkbox.
+- Mana Fluid row: MP trigger %, editable Item ID, enable checkbox.
+- Life Fluid row: HP trigger %, editable Item ID, enable checkbox.
+- IDs stay editable regardless of backend readiness; enable checkboxes require a compatible backend.
+- current OT Mana Fluid default is 15552, but this is configuration only and remains editable for other OTs.
+
+Runtime:
+- item rules use USE_CONTAINER_ITEM_ON_SELF and scan open containers for the configured item ID;
+- UH priority 1000;
+- Life Fluid priority 900;
+- spell rules remain 800/700/600;
+- Mana Fluid priority 500;
+- if a higher-priority item heal is configured but unavailable in open containers, Crome can fall back to a matching spell rule instead of leaving the player unhealed;
+- item cooldown default is 650 ms.
+
+Persistence:
+- item IDs and enable state continue to be stored in healing.json;
+- an old healing.json containing mana_fluid item_id=0 no longer overwrites the current OT default 15552 on first load.
