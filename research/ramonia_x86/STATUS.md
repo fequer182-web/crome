@@ -484,3 +484,23 @@ On death:
 - the baseline is never updated from a target snapshot with hpPercent=0, preventing a just-created corpse from being accidentally absorbed into the baseline.
 
 Crome v0.8.9 refreshes the target-specific Loot mark every worker cycle (~250-300 ms) and requires Bridge V21+ for Ramonia Loot. Target remains V19+ and Food remains V16+.
+
+
+## V21 stability >1h + Crome v0.9.0 Learned Loot
+
+Live testing reported more than one hour without a Ramonia crash under active Target/Loot/Food. This is strong runtime evidence that the V19 CreaturePtr ownership correction and later V21 Loot tracking do not reintroduce the previous delayed Target crash.
+
+A remaining Loot reliability issue appears mainly in crowded fights. Review of the external worker confirmed that Target is not racing ahead of Loot: while a death is pending, the worker holds target selection and continues the Loot state machine first.
+
+The crowded-fight bottleneck is corpse identification cost. A strict death tile can contain several newly-created Items (blood/splash/field/etc.). Previously every unknown candidate could receive the full ~1.2 s asynchronous container-open wait, exhausting the death window before the real corpse candidate was reached.
+
+Crome v0.9.0 adds runtime corpse learning:
+- corpse IDs that successfully open a container are remembered for the current Crome session;
+- known corpse IDs are prioritized before unknown strict death-tile candidates;
+- known IDs receive the full ~1.25 s asynchronous-open budget;
+- unknown candidates receive a short ~320 ms probe;
+- at most six unknown candidates are probed per death;
+- the overall death window is extended to ~5.5 s;
+- strict V21 rolling death-tile filtering remains unchanged, so decorative bodies outside/newly-unrelated to the tracked death do not return as candidates.
+
+Bridge remains V21 for this step; v0.9.0 is an external Crome policy optimization.
