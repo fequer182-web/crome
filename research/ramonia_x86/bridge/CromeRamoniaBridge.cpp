@@ -118,6 +118,8 @@ struct Profile {
     bool tileThingsRuntimeConfirmed{};
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
+    bool attackCreatureSharedValueConfirmed{};
+    std::size_t sharedObjectRefCountOffset{};
     bool attackCancelFalseConfirmed{};
 
     struct Field {
@@ -289,7 +291,19 @@ Profile loadProfile(const std::string& path) {
 
         const auto* args = attack->get("args");
         if (args && args->isArray() && args->array().size() >= 2) {
+            const auto& creature = args->array()[0];
             const auto& cancel = args->array()[1];
+
+            p.attackCreatureSharedValueConfirmed =
+                creature.isObject() &&
+                stringValue(creature.get("semantic")) == "Creature" &&
+                stringValue(creature.get("abiType")) == "shared_object_ptr_value" &&
+                stringValue(creature.get("status")) == "runtime_confirmed";
+
+            if (const auto n = integerValue(
+                    creature.isObject() ? creature.get("refCountOffset") : nullptr))
+                p.sharedObjectRefCountOffset = static_cast<std::size_t>(*n);
+
             const auto* required = cancel.isObject() ? cancel.get("observedRequiredValue") : nullptr;
             p.attackCancelFalseConfirmed =
                 cancel.isObject() &&
@@ -431,8 +445,9 @@ Profile loadProfile(const std::string& path) {
         throw std::runtime_error("build fingerprint incomplete");
     if (!p.monsterVtableRva || !p.creatureIdOffset || !p.creatureNameOffset ||
         !p.creatureHpPercentOffset || !p.attackMethodRva ||
-        !p.attackRuntimeConfirmed || !p.attackCancelFalseConfirmed)
-        throw std::runtime_error("V37 target/attack contract incomplete");
+        !p.attackRuntimeConfirmed || !p.attackCreatureSharedValueConfirmed ||
+        !p.sharedObjectRefCountOffset || !p.attackCancelFalseConfirmed)
+        throw std::runtime_error("V39 target/attack ownership contract incomplete");
 
     return p;
 }
@@ -466,6 +481,17 @@ bool isExecutableAddress(std::uintptr_t address) {
         return false;
     const DWORD p = mbi.Protect & 0xFFu;
     return p == PAGE_EXECUTE || p == PAGE_EXECUTE_READ ||
+           p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool isWritableAddress(std::uintptr_t address) {
+    if (!address) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<const void*>(address), &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) || (mbi.Protect & PAGE_NOACCESS))
+        return false;
+    const DWORD p = mbi.Protect & 0xFFu;
+    return p == PAGE_READWRITE || p == PAGE_WRITECOPY ||
            p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
 }
 
@@ -1684,16 +1710,41 @@ bool executeAttackSelectedOnGameThread() {
     g_lastActionTargetId = id;
     const auto fn = reinterpret_cast<GameAttackFn>(functionAddress);
 
+    // IMPORTANT: Game::attack receives CreaturePtr BY VALUE on this OTC family.
+    // shared_object_ptr is 4 bytes, so the actual stack value looks exactly like
+    // a raw Creature*. The semantic difference is ownership: the normal caller
+    // copy-constructs CreaturePtr (add_ref), and the callee destroys that
+    // by-value parameter (dec_ref) on return. Calling with raw pointer bits
+    // without the matching add_ref under-counts references and leaves
+    // m_attackingCreature with invalid ownership after creatures disappear.
+    const auto refAddress = target + p.sharedObjectRefCountOffset;
+    std::uint32_t refsBefore{};
+    if (!p.attackCreatureSharedValueConfirmed ||
+        !p.sharedObjectRefCountOffset ||
+        !safeRead(refAddress, refsBefore) ||
+        refsBefore == 0 || refsBefore > 1000000u ||
+        !isWritableAddress(refAddress)) {
+        InterlockedExchange(&g_lastActionCode, 22);
+        logLine("[TARGET TRACE] refusing attack: invalid shared_object refcount");
+        return false;
+    }
+
+    const LONG refsAfterAdd =
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(refAddress));
+
     logLine("[TARGET TRACE] before Game::attack id=" + std::to_string(id) +
-            " target=0x" + [&]{
-                std::ostringstream o; o << std::hex << std::uppercase << target; return o.str();
-            }());
-    // V4 ABI experiment: V37 captured Creature* as arg1, but the
-    // original probe only inspected one attack argument. OTC-family Game::attack
-    // commonly has a trailing bool cancel; false is the path that transmits the
-    // attack rather than only updating local target state.
+            " refsBefore=" + std::to_string(refsBefore) +
+            " refsAfterAdd=" + std::to_string(refsAfterAdd));
+
+    // Stack ABI remains pointer-sized: the single px field of CreaturePtr is
+    // passed by value. The explicit add_ref above supplies the ownership step
+    // that the original C++ caller performs before entering Game::attack.
     fn(reinterpret_cast<void*>(game), reinterpret_cast<void*>(target), false);
-    logLine("[TARGET TRACE] Game::attack returned id=" + std::to_string(id));
+
+    std::uint32_t refsAfter{};
+    safeRead(refAddress, refsAfter);
+    logLine("[TARGET TRACE] Game::attack returned id=" + std::to_string(id) +
+            " refsAfter=" + std::to_string(refsAfter));
 
     std::uintptr_t after{};
     safeRead(game + p.attackTargetOffset, after);
@@ -2059,6 +2110,7 @@ std::string actionCodeText(LONG code) {
         case 19: return "move_target_full";
         case 20: return "loot_candidate_missing";
         case 21: return "container_item_not_visible";
+        case 22: return "attack_shared_object_refcount_invalid";
         default: return "unknown_action_result";
     }
 }
@@ -2559,7 +2611,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":18,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":19,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
