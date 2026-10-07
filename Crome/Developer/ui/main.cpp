@@ -816,6 +816,63 @@ static void RamoniaTargetWorker() {
             nextLightRefreshMs=nowMs+500;
         }
 
+        // Spell Healing for Ramonia uses the runtime-confirmed talkChannel
+        // route. Item heals remain native-only until their self-use ABI is
+        // validated for this build.
+        const auto healingCfg=GetRamoniaHealingConfig();
+        if (!healingCfg.enabled) {
+            nextHealAttemptMs=0;
+            SetRamoniaHealingStatus("Healing: desligado");
+        } else if (bridgeVersion<23) {
+            nextHealAttemptMs=0;
+            SetRamoniaHealingStatus("Healing: requer Bridge V23+");
+        } else if (!nextHealAttemptMs || nowMs>=nextHealAttemptMs) {
+            nlohmann::json playerJson;
+            const bool playerOk=
+                RamoniaPipeRequest(pid,{{"cmd","GET_PLAYER"}},playerJson);
+            const auto vitals=playerOk ? ParseRamoniaVitals(playerJson) : RamoniaVitalsUi{};
+
+            const RamoniaHealingSpellRuleUi* selected=nullptr;
+            if (vitals.valid) {
+                const double hpPct=vitals.healthPercent();
+                for (const auto& rule:healingCfg.spells) {
+                    if (!rule.enabled || rule.spell.empty() || rule.spell.size()>15)
+                        continue;
+                    if (hpPct>static_cast<double>(rule.hpPercent) ||
+                        vitals.mana<rule.minMana)
+                        continue;
+                    if (!selected || rule.priority>selected->priority)
+                        selected=&rule;
+                }
+            }
+
+            if (selected) {
+                nlohmann::json sayJson;
+                const bool cast=
+                    RamoniaPipeRequest(
+                        pid,
+                        {{"cmd","SAY"},{"message",selected->spell}},
+                        sayJson) &&
+                    sayJson.value("ok",false);
+
+                if (cast) {
+                    SetRamoniaHealingStatus(
+                        "Healing: " + selected->spell +
+                        " HP=" + std::to_string(
+                            static_cast<int>(vitals.healthPercent())) + "%");
+                    nextHealAttemptMs=
+                        nowMs+std::max<std::uint32_t>(250u,selected->cooldownMs);
+                } else {
+                    SetRamoniaHealingStatus("Healing: SAY pendente");
+                    nextHealAttemptMs=nowMs+250;
+                }
+            } else {
+                SetRamoniaHealingStatus(
+                    vitals.valid ? "Healing: monitorando" : "Healing: aguardando player");
+                nextHealAttemptMs=nowMs+100;
+            }
+        }
+
         // Auto Food stays independent from Target and Loot.
         const auto foodCfg = GetRamoniaFoodConfig();
         if (!foodCfg.enabled) {
