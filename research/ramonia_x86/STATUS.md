@@ -331,3 +331,19 @@ Ramonia Loot defaults:
 - initial loot item list: `2148` (gold).
 
 The Ramonia Loot policy is external x64 Crome logic. The x86 bridge remains unchanged at V16 and continues to expose the already runtime-confirmed semantic actions.
+
+
+## Ramonia transition crash — safety hardening pending live validation
+
+A crash was reported after leaving the cave with Target/Loot active, after successful cave combat. The existing V12+ dispatcher contract was audited and still removes its `WH_GETMESSAGE` hook immediately after each native action, including timeout/error cleanup; no permanent Target hook is installed while idle.
+
+Two additional protections were added before the next live run:
+
+- Crome v0.8.4 detects Ramonia floor changes or large position jumps through `GET_PLAYER`, clears pending Loot target state and pauses all `Tile::things` Target/Loot polling for 1600 ms while the map settles.
+- Bridge V17 re-resolves the current Ramonia window and game-thread id immediately before every native action. It no longer reuses a cached thread id across actions/map transitions. The per-action hook is still installed only for the action and removed immediately afterward.
+
+These changes are safety hardening based on the observed transition crash. They are not considered runtime-confirmed until a live cave-exit test completes without a crash.
+
+Target name filtering remains policy-driven: a list containing only `Rat` intentionally excludes `Cave Rat` and `Spider`. Those names must be added explicitly or Attack Any (`*`) must be enabled.
+
+Loot corpse id `2813` is confirmed only for the tested Rat corpse. Other creature types should have their death-window corpse item id captured before being added to continuous Loot.
