@@ -366,6 +366,7 @@ static std::optional<RamoniaMonsterUi> ChooseRamoniaTarget(
     int bestPriority = 1000000;
     for (const auto& m : monsters) {
         int pr{};
+        if (m.hpPercent == 0) continue;
         if (!RamoniaNameMatches(m, cfg, pr)) continue;
         if (static_cast<int>(m.hpPercent) < cfg.hpMin || static_cast<int>(m.hpPercent) > cfg.hpMax) continue;
         if (static_cast<int>(m.distance) > cfg.maxRange) continue;
@@ -875,7 +876,54 @@ static void RamoniaTargetWorker() {
         }
 
         const auto monsters = ParseRamoniaMonsters(monstersJson);
-        const auto currentAttackId = ParseRamoniaAttackId(combatJson);
+        auto currentAttackId = ParseRamoniaAttackId(combatJson);
+
+        // Fast reacquire lane:
+        // Loot can legitimately spend several seconds finishing the corpse of
+        // the previous target. Do NOT let that block combat. When the game has
+        // already cleared AttackTarget, acquire the next monster first, then
+        // continue processing the previous death/loot state below.
+        if (targetPolicyActive && currentAttackId == 0) {
+            const auto fastTarget =
+                ChooseRamoniaTarget(monsters,targetCfg,0);
+
+            if (fastTarget) {
+                nlohmann::json attackResponse;
+                const bool transportOk =
+                    RamoniaPipeRequest(
+                        pid,
+                        {{"cmd","ATTACK_ID"},{"creatureId",fastTarget->id}},
+                        attackResponse);
+                const bool actionOk =
+                    transportOk &&
+                    attackResponse.is_object() &&
+                    attackResponse.value("ok",false);
+
+                if (actionOk) {
+                    currentAttackId=fastTarget->id;
+                    SetRamoniaStatus(
+                        "Target reacquired",
+                        fastTarget->name,
+                        fastTarget->id,
+                        fastTarget->hpPercent);
+
+                    // Do not overwrite a pending previous Loot baseline here.
+                    // Once that death is resolved, the normal Loot marker will
+                    // arm itself on this new AttackTarget.
+                    if (!lootMarkedTargetId)
+                        lootLastTargetMarkMs=0;
+                } else {
+                    const std::string error =
+                        (transportOk && attackResponse.is_object())
+                            ? attackResponse.value("error",std::string())
+                            : std::string();
+                    if (error == "creature_id_not_visible")
+                        SetRamoniaStatus("Alvo sumiu - procurando proximo");
+                    else
+                        SetRamoniaStatus("ATTACK_ID pendente - nova tentativa");
+                }
+            }
+        }
 
         // Loot baseline is armed against the actual AttackTarget. This removes
         // the manual diagnostic race where LOOT_MARK could run before a Rat was
@@ -985,7 +1033,7 @@ static void RamoniaTargetWorker() {
             continue;
         }
 
-        const auto currentAttackForTarget = ParseRamoniaAttackId(combatJson);
+        const auto currentAttackForTarget = currentAttackId;
         const auto target = ChooseRamoniaTarget(
             monsters,targetCfg,currentAttackForTarget);
 
@@ -2249,7 +2297,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.1 Persist + Light");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.2 Fast Reacquire");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
