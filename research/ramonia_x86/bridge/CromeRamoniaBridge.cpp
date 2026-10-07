@@ -1796,6 +1796,33 @@ std::string armLookCaptureResponse() {
     return R"({"ok":true,"cmd":"ARM_LOOK_ID","armed":true,"timeoutMs":8000})";
 }
 
+void shutdownLookCapture() {
+    HANDLE event{};
+    AcquireSRWLockExclusive(&g_lookCaptureLock);
+    restoreLookCaptureBreakpointLocked();
+    event=g_lookCaptureEvent;
+    if (event) SetEvent(event);
+    ReleaseSRWLockExclusive(&g_lookCaptureLock);
+
+    for (int i=0;i<100 &&
+         InterlockedCompareExchange(&g_lookCaptureWorkerActive,0,0)!=0;
+         ++i)
+        Sleep(10);
+
+    AcquireSRWLockExclusive(&g_lookCaptureLock);
+    if (g_lookVehHandle) {
+        RemoveVectoredExceptionHandler(g_lookVehHandle);
+        g_lookVehHandle=nullptr;
+    }
+    if (g_lookCaptureEvent) {
+        CloseHandle(g_lookCaptureEvent);
+        g_lookCaptureEvent=nullptr;
+    }
+    InterlockedExchange(&g_lookCaptureWorkerActive,0);
+    InterlockedExchange(&g_lookCaptureArmed,0);
+    ReleaseSRWLockExclusive(&g_lookCaptureLock);
+}
+
 std::string getLookCaptureResponse() {
     const bool captured=
         InterlockedCompareExchange(&g_lookCaptureCaptured,0,0)!=0;
@@ -3756,11 +3783,14 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":24,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":25,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
           << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
+          << ",\"lookReady\":"
+          << ((g_profile && g_profile->lookRuntimeConfirmed &&
+               g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
           << ",\"lightReady\":"
           << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
           << ",\"lightEnabled\":" << (g_worldLightEnabled ? "true" : "false")
@@ -3794,6 +3824,8 @@ std::string handleRequest(const std::string& request) {
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
+    if (cmd == "ARM_LOOK_ID") return armLookCaptureResponse();
+    if (cmd == "GET_LOOK_ID") return getLookCaptureResponse();
     if (cmd == "SAY") {
         const auto message=stringFieldFromRequest(request,"message");
         if (!message)
@@ -3918,7 +3950,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V24 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V25 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -3992,6 +4024,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         writeStatusFile();
     }
 
+    shutdownLookCapture();
     if (g_worldLightEnabled)
         restoreWorldLightHack();
     cleanupOnDemandDispatcher();
