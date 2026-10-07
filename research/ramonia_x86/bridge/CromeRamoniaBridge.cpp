@@ -1684,12 +1684,16 @@ bool executeAttackSelectedOnGameThread() {
     g_lastActionTargetId = id;
     const auto fn = reinterpret_cast<GameAttackFn>(functionAddress);
 
-    logLine("[ACTION] ATTACK_SELECTED game-thread id=" + std::to_string(id));
+    logLine("[TARGET TRACE] before Game::attack id=" + std::to_string(id) +
+            " target=0x" + [&]{
+                std::ostringstream o; o << std::hex << std::uppercase << target; return o.str();
+            }());
     // V4 ABI experiment: V37 captured Creature* as arg1, but the
     // original probe only inspected one attack argument. OTC-family Game::attack
     // commonly has a trailing bool cancel; false is the path that transmits the
     // attack rather than only updating local target state.
     fn(reinterpret_cast<void*>(game), reinterpret_cast<void*>(target), false);
+    logLine("[TARGET TRACE] Game::attack returned id=" + std::to_string(id));
 
     std::uintptr_t after{};
     safeRead(game + p.attackTargetOffset, after);
@@ -1900,6 +1904,7 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     UnhookWindowsHookEx(hook);
                     if (g_gameThreadHook == hook) g_gameThreadHook = nullptr;
                 }
+                logLine("[TARGET TRACE] hook removed after action");
                 if (g_actionEvent) SetEvent(g_actionEvent);
                 return next;
             }
@@ -1989,6 +1994,9 @@ bool dispatchPendingActionToGameThread(DWORD& win32Error) {
         cleanupOnDemandDispatcher();
         return false;
     }
+
+    logLine("[TARGET TRACE] hook installed tid=" +
+            std::to_string(g_gameThreadId));
 
     ResetEvent(g_actionEvent);
     InterlockedExchange(&g_lastActionCode, 0);
@@ -2476,6 +2484,7 @@ std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
 }
 
 std::string attackIdResponse(std::uint32_t creatureId) {
+    logLine("[TARGET TRACE] ATTACK_ID request id=" + std::to_string(creatureId));
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"ATTACK_ID","error":"build_not_validated"})";
     if (!prepareGameThreadDispatcher())
@@ -2550,7 +2559,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":17,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":18,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
