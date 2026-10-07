@@ -2432,6 +2432,59 @@ bool executeMoveOnGameThread() {
     return true;
 }
 
+bool executeTalkOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,5);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if (!p.talkChannelRuntimeConfirmed ||
+        !p.talkModeArgConfirmed ||
+        !p.talkChannelArgConfirmed ||
+        !p.talkMessageMsvcStringRefConfirmed ||
+        !p.talkChannelMethodRva) {
+        InterlockedExchange(&g_lastActionCode,23);
+        return false;
+    }
+
+    const std::size_t len=std::strlen(g_pendingTalkMessage);
+    if (!len || len>15) {
+        InterlockedExchange(&g_lastActionCode,24);
+        return false;
+    }
+
+    MsvcSmallString32 message;
+    std::memcpy(message.storage,g_pendingTalkMessage,len);
+    message.storage[len]='\0';
+    message.size=static_cast<std::uint32_t>(len);
+    message.capacity=15;
+
+    const auto functionAddress=g_base+p.talkChannelMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,25);
+        return false;
+    }
+
+    const auto game=g_base+p.gameRva;
+    const auto fn=reinterpret_cast<GameTalkChannelFn>(functionAddress);
+
+    logLine("[ACTION] TALK_CHANNEL mode=" +
+            std::to_string(g_pendingTalkMode) +
+            " channel=" + std::to_string(g_pendingTalkChannel) +
+            " message=" + std::string(g_pendingTalkMessage));
+
+    fn(reinterpret_cast<void*>(game),
+       g_pendingTalkMode,
+       g_pendingTalkChannel,
+       &message);
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         auto* msg = reinterpret_cast<MSG*>(lParam);
@@ -2450,6 +2503,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeUseOnGameThread();
                 else if (kind == PendingMove)
                     executeMoveOnGameThread();
+                else if (kind == PendingTalk)
+                    executeTalkOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -2617,6 +2672,9 @@ std::string actionCodeText(LONG code) {
         case 20: return "loot_candidate_missing";
         case 21: return "container_item_not_visible";
         case 22: return "attack_shared_object_refcount_invalid";
+        case 23: return "talk_contract_not_ready";
+        case 24: return "talk_message_invalid";
+        case 25: return "talk_function_not_executable";
         default: return "unknown_action_result";
     }
 }
@@ -2659,6 +2717,19 @@ std::optional<std::uint32_t> uint32FieldAllowZeroFromRequest(
         const auto n = integerValue(root.get(field));
         if (!n || *n > 0xFFFFFFFFull) return std::nullopt;
         return static_cast<std::uint32_t>(*n);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> stringFieldFromRequest(
+    const std::string& request,const char* field) {
+    try {
+        const auto root=crome::json::parse(request);
+        if (!root.isObject()) return std::nullopt;
+        const auto* v=root.get(field);
+        if (!v || !v->isString()) return std::nullopt;
+        return v->string();
     } catch (...) {
         return std::nullopt;
     }
@@ -3112,12 +3183,57 @@ std::string attackSelectedResponse() {
       << ",\"gameThreadResult\":" << (code == 1 ? 1 : 0) << "}";
     return o.str();
 }
+std::string sayResponse(const std::string& message) {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"SAY","error":"build_not_validated"})";
+    if (message.empty() || message.size()>15)
+        return R"({"ok":false,"cmd":"SAY","error":"message_must_be_1_to_15_ascii_chars"})";
+
+    for (const unsigned char c:message) {
+        if (c<0x20 || c>0x7E)
+            return R"({"ok":false,"cmd":"SAY","error":"message_ascii_only"})";
+    }
+
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"SAY","error":"dispatcher_not_ready"})";
+
+    std::memset(g_pendingTalkMessage,0,sizeof(g_pendingTalkMessage));
+    std::memcpy(g_pendingTalkMessage,message.data(),message.size());
+
+    // OTC-family Game::talk is talkChannel(MessageSay,0,message).
+    // MessageSay=1 is cross-checked against upstream OTClient/OTCv8 source;
+    // the Ramonia talkChannel ABI itself is runtime-confirmed in this profile.
+    g_pendingTalkMode=1;
+    g_pendingTalkChannel=0;
+    InterlockedExchange(&g_pendingActionKind,PendingTalk);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    std::memset(g_pendingTalkMessage,0,sizeof(g_pendingTalkMessage));
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"SAY\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code==1?"true":"false")
+      << ",\"cmd\":\"SAY\",\"result\":\"" << actionCodeText(code)
+      << "\",\"mode\":1,\"channel\":0"
+      << ",\"message\":\"" << jsonEscape(message) << "\"}";
+    return o.str();
+}
+
 std::string handleRequest(const std::string& request) {
     const auto cmd = commandFromRequest(request);
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":22,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":23,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -3155,6 +3271,12 @@ std::string handleRequest(const std::string& request) {
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
+    if (cmd == "SAY") {
+        const auto message=stringFieldFromRequest(request,"message");
+        if (!message)
+            return R"({"ok":false,"cmd":"SAY","error":"invalid_message"})";
+        return sayResponse(*message);
+    }
     if (cmd == "GET_LIGHT") return worldLightStatusResponse("GET_LIGHT");
     if (cmd == "SET_LIGHT") {
         const auto enabled=uint32FieldAllowZeroFromRequest(request,"enabled");
@@ -3261,7 +3383,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V22 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V23 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
