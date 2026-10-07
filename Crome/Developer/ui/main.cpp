@@ -309,12 +309,16 @@ static std::optional<RamoniaMonsterUi> ChooseRamoniaTarget(
     const RamoniaTargetConfigUi& cfg,
     std::uint32_t currentAttackId) {
 
-    for (const auto& m : monsters) {
-        int pr{};
-        if (m.id != currentAttackId || !RamoniaNameMatches(m, cfg, pr)) continue;
-        if (static_cast<int>(m.hpPercent) < cfg.hpMin || static_cast<int>(m.hpPercent) > cfg.hpMax) continue;
-        if (static_cast<int>(m.distance) > cfg.maxRange) continue;
-        return m;
+    // Sticky target rule: once the client has a real AttackTarget, never
+    // abandon it merely because one Tile::things poll missed the creature or
+    // because HP/range changed. Let the game clear AttackTarget on death,
+    // cancel or true disappearance before acquiring another monster.
+    if (currentAttackId) {
+        for (const auto& m : monsters) {
+            if (m.id == currentAttackId)
+                return m;
+        }
+        return std::nullopt;
     }
 
     std::optional<RamoniaMonsterUi> best;
@@ -777,7 +781,12 @@ static void RamoniaTargetWorker() {
             monsters,targetCfg,currentAttackForTarget);
 
         if (!target) {
-            SetRamoniaStatus("Target ativo - aguardando alvo");
+            if (currentAttackForTarget)
+                SetRamoniaStatus(
+                    "Target travado no ID " + std::to_string(currentAttackForTarget) +
+                    " - aguardando confirmacao do jogo");
+            else
+                SetRamoniaStatus("Target ativo - aguardando alvo");
             Sleep(300);
             continue;
         }
@@ -1991,7 +2000,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.5 Target Ownership");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.6 Sticky Target");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
