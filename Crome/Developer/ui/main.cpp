@@ -118,6 +118,7 @@ struct RamoniaLootConfigUi {
     std::uint32_t corpseItemId{2813};
     std::uint32_t targetContainerId{0};
     std::vector<std::uint32_t> itemIds;
+    std::vector<std::uint32_t> nestedContainerIds;
     std::vector<std::uint32_t> learnedCorpseIds;
 };
 
