@@ -2402,29 +2402,170 @@ static void DrawHealing(const Theme& t) {
 }
 
 static void DrawFriends(const Theme& t) {
-    static int friendHp=70, myHp=80; static bool follow=false, uh=false, party=false;
+    static int friendHp=70, myHp=80;
+    static bool follow=false, uh=false, party=false;
     static char list[128]="Friend1, Friend2, Friend3";
-    CardBegin("friends","Friends / Party",CardIcon::Users,ImVec4(0.12f,0.62f,1.0f,1),84,t);
-    ImGui::TextUnformatted("Friend HP:"); ImGui::SameLine(); SmallInt("##fhp",&friendHp,58); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::SameLine(190); ImGui::TextUnformatted("Your HP:"); ImGui::SameLine(); SmallInt("##mhp",&myHp,58); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::Checkbox("Follow Friends",&follow); ImGui::SameLine(145); ImGui::Checkbox("UH Friends",&uh); ImGui::SameLine(270); ImGui::Checkbox("Party Mode",&party);
-    ImGui::TextDisabled("Friends:"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1); ImGui::InputText("##flist",list,sizeof(list));
+    static std::uint64_t seenProfileLoadGeneration=~0ull;
+
+    if(seenProfileLoadGeneration!=g_profileLoadGeneration){
+        seenProfileLoadGeneration=g_profileLoadGeneration;
+        nlohmann::json fj;
+        if(ReadJsonFile(g_baseDir/"config"/"friends.json",fj)){
+            friendHp=fj.value("friend_hp",friendHp);
+            myHp=fj.value("your_hp",myHp);
+            follow=fj.value("follow_friends",follow);
+            uh=fj.value("uh_friends",uh);
+            party=fj.value("party_mode",party);
+            const auto csv=fj.value("friends_csv",std::string(list));
+            std::snprintf(list,sizeof(list),"%s",csv.c_str());
+        }
+    }
+
+    CardBegin("friends","Friends / Party",CardIcon::Users,
+              ImVec4(0.12f,0.62f,1.0f,1),88,t);
+
+    ImGui::TextUnformatted("Friend HP:");
+    ImGui::SameLine();
+    SmallInt("##fhp",&friendHp,58);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%%");
+
+    ImGui::SameLine(190);
+    ImGui::TextUnformatted("Your HP:");
+    ImGui::SameLine();
+    SmallInt("##mhp",&myHp,58);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%%");
+
+    ImGui::Checkbox("Follow Friends",&follow);
+    ImGui::SameLine(145);
+    ImGui::Checkbox("UH Friends",&uh);
+    ImGui::SameLine(270);
+    ImGui::Checkbox("Party Mode",&party);
+
+    ImGui::TextDisabled("Friends:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputText("##flist",list,sizeof(list));
+
+    nlohmann::json fcfg={
+        {"friend_hp",std::clamp(friendHp,0,100)},
+        {"your_hp",std::clamp(myHp,0,100)},
+        {"follow_friends",follow},
+        {"uh_friends",uh},
+        {"party_mode",party},
+        {"friends_csv",std::string(list)},
+        {"backend","prepared_only"},
+        {"future_follow_action","follow_friend_by_name"},
+        {"future_uh_action","useWith_uh_on_friend"},
+        {"future_sio_action","exura sio \"{name}\""},
+        {"party_semantic","green_shield_or_green_skull_pending_runtime_validation"}
+    };
+    WriteJsonIfChanged("friends.json",fcfg);
+
     CardEnd();
 }
 
 static void DrawRune(const Theme& t) {
     static bool en=false, relog=false, logout=false, noblank=false;
-    static int mana=70,soul=5,relogMin=6; static char spell[32]="exura"; static int mode=0;
+    static int mana=70,soul=5,relogMin=6;
+    static char spell[32]="exura";
+    static int mode=0;
+    static int cooldownMs=1000;
+    static std::uint64_t seenProfileLoadGeneration=~0ull;
+
     const char* modes[]={"Logout","Stay Online","Pause"};
-    CardBegin("rune","Rune Maker / Trainer",CardIcon::Rune,ImVec4(0.72f,0.35f,1.0f,1),90,t);
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
-    ImGui::Checkbox("Enabled",&en); ImGui::SameLine(165); ImGui::TextUnformatted("Spell:"); ImGui::SameLine(); SmallInput("##rspell",spell,sizeof(spell),170);
-    ImGui::TextUnformatted("Mana:"); ImGui::SameLine(); SmallInt("##rmana",&mana,60); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::SameLine(210); ImGui::TextUnformatted("Soul:"); ImGui::SameLine(); SmallInt("##soul",&soul,60);
-    ImGui::Checkbox("Re-Login After",&relog); ImGui::SameLine(); SmallInt("##relogin",&relogMin,55); ImGui::SameLine(); ImGui::TextDisabled("min");
-    ImGui::Checkbox("Player Logout",&logout); ImGui::SameLine(135); ImGui::Checkbox("No Blank Runes",&noblank);
-    ImGui::SameLine(270); ImGui::SetNextItemWidth(105); ImGui::Combo("##mode",&mode,modes,3);
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    if(seenProfileLoadGeneration!=g_profileLoadGeneration){
+        seenProfileLoadGeneration=g_profileLoadGeneration;
+        nlohmann::json rj;
+        if(ReadJsonFile(g_baseDir/"config"/"rune.json",rj)){
+            en=rj.value("enabled",en);
+            mana=rj.value("mana_percent",mana);
+            soul=rj.value("soul_min",soul);
+            cooldownMs=rj.value("cooldown_ms",cooldownMs);
+            relog=rj.value("relog_after",relog);
+            relogMin=rj.value("relog_minutes",relogMin);
+            logout=rj.value("player_logout",logout);
+            noblank=rj.value("no_blank_runes",noblank);
+            mode=rj.value("mode",mode);
+            const auto sp=rj.value("spell",std::string(spell));
+            std::snprintf(spell,sizeof(spell),"%s",sp.c_str());
+        }
+    }
+
+    const bool runeRuntimeReady=RuneRuntimeReady();
+    const bool ramoniaRuneReady=
+        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=26;
+
+    CardBegin("rune","Rune Maker / Trainer",CardIcon::Rune,
+              ImVec4(0.72f,0.35f,1.0f,1),104,t);
+
+    if(!runeRuntimeReady) ImGui::BeginDisabled();
+    ImGui::Checkbox("Enabled",&en);
+    ImGui::SameLine(165);
+    ImGui::TextUnformatted("Spell:");
+    ImGui::SameLine();
+    SmallInput("##rspell",spell,sizeof(spell),170);
+    if(!runeRuntimeReady) ImGui::EndDisabled();
+
+    if(!runeRuntimeReady) ImGui::BeginDisabled();
+    ImGui::TextUnformatted("Mana:");
+    ImGui::SameLine();
+    SmallInt("##rmana",&mana,60);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%%");
+
+    ImGui::SameLine(190);
+    ImGui::TextUnformatted("Soul Min:");
+    ImGui::SameLine();
+    SmallInt("##soul",&soul,60);
+    if(!runeRuntimeReady) ImGui::EndDisabled();
+
+    if(ramoniaRuneReady){
+        ImGui::TextDisabled("%s",RamoniaRuneStatusText().c_str());
+    } else {
+        // Advanced legacy automation remains native-only for now.
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+        ImGui::Checkbox("Re-Login After",&relog);
+        ImGui::SameLine();
+        SmallInt("##relogin",&relogMin,55);
+        ImGui::SameLine();
+        ImGui::TextDisabled("min");
+        ImGui::Checkbox("Player Logout",&logout);
+        ImGui::SameLine(135);
+        ImGui::Checkbox("No Blank Runes",&noblank);
+        ImGui::SameLine(270);
+        ImGui::SetNextItemWidth(105);
+        ImGui::Combo("##mode",&mode,modes,3);
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    }
+
+    RamoniaRuneConfigUi ramRune;
+    ramRune.enabled=ramoniaRuneReady && en;
+    ramRune.manaPercent=std::clamp(mana,0,100);
+    ramRune.soulMin=std::max(0,soul);
+    ramRune.spell=spell;
+    ramRune.cooldownMs=static_cast<std::uint32_t>(
+        std::clamp(cooldownMs,300,10000));
+    SetRamoniaRuneConfig(ramRune);
+
+    nlohmann::json rcfg={
+        {"enabled",runeRuntimeReady&&en},
+        {"spell",std::string(spell)},
+        {"mana_percent",std::clamp(mana,0,100)},
+        {"soul_min",std::max(0,soul)},
+        {"soul_mode","auto_if_available"},
+        {"cooldown_ms",std::clamp(cooldownMs,300,10000)},
+        {"ramonia_backend",ramoniaRuneReady ? "bridge_v26_get_player_plus_say" : "unavailable"},
+        {"relog_after",g_nativeRuntimeLoaded&&relog},
+        {"relog_minutes",std::max(0,relogMin)},
+        {"player_logout",g_nativeRuntimeLoaded&&logout},
+        {"no_blank_runes",g_nativeRuntimeLoaded&&noblank},
+        {"mode",mode}
+    };
+    WriteJsonIfChanged("rune.json",rcfg);
+
     CardEnd();
 }
 
@@ -3084,7 +3225,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.8 Editable Item Healing");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.9 Rune Trainer");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
