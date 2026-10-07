@@ -307,3 +307,27 @@ Initial defaults are intentionally limited to the already observed Ramonia Rat/C
 - loot item id: gold `2148`.
 
 This stage is diagnostic-only. Continuous Loot in the Crome UI remains disabled until the complete one-cycle chain is confirmed live.
+
+
+## V17 live Auto Loot confirmation and Crome UI integration
+
+The one-cycle Auto Loot diagnostic was live-confirmed twice against Rat corpses.
+
+Confirmed sequence:
+- corpse item id `2813` detected after Rat death;
+- corpse opened through `USE_LOOT_ITEM`;
+- newly opened container identified as `dead rat`;
+- gold item id `2148` moved through `MOVE_CONTAINER_ITEM`;
+- destination bag id `0` updated successfully.
+
+Observed successful move counts included 3 gold and 1 gold in separate runs. The diagnostic also reported the destination Bag total after each move.
+
+Two earlier diagnostic runs timed out before a corpse candidate was detected. To remove that manual timing weakness from normal use, Crome v0.8.3 arms `LOOT_MARK` only when an actual AttackTarget is present. It keeps one baseline per target, waits for that target ID to disappear, then runs `LOOT_DIFF`, opens the configured corpse and moves the configured loot items. After a Crome `ATTACK_ID`, Loot also arms its baseline immediately in the same worker cycle so very weak targets cannot die before the next 300 ms poll.
+
+Ramonia Loot defaults:
+- corpse item id: `2813`;
+- destination container id: `0`;
+- loot-only-list: enabled;
+- initial loot item list: `2148` (gold).
+
+The Ramonia Loot policy is external x64 Crome logic. The x86 bridge remains unchanged at V16 and continues to expose the already runtime-confirmed semantic actions.
