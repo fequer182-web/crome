@@ -8939,7 +8939,16 @@ ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,
     }
 
     if((token=="attack" || token=="follow") && idx==0 && V34CreatureFamily(direct)) {
-        out.semantic="Creature"; out.abiType="raw_ptr"; out.status="runtime_confirmed"; out.rtti=direct; return out;
+        // Game::attack/follow receive CreaturePtr by value on this OTC family.
+        // shared_object_ptr is pointer-sized, so the stack slot contains the
+        // Creature* bits directly even though ownership semantics are NOT raw.
+        // The caller must add_ref before the call; the callee releases its
+        // by-value parameter when it returns.
+        out.semantic="Creature";
+        out.abiType="shared_object_ptr_value";
+        out.status="runtime_confirmed";
+        out.rtti=direct;
+        return out;
     }
 
     if(token=="attack" && idx==1 && raw<=1u) {
