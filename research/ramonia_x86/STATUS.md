@@ -375,3 +375,20 @@ Additional V17 hardening:
 - the bridge now invalidates the cached Tile* list immediately when LocalPlayer z differs from the cache origin z, rather than allowing the previous-floor cache to survive for up to 1000 ms.
 
 Rat and Cave Rat both opened successfully under corpse item id `2813` on this Ramonia build.
+
+
+## V18 Target isolation diagnostics
+
+Further live testing showed the crash can also occur inside the cave when Target is active, while Loot + Auto Food without Target remain stable. This broadens the fault from floor-transition-only to the Target path itself.
+
+V18 introduces two isolation aids:
+
+- `CromePipeTest_x64.exe targetscan <name|*>`: continuous read-only Target polling using `GET_VISIBLE_MONSTERS` + `GET_COMBAT_TARGETS`; it never calls `ATTACK_ID` and never installs the game-thread hook.
+- bridge Target trace markers in `CromeRamoniaBridge.log`: ATTACK_ID request, hook installation, before/after `Game::attack`, and hook removal.
+
+The validated V37 attack ABI remains:
+`x86 thiscall-like, ECX=Game*, arg1=Creature* raw_ptr, arg2=bool false`.
+
+The next A/B test is intentionally split:
+1. read-only targetscan while manually killing/moving/changing floors;
+2. active target loop only if read-only remains stable.
