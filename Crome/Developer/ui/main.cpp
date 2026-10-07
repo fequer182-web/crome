@@ -75,12 +75,22 @@ struct RamoniaTargetConfigUi {
     std::vector<std::string> names;
 };
 
+struct RamoniaFoodConfigUi {
+    bool enabled{};
+    std::uint32_t itemId{2696};
+    std::uint32_t intervalMs{60000};
+    std::uint32_t retryMs{1000};
+};
+
 static std::atomic<bool> g_ramoniaWorkerRun{true};
 static std::atomic<bool> g_ramoniaBridgeReady{false};
+static std::atomic<int> g_ramoniaBridgeVersion{0};
 static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
 static RamoniaTargetConfigUi g_ramoniaTargetConfig;
+static RamoniaFoodConfigUi g_ramoniaFoodConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
+static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
 static std::uint32_t g_ramoniaCurrentTargetHp{};
@@ -137,6 +147,26 @@ static void SetRamoniaTargetConfig(const RamoniaTargetConfigUi& cfg) {
 static RamoniaTargetConfigUi GetRamoniaTargetConfig() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaTargetConfig;
+}
+
+static void SetRamoniaFoodConfig(const RamoniaFoodConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaFoodConfig = cfg;
+}
+
+static RamoniaFoodConfigUi GetRamoniaFoodConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaFoodConfig;
+}
+
+static void SetRamoniaFoodStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaFoodStatus = status;
+}
+
+static std::string RamoniaFoodStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaFoodStatus;
 }
 
 static bool RamoniaPipeRequest(DWORD pid, const nlohmann::json& request, nlohmann::json& response) {
@@ -255,12 +285,17 @@ static std::optional<RamoniaMonsterUi> ChooseRamoniaTarget(
 }
 
 static void RamoniaTargetWorker() {
+    std::uint64_t nextFoodAttemptMs = 0;
+
     while (g_ramoniaWorkerRun.load()) {
         const DWORD pid = FindRamoniaProcess();
         g_ramoniaPid.store(pid);
         if (!pid) {
             g_ramoniaBridgeReady.store(false);
+            g_ramoniaBridgeVersion.store(0);
+            nextFoodAttemptMs = 0;
             SetRamoniaStatus("Ramonia nao esta aberto");
+            SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
             Sleep(700);
             continue;
         }
@@ -273,12 +308,66 @@ static void RamoniaTargetWorker() {
             !hello.value("dispatcherReady",false) ||
             hello.value("bridgeVersion",0) < 6) {
             g_ramoniaBridgeReady.store(false);
+            g_ramoniaBridgeVersion.store(hello.value("bridgeVersion",0));
+            nextFoodAttemptMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
+            SetRamoniaFoodStatus("Auto Food: bridge aguardando");
             Sleep(500);
             continue;
         }
 
+        const int bridgeVersion = hello.value("bridgeVersion",0);
         g_ramoniaBridgeReady.store(true);
+        g_ramoniaBridgeVersion.store(bridgeVersion);
+
+        // Auto Food is an independent policy from Target/Loot. The x64 UI
+        // decides when to eat; the x86 bridge only validates + calls Game::use.
+        const auto foodCfg = GetRamoniaFoodConfig();
+        const auto nowMs = static_cast<std::uint64_t>(GetTickCount64());
+
+        if (!foodCfg.enabled) {
+            nextFoodAttemptMs = 0;
+            SetRamoniaFoodStatus("Auto Food: desligado");
+        } else if (bridgeVersion < 16) {
+            nextFoodAttemptMs = 0;
+            SetRamoniaFoodStatus("Auto Food: requer Bridge V16+");
+        } else if (foodCfg.itemId == 0 || foodCfg.itemId > 0xFFFFu) {
+            nextFoodAttemptMs = 0;
+            SetRamoniaFoodStatus("Auto Food: item ID invalido");
+        } else if (!nextFoodAttemptMs || nowMs >= nextFoodAttemptMs) {
+            nlohmann::json foodResponse;
+            const bool transportOk = RamoniaPipeRequest(
+                pid,
+                {{"cmd","USE_CONTAINER_ITEM"},{"itemId",foodCfg.itemId}},
+                foodResponse);
+
+            if (transportOk && foodResponse.value("ok",false)) {
+                const auto containerId = foodResponse.value("sourceContainerId",0u);
+                const auto slot = foodResponse.value("slot",0u);
+                SetRamoniaFoodStatus(
+                    "Auto Food: usou " + std::to_string(foodCfg.itemId) +
+                    " bag=" + std::to_string(containerId) +
+                    " slot=" + std::to_string(slot));
+                nextFoodAttemptMs = nowMs + std::max<std::uint32_t>(1000u, foodCfg.intervalMs);
+            } else {
+                const std::string error =
+                    (transportOk && foodResponse.is_object())
+                        ? foodResponse.value("error",std::string())
+                        : std::string();
+
+                if (error == "item_not_found_in_open_containers")
+                    SetRamoniaFoodStatus("Auto Food: aguardando item " + std::to_string(foodCfg.itemId));
+                else if (error == "container_item_not_visible" || error == "item_holder_changed")
+                    SetRamoniaFoodStatus("Auto Food: item mudou - tentando novamente");
+                else if (!transportOk)
+                    SetRamoniaFoodStatus("Auto Food: pipe indisponivel");
+                else
+                    SetRamoniaFoodStatus("Auto Food: " + (error.empty() ? std::string("falhou") : error));
+
+                nextFoodAttemptMs = nowMs + std::max<std::uint32_t>(250u, foodCfg.retryMs);
+            }
+        }
+
         const auto cfg = GetRamoniaTargetConfig();
         if (!cfg.enabled) {
             SetRamoniaStatus("Ramonia Bridge pronta");
@@ -287,8 +376,6 @@ static void RamoniaTargetWorker() {
         }
 
         // Target enabled without a target policy must be a true idle state.
-        // Do not run the provisional monster heap scan when there is nothing
-        // the user actually asked us to attack.
         if (!HasRamoniaTargetPolicy(cfg)) {
             SetRamoniaStatus("Target ativo - informe um alvo ou marque Any");
             Sleep(300);
@@ -341,6 +428,11 @@ static void RamoniaTargetWorker() {
 
 static bool TargetRuntimeReady() {
     return g_nativeRuntimeLoaded || g_ramoniaBridgeReady.load();
+}
+
+static bool FoodRuntimeReady() {
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16);
 }
 
 static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
@@ -1161,7 +1253,7 @@ static void DrawTools(const Theme& t) {
     static bool mana=false,light=false,antiIdle=false,fish=false,food=false;
     static bool para=false,haste=false,advert=false,spear=false,reAmmo=false;
     static char paraSpell[32]="exura",hasteSpell[32]="utani hur",manaSpell[32]="utamo vita",ad[64]="Set Message...",spears[64]="";
-    static int ammo=3447, foodInterval=60000, manaInterval=170000, hasteInterval=30000, idleMin=45000, idleMax=90000;
+    static int ammo=3447, foodId=2696, foodInterval=60000, manaInterval=170000, hasteInterval=30000, idleMin=45000, idleMax=90000;
     static int fishMinDelay=850, fishMaxDelay=1450, fishRange=7;
     static std::uint64_t seenProfileLoadGeneration=~0ull;
     if(seenProfileLoadGeneration!=g_profileLoadGeneration){
@@ -1177,7 +1269,13 @@ static void DrawTools(const Theme& t) {
             loadSpell("mana_shield",mana,manaSpell,sizeof(manaSpell),manaInterval,"utamo vita");
             loadSpell("anti_paralyze",para,paraSpell,sizeof(paraSpell),hasteInterval,"exura");
             loadSpell("auto_haste",haste,hasteSpell,sizeof(hasteSpell),hasteInterval,"utani hur");
-            if(tj.contains("food")){ food=tj["food"].value("enabled",false); foodInterval=tj["food"].value("interval_ms",foodInterval); }
+            if(tj.contains("food")){
+                food=tj["food"].value("enabled",false);
+                foodInterval=tj["food"].value("interval_ms",foodInterval);
+                if(tj["food"].contains("item_ids") && tj["food"]["item_ids"].is_array() &&
+                   !tj["food"]["item_ids"].empty() && tj["food"]["item_ids"][0].is_number_integer())
+                    foodId=tj["food"]["item_ids"][0].get<int>();
+            }
             if(tj.contains("anti_idle")){ antiIdle=tj["anti_idle"].value("enabled",false); idleMin=tj["anti_idle"].value("min_interval_ms",idleMin); idleMax=tj["anti_idle"].value("max_interval_ms",idleMax); }
             if(tj.contains("light")) light=tj["light"].value("enabled",false);
             if(tj.contains("spear_pickup")) spear=tj["spear_pickup"].value("enabled",false);
@@ -1185,27 +1283,63 @@ static void DrawTools(const Theme& t) {
         }
     }
     CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),214,t);
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    const bool foodRuntimeReady = FoodRuntimeReady();
     if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("left",0,1.05f); ImGui::TableSetupColumn("right",0,1.05f); ImGui::TableSetupColumn("value",0,1.25f);
         auto row=[&](const char* lid,bool* lv,const char* rid,bool* rv,const char* iid,char* buf,size_t cap){ ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox(lid,lv); ImGui::TableSetColumnIndex(1); ImGui::Checkbox(rid,rv); ImGui::TableSetColumnIndex(2); SmallInput(iid,buf,cap,-1); };
+
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
         row("Mana Shield",&mana,"Anti-Paralyze",&para,"##para",paraSpell,sizeof(paraSpell));
         row("Light Hack",&light,"Auto-Haste",&haste,"##haste",hasteSpell,sizeof(hasteSpell));
         row("Anti-Idle",&antiIdle,"Advertise",&advert,"##advert",ad,sizeof(ad));
         row("Auto Fishing",&fish,"Pick Up Spear",&spear,"##spear",spears,sizeof(spears));
-        ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox("Food Eater",&food); ImGui::TableSetColumnIndex(1); ImGui::Checkbox("Re-Ammo",&reAmmo); ImGui::TableSetColumnIndex(2); SmallInt("##ammo",&ammo,-1);
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        if(!foodRuntimeReady) ImGui::BeginDisabled();
+        ImGui::Checkbox("Food Eater",&food);
+        if(!foodRuntimeReady) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(1);
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+        ImGui::Checkbox("Re-Ammo",&reAmmo);
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(2);
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+        SmallInt("##ammo",&ammo,-1);
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
         ImGui::EndTable();
     }
-    if(fish){ ImGui::TextDisabled("Fishing usa Game::useWith(rod, waterThing), recarrega config em runtime e sorteia o tile."); ImGui::TextUnformatted("Delay:"); ImGui::SameLine(); SmallInt("##fmin",&fishMinDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("-"); ImGui::SameLine(); SmallInt("##fmax",&fishMaxDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("ms  Range:"); ImGui::SameLine(); SmallInt("##frange",&fishRange,45); }
-    ImGui::TextDisabled("Timers ms: Food"); ImGui::SameLine(); SmallInt("##foodms",&foodInterval,70); ImGui::SameLine(); ImGui::TextDisabled("ManaShield"); ImGui::SameLine(); SmallInt("##manams",&manaInterval,70); ImGui::SameLine(); ImGui::TextDisabled("Haste"); ImGui::SameLine(); SmallInt("##hastems",&hasteInterval,70);
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    if(g_nativeRuntimeLoaded && fish){ ImGui::TextDisabled("Fishing usa Game::useWith(rod, waterThing), recarrega config em runtime e sorteia o tile."); ImGui::TextUnformatted("Delay:"); ImGui::SameLine(); SmallInt("##fmin",&fishMinDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("-"); ImGui::SameLine(); SmallInt("##fmax",&fishMaxDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("ms  Range:"); ImGui::SameLine(); SmallInt("##frange",&fishRange,45); }
+
+    if(!foodRuntimeReady) ImGui::BeginDisabled();
+    ImGui::TextDisabled("Food ID"); ImGui::SameLine(); SmallInt("##foodid",&foodId,60);
+    ImGui::SameLine(); ImGui::TextDisabled("Timer ms"); ImGui::SameLine(); SmallInt("##foodms",&foodInterval,70);
+    if(!foodRuntimeReady) ImGui::EndDisabled();
+
+    if(g_nativeRuntimeLoaded){
+        ImGui::SameLine(); ImGui::TextDisabled("ManaShield"); ImGui::SameLine(); SmallInt("##manams",&manaInterval,70);
+        ImGui::SameLine(); ImGui::TextDisabled("Haste"); ImGui::SameLine(); SmallInt("##hastems",&hasteInterval,70);
+    }
+
     EnsureWalkerIdCatalog();
     nlohmann::json waters=nlohmann::json::array(); for(auto&v:g_walkerIds.data["fishingWater"]) if(v.is_number_integer()) waters.push_back(v);
-    nlohmann::json foodIds=nlohmann::json::array(); for(auto&v:g_walkerIds.data["food"]) if(v.is_number_integer()) foodIds.push_back(v);
+    nlohmann::json foodIds=nlohmann::json::array({std::max(1,foodId)});
     nlohmann::json fcfg={{"enabled",g_nativeRuntimeLoaded&&fish},{"rod_id",CatalogFirst("fishingRod",3483)},{"water_ids",waters},{"range",fishRange},{"min_delay_ms",fishMinDelay},{"max_delay_ms",fishMaxDelay},{"random_target",true},{"pause_while_walker",true},{"pause_while_targeting",true}};
     WriteJsonIfChanged("fishing.json",fcfg);
+
+    RamoniaFoodConfigUi ramFood;
+    ramFood.enabled = g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16 && food;
+    ramFood.itemId = static_cast<std::uint32_t>(std::max(1,foodId));
+    ramFood.intervalMs = static_cast<std::uint32_t>(std::max(1000,foodInterval));
+    ramFood.retryMs = 1000;
+    SetRamoniaFoodConfig(ramFood);
+
     nlohmann::json tcfg={
-      {"food",{{"enabled",g_nativeRuntimeLoaded&&food},{"interval_ms",foodInterval},{"item_ids",foodIds}}},
+      {"food",{{"enabled",foodRuntimeReady&&food},{"interval_ms",foodInterval},{"item_ids",foodIds}}},
       {"anti_idle",{{"enabled",g_nativeRuntimeLoaded&&antiIdle},{"min_interval_ms",idleMin},{"max_interval_ms",idleMax},{"mode","turn_only"},{"status","runtime_turn_action_pending"}}},
       {"mana_shield",{{"enabled",g_nativeRuntimeLoaded&&mana},{"spell",manaSpell},{"fallback_interval_ms",manaInterval},{"prefer_condition_state",true}}},
       {"anti_paralyze",{{"enabled",g_nativeRuntimeLoaded&&para},{"spell",paraSpell},{"prefer_condition_state",true},{"speed_baseline_mode","unhasted_base"}}},
@@ -1215,6 +1349,8 @@ static void DrawTools(const Theme& t) {
       {"reammo",{{"enabled",g_nativeRuntimeLoaded&&reAmmo},{"item_ids",nlohmann::json::array({ammo})},{"min_count",1},{"status","requires_move_equip_backend"}}}
     };
     WriteJsonIfChanged("tools.json",tcfg);
+    if(g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16)
+        ImGui::TextDisabled("%s", RamoniaFoodStatusText().c_str());
     CardEnd();
 }
 
@@ -1352,7 +1488,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.1 Ramonia Target");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.2 Ramonia Food");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
