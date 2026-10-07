@@ -1083,6 +1083,8 @@ struct TileItemDiagnostic {
 struct LootBaselineState {
     bool valid{};
     std::uint64_t tileGeneration{};
+    std::uint32_t trackedTargetId{};
+    std::uintptr_t trackedTargetTile{};
     std::vector<std::uintptr_t> tiles;
     std::vector<TileItemDiagnostic> items;
     std::vector<TileMonsterDiagnostic> monsters;
@@ -1520,6 +1522,68 @@ std::string lootMarkResponse() {
     return o.str();
 }
 
+std::string lootMarkTargetResponse(std::uint32_t targetId) {
+    if (!targetId)
+        return R"({"ok":false,"cmd":"LOOT_MARK_TARGET","error":"invalid_target_id"})";
+    if (!g_profile || !g_profile->itemContractReady)
+        return R"({"ok":false,"cmd":"LOOT_MARK_TARGET","error":"item_contract_not_ready"})";
+
+    std::uint32_t px{}, py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px, py, pz))
+        return R"({"ok":false,"cmd":"LOOT_MARK_TARGET","error":"player_unavailable"})";
+
+    if (!ensureTileCache(px, py, pz))
+        return R"({"ok":false,"cmd":"LOOT_MARK_TARGET","error":"tile_cache_unavailable"})";
+
+    const auto cache = tileCacheInfo();
+    const auto tiles = copyTileCache();
+    const auto items = scanTileItemsFromSnapshot(tiles);
+    const auto monsters = scanTileMonstersFromSnapshot(tiles, 15);
+
+    const TileMonsterDiagnostic* tracked = nullptr;
+    for (const auto& m : monsters) {
+        if (m.monster.id == targetId) {
+            tracked = &m;
+            break;
+        }
+    }
+
+    // Critical safety rule: if the requested target is already gone, DO NOT
+    // overwrite the previous good baseline. That preserved baseline is the
+    // last confirmed tile where the creature was alive.
+    if (!tracked) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"LOOT_MARK_TARGET\","
+          << "\"error\":\"target_not_visible\",\"targetId\":" << targetId << "}";
+        return o.str();
+    }
+
+    AcquireSRWLockExclusive(&g_lootBaselineLock);
+    g_lootBaseline.valid = true;
+    g_lootBaseline.tileGeneration = cache.generation;
+    g_lootBaseline.trackedTargetId = targetId;
+    g_lootBaseline.trackedTargetTile = tracked->tileAddress;
+    g_lootBaseline.tiles = tiles;
+    g_lootBaseline.items = items;
+    g_lootBaseline.monsters = monsters;
+    ReleaseSRWLockExclusive(&g_lootBaselineLock);
+
+    AcquireSRWLockExclusive(&g_lootCandidateLock);
+    g_lastLootCandidates.clear();
+    ReleaseSRWLockExclusive(&g_lootCandidateLock);
+
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"LOOT_MARK_TARGET\","
+      << "\"targetId\":" << targetId
+      << ",\"targetName\":\"" << jsonEscape(tracked->monster.name) << "\""
+      << ",\"targetTileSlot\":" << tileSlotOf(tiles, tracked->tileAddress)
+      << ",\"tileGeneration\":" << cache.generation
+      << ",\"baselineItems\":" << items.size()
+      << "}";
+    return o.str();
+}
+
 std::string lootDiffResponse() {
     LootBaselineState baseline;
     AcquireSRWLockShared(&g_lootBaselineLock);
@@ -1552,24 +1616,50 @@ std::string lootDiffResponse() {
             removed.push_back(oldMonster);
     }
 
+    std::vector<TileItemDiagnostic> deathTileCandidates;
+    if (baseline.trackedTargetId && baseline.trackedTargetTile) {
+        bool trackedRemoved = false;
+        for (const auto& oldMonster : removed) {
+            if (oldMonster.monster.id == baseline.trackedTargetId) {
+                trackedRemoved = true;
+                break;
+            }
+        }
+        if (trackedRemoved) {
+            for (const auto& item : added) {
+                if (item.tileAddress == baseline.trackedTargetTile)
+                    deathTileCandidates.push_back(item);
+            }
+        }
+    } else if (!removed.empty()) {
+        // Legacy LOOT_MARK diagnostic behavior only.
+        deathTileCandidates = added;
+    }
+
     AcquireSRWLockExclusive(&g_lootCandidateLock);
-    g_lastLootCandidates = removed.empty()
-        ? std::vector<TileItemDiagnostic>{}
-        : added;
+    g_lastLootCandidates = deathTileCandidates;
     ReleaseSRWLockExclusive(&g_lootCandidateLock);
+
+    const auto& emittedItems =
+        baseline.trackedTargetId ? deathTileCandidates : added;
 
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"LOOT_DIFF\",\"readOnly\":true,"
       << "\"baselineGeneration\":" << baseline.tileGeneration
       << ",\"currentGlobalGeneration\":" << cache.generation
       << ",\"snapshotTiles\":" << baseline.tiles.size()
-      << ",\"candidatePolicy\":\"death_window_item_id\","
-      << "\"addedCount\":" << added.size()
+      << ",\"trackedTargetId\":" << baseline.trackedTargetId
+      << ",\"trackedTargetTileSlot\":"
+      << (baseline.trackedTargetTile
+            ? tileSlotOf(tiles, baseline.trackedTargetTile)
+            : 0xFFFFFFFFu)
+      << ",\"candidatePolicy\":\"strict_tracked_target_death_tile\","
+      << "\"addedCount\":" << emittedItems.size()
       << ",\"addedItems\":[";
 
-    for (std::size_t i = 0; i < added.size() && i < 64; ++i) {
+    for (std::size_t i = 0; i < emittedItems.size() && i < 64; ++i) {
         if (i) o << ",";
-        const auto& item = added[i];
+        const auto& item = emittedItems[i];
 
         o << "{\"id\":" << item.id
           << ",\"count\":" << item.count
@@ -2611,7 +2701,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":19,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":20,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -2650,6 +2740,12 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
     if (cmd == "GET_TILE_MONSTERS") return tileMonstersResponse();
     if (cmd == "LOOT_MARK") return lootMarkResponse();
+    if (cmd == "LOOT_MARK_TARGET") {
+        const auto id = uint32FieldFromRequest(request, "creatureId");
+        if (!id || !*id)
+            return R"({"ok":false,"cmd":"LOOT_MARK_TARGET","error":"invalid_creature_id"})";
+        return lootMarkTargetResponse(*id);
+    }
     if (cmd == "LOOT_DIFF") return lootDiffResponse();
     if (cmd == "GET_OPEN_CONTAINERS") return openContainersResponse();
     if (cmd == "USE_LOOT_ITEM") {
