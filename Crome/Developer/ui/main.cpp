@@ -535,16 +535,15 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
         if (sourceIdOpt) break;
 
         // OTC can reuse an existing container id/window for the next corpse.
-        // Detect a container whose name/content changed after Game::use.
+        // Any non-target container that changes immediately after the corpse
+        // Game::use is a stronger signal than relying on English "dead ..."
+        // naming, which may vary by server/client language.
         for (const auto& c:containers) {
             if (c.id==cfg.targetContainerId) continue;
             const auto* old=FindRamoniaContainer(before,c.id);
             if (old && !SameRamoniaContainerSnapshot(*old,c)) {
-                const auto name=LowerAscii(c.name);
-                if (name.rfind("dead ",0)==0) {
-                    sourceIdOpt=c.id;
-                    break;
-                }
+                sourceIdOpt=c.id;
+                break;
             }
         }
     }
