@@ -2070,7 +2070,9 @@ static void DrawHealing(const Theme& t) {
                     } else if(name=="mana_fluid"){
                         manaFluidEnabled=r.value("enabled",false);
                         manaFluidMp=r.value("below_or_equal",manaFluidMp);
-                        manaFluidId=r.value("item_id",manaFluidId);
+                        const int configuredManaFluidId=r.value("item_id",manaFluidId);
+                        if(configuredManaFluidId>0)
+                            manaFluidId=configuredManaFluidId;
                     } else if(name=="life_fluid"){
                         lifeFluidEnabled=r.value("enabled",false);
                         lifeFluidHp=r.value("below_or_equal",lifeFluidHp);
