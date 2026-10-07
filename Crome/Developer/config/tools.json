@@ -33,7 +33,9 @@
   },
   "light": {
     "enabled": false,
-    "profile_gated": true
+    "profile_gated": true,
+    "ambient": 1,
+    "ramonia_bridge_min_version": 22
   },
   "spear_pickup": {
     "enabled": false,
