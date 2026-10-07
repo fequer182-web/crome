@@ -406,31 +406,90 @@ static bool RamoniaLootMarkTracksTarget(const nlohmann::json& mark,
     return false;
 }
 
-static bool RamoniaLootDiffHasCorpse(const nlohmann::json& diff,
-                                     std::uint32_t targetId,
-                                     std::uint32_t corpseItemId) {
-    if (!diff.is_object() || !diff.value("ok",false)) return false;
+static std::vector<std::uint32_t> RamoniaLootCorpseCandidates(
+    const nlohmann::json& diff,
+    std::uint32_t targetId,
+    std::uint32_t fallbackCorpseItemId) {
+
+    std::vector<std::uint32_t> exactTile;
+    std::vector<std::uint32_t> allAdded;
+    if (!diff.is_object() || !diff.value("ok",false)) return {};
 
     bool targetRemoved = false;
     if (diff.contains("removedMonsters") && diff["removedMonsters"].is_array()) {
-        for (const auto& m : diff["removedMonsters"])
+        for (const auto& m : diff["removedMonsters"]) {
             if (m.is_object() && m.value("id",0u) == targetId) {
                 targetRemoved = true;
                 break;
             }
+        }
     }
-    if (!targetRemoved) return false;
+    if (!targetRemoved) return {};
+
+    auto pushUnique=[](std::vector<std::uint32_t>& dst,std::uint32_t id){
+        if (!id) return;
+        if (std::find(dst.begin(),dst.end(),id)==dst.end()) dst.push_back(id);
+    };
 
     if (diff.contains("addedItems") && diff["addedItems"].is_array()) {
-        for (const auto& item : diff["addedItems"])
-            if (item.is_object() && item.value("id",0u) == corpseItemId)
-                return true;
+        for (const auto& item : diff["addedItems"]) {
+            if (!item.is_object()) continue;
+            const auto id=item.value("id",0u);
+            if (!id) continue;
+            pushUnique(allAdded,id);
+
+            bool exact=false;
+            if (item.contains("baselineMonsters") &&
+                item["baselineMonsters"].is_array()) {
+                for (const auto& bm : item["baselineMonsters"]) {
+                    if (bm.is_object() && bm.value("id",0u)==targetId) {
+                        exact=true;
+                        break;
+                    }
+                }
+            }
+            if (exact) pushUnique(exactTile,id);
+        }
     }
-    return false;
+
+    std::vector<std::uint32_t> out;
+    // Known/fallback corpse first when the death transition actually produced
+    // it, then every item born on the exact target tile.
+    if (fallbackCorpseItemId &&
+        std::find(exactTile.begin(),exactTile.end(),fallbackCorpseItemId)!=exactTile.end())
+        pushUnique(out,fallbackCorpseItemId);
+
+    for (const auto id:exactTile) pushUnique(out,id);
+
+    // If the monster moved between LOOT_MARK and death, the corpse may be on a
+    // tile that did not contain it in the baseline. Preserve the proven fixed
+    // corpse fallback when it appeared anywhere in the death window.
+    if (fallbackCorpseItemId &&
+        std::find(allAdded.begin(),allAdded.end(),fallbackCorpseItemId)!=allAdded.end())
+        pushUnique(out,fallbackCorpseItemId);
+
+    // Last-resort auto discovery: try the other items created in this exact
+    // death window. USE_LOOT_ITEM still revalidates the live Tile holder.
+    for (const auto id:allAdded) pushUnique(out,id);
+    return out;
+}
+
+static bool SameRamoniaContainerSnapshot(
+    const RamoniaContainerUi& a,
+    const RamoniaContainerUi& b) {
+
+    if (a.name!=b.name || a.items.size()!=b.items.size()) return false;
+    for (std::size_t i=0;i<a.items.size();++i) {
+        if (a.items[i].id!=b.items[i].id ||
+            a.items[i].count!=b.items[i].count)
+            return false;
+    }
+    return true;
 }
 
 static bool RamoniaLootOpenAndMove(DWORD pid,
-                                   const RamoniaLootConfigUi& cfg) {
+                                   const RamoniaLootConfigUi& cfg,
+                                   std::uint32_t corpseItemId) {
     nlohmann::json beforeJson;
     if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, beforeJson))
         return false;
@@ -444,48 +503,62 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
     nlohmann::json useResponse;
     if (!RamoniaPipeRequest(
             pid,
-            {{"cmd","USE_LOOT_ITEM"},{"itemId",cfg.corpseItemId}},
+            {{"cmd","USE_LOOT_ITEM"},{"itemId",corpseItemId}},
             useResponse) ||
         !useResponse.value("ok",false)) {
         SetRamoniaLootStatus("Loot: falha ao abrir corpse");
         return false;
     }
 
-    Sleep(350);
+    std::vector<RamoniaContainerUi> containers;
+    std::optional<std::uint32_t> sourceIdOpt;
 
-    nlohmann::json afterJson;
-    if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, afterJson)) {
-        SetRamoniaLootStatus("Loot: corpse abriu, leitura de container falhou");
-        return false;
-    }
-    auto containers = ParseRamoniaContainers(afterJson);
+    // Opening a corpse is asynchronous from the external worker's point of
+    // view. Give the client/server up to ~1.2 s to create OR reuse/update the
+    // corpse container instead of assuming 350 ms is always enough.
+    for (int attempt=0; attempt<10 && !sourceIdOpt; ++attempt) {
+        Sleep(attempt==0 ? 220 : 110);
 
-    const RamoniaContainerUi* source = nullptr;
-    for (const auto& c : containers) {
-        if (c.id == cfg.targetContainerId) continue;
-        if (!RamoniaContainerIdExists(before,c.id)) {
-            source = &c;
-            break;
-        }
-    }
+        nlohmann::json afterJson;
+        if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, afterJson))
+            continue;
+        containers=ParseRamoniaContainers(afterJson);
 
-    if (!source) {
-        for (const auto& c : containers) {
-            if (c.id == cfg.targetContainerId) continue;
-            const auto name = LowerAscii(c.name);
-            if (name.rfind("dead ",0) == 0) {
-                source = &c;
+        // Best signal: a brand-new non-target container.
+        for (const auto& c:containers) {
+            if (c.id==cfg.targetContainerId) continue;
+            if (!RamoniaContainerIdExists(before,c.id)) {
+                sourceIdOpt=c.id;
                 break;
+            }
+        }
+        if (sourceIdOpt) break;
+
+        // OTC can reuse an existing container id/window for the next corpse.
+        // Detect a container whose name/content changed after Game::use.
+        for (const auto& c:containers) {
+            if (c.id==cfg.targetContainerId) continue;
+            const auto* old=FindRamoniaContainer(before,c.id);
+            if (old && !SameRamoniaContainerSnapshot(*old,c)) {
+                const auto name=LowerAscii(c.name);
+                if (name.rfind("dead ",0)==0) {
+                    sourceIdOpt=c.id;
+                    break;
+                }
             }
         }
     }
 
-    if (!source) {
-        SetRamoniaLootStatus("Loot: corpse abriu, container nao identificado");
+    if (!sourceIdOpt) {
+        SetRamoniaLootStatus(
+            "Loot: corpse " + std::to_string(corpseItemId) +
+            " ainda nao abriu");
         return false;
     }
 
-    const std::uint32_t sourceId = source->id;
+    const std::uint32_t sourceId=*sourceIdOpt;
+    const auto* source=FindRamoniaContainer(containers,sourceId);
+    if (!source) return false;
     std::vector<std::uint32_t> wanted;
 
     if (cfg.onlyList) {
@@ -727,29 +800,45 @@ static void RamoniaTargetWorker() {
         // present in the tracked tile snapshot.
         if (lootActive) {
             if (lootMarkedTargetId && currentAttackId != lootMarkedTargetId) {
-                if (!lootDiffDeadlineMs) lootDiffDeadlineMs = nowMs + 2500;
+                if (!lootDiffDeadlineMs) lootDiffDeadlineMs = nowMs + 4000;
 
                 nlohmann::json diff;
-                if (RamoniaPipeRequest(pid, {{"cmd","LOOT_DIFF"}}, diff) &&
-                    RamoniaLootDiffHasCorpse(
-                        diff,lootMarkedTargetId,lootCfg.corpseItemId)) {
-                    SetRamoniaLootStatus("Loot: corpse detectado, abrindo...");
-                    RamoniaLootOpenAndMove(pid,lootCfg);
-                    lootMarkedTargetId = 0;
-                            lootDiffDeadlineMs = 0;
-                    Sleep(150);
-                    continue;
+                if (RamoniaPipeRequest(pid, {{"cmd","LOOT_DIFF"}}, diff)) {
+                    const auto corpseCandidates=
+                        RamoniaLootCorpseCandidates(
+                            diff,lootMarkedTargetId,lootCfg.corpseItemId);
+
+                    if (!corpseCandidates.empty()) {
+                        bool opened=false;
+                        for (const auto corpseId:corpseCandidates) {
+                            SetRamoniaLootStatus(
+                                "Loot: tentando corpse auto ID " +
+                                std::to_string(corpseId));
+                            if (RamoniaLootOpenAndMove(
+                                    pid,lootCfg,corpseId)) {
+                                opened=true;
+                                break;
+                            }
+                        }
+
+                        if (opened) {
+                            lootMarkedTargetId=0;
+                            lootDiffDeadlineMs=0;
+                            Sleep(120);
+                            continue;
+                        }
+                    }
                 }
 
                 if (nowMs < lootDiffDeadlineMs) {
-                    SetRamoniaLootStatus("Loot: aguardando corpse...");
-                    Sleep(150);
+                    SetRamoniaLootStatus("Loot: aguardando/abrindo corpse...");
+                    Sleep(120);
                     continue;
                 }
 
-                SetRamoniaLootStatus("Loot: alvo saiu sem corpse confirmado");
-                lootMarkedTargetId = 0;
-                    lootDiffDeadlineMs = 0;
+                SetRamoniaLootStatus("Loot: morte sem corpse abrivel confirmado");
+                lootMarkedTargetId=0;
+                lootDiffDeadlineMs=0;
             }
 
             if (currentAttackId) {
@@ -1827,7 +1916,7 @@ static void DrawLoot(const Theme& t) {
 
     ImGui::SameLine(285);
     if(ramoniaLootReady){
-        ImGui::TextUnformatted("Corpse ID:");
+        ImGui::TextUnformatted("Corpse fallback:");
         ImGui::SameLine(); SmallInt("##corpseid",&corpseId,65);
     }else{
         ImGui::TextUnformatted("Radius:");
@@ -1884,6 +1973,7 @@ static void DrawLoot(const Theme& t) {
       {"radius",radius},
       {"max_weight",maxWeight},
       {"target_container_id",targetBagId},
+      {"auto_detect_corpse",true},
       {"corpse_item_ids",nlohmann::json::array({std::max(1,corpseId)})},
       {"item_ids",lootJsonIds},
       {"drop_item",{
@@ -2000,7 +2090,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.6 Sticky Target");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.7 Auto Corpse");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
