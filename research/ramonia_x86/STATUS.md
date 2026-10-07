@@ -415,3 +415,18 @@ V19 changes:
 - ABI Builder persists this ownership metadata for future profile regeneration.
 
 This is a root-cause correction, but remains pending live confirmation. Do not mark Target stable until V19 survives repeated attacks, creature deaths, walking, and floor transitions.
+
+
+## V19 stability signal + sticky Target policy
+
+First live V19 run remained stable for at least 10 minutes under active targeting, which is the strongest evidence so far that the CreaturePtr ownership correction addressed the delayed crash mechanism.
+
+A separate Target-policy issue was observed: a Troll could be left alive when its health became low/red because the external selector immediately chose another monster whenever the current AttackTarget was absent from a single Tile::things poll or no longer matched acquisition filters.
+
+Crome v0.8.6 and CromePipeTest now use sticky AttackTarget semantics:
+- while Game::AttackTarget is nonzero, no new target is acquired;
+- if the active target appears in the monster snapshot, it is retained regardless of HP/range acquisition filters;
+- if one Tile::things poll misses the active target, the worker waits rather than switching;
+- a new target is selected only after the game itself clears AttackTarget.
+
+This separates target acquisition policy from active-target retention and should prevent low-HP monsters from being abandoned before death.
