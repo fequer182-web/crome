@@ -540,3 +540,24 @@ Crome v0.9.1:
 - adds `lightstatus`, `lighton`, and `lightoff` diagnostics to CromePipeTest.
 
 This V22 Light backend is profile-driven but has not yet been runtime-confirmed visually on Ramonia. Compilation/runtime validation remains pending the next live test.
+
+
+## V22 Light runtime-confirmed + Crome v0.9.2 Fast Reacquire
+
+Ramonia Light V22 was visually confirmed live:
+- SET_LIGHT/lighton changed the same dark cave area to full-bright;
+- the profile-driven UIMap -> MapView -> minimumAmbient path is therefore runtime-confirmed for build 6AB03F94 / E281E9CA5BA0AF2;
+- Light remained compatible with active Target/Loot during the test.
+
+A separate responsiveness issue was then observed: after a monster died, another nearby monster could attack the player for roughly 5 seconds before Crome selected it.
+
+Code review identified the exact cause: the Loot state machine can keep a previous death pending for up to ~5.5 seconds, and its wait path used `continue` before Target acquisition.
+
+Crome v0.9.2 changes scheduling only:
+- if Game::AttackTarget is zero, Target acquisition runs before pending Loot processing;
+- a new monster can therefore receive ATTACK_ID immediately while the previous corpse is still being resolved;
+- the existing pending Loot baseline is deliberately not overwritten by the fast reacquire path;
+- the normal Loot marker arms the new AttackTarget after the previous death is resolved;
+- new target acquisition ignores hpPercent=0 creatures.
+
+Bridge remains V22; no Game::attack ABI, dispatcher, Light backend, or Loot bridge contract changed in this step.
