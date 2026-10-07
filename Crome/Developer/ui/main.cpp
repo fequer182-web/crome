@@ -519,7 +519,6 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
     std::uint32_t lootMarkedTargetId = 0;
-    std::uint64_t lootLastMarkMs = 0;
     std::uint64_t lootDiffDeadlineMs = 0;
 
     while (g_ramoniaWorkerRun.load()) {
@@ -530,7 +529,6 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
             lootMarkedTargetId = 0;
-            lootLastMarkMs = 0;
             lootDiffDeadlineMs = 0;
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
@@ -551,7 +549,6 @@ static void RamoniaTargetWorker() {
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
             lootMarkedTargetId = 0;
-            lootLastMarkMs = 0;
             lootDiffDeadlineMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
@@ -620,7 +617,6 @@ static void RamoniaTargetWorker() {
 
         if (!lootActive) {
             lootMarkedTargetId = 0;
-            lootLastMarkMs = 0;
             lootDiffDeadlineMs = 0;
             SetRamoniaLootStatus(lootCfg.enabled
                 ? "Loot: requer Bridge V16+"
@@ -662,8 +658,7 @@ static void RamoniaTargetWorker() {
                     SetRamoniaLootStatus("Loot: corpse detectado, abrindo...");
                     RamoniaLootOpenAndMove(pid,lootCfg);
                     lootMarkedTargetId = 0;
-                    lootLastMarkMs = 0;
-                    lootDiffDeadlineMs = 0;
+                            lootDiffDeadlineMs = 0;
                     Sleep(150);
                     continue;
                 }
@@ -676,8 +671,7 @@ static void RamoniaTargetWorker() {
 
                 SetRamoniaLootStatus("Loot: alvo saiu sem corpse confirmado");
                 lootMarkedTargetId = 0;
-                lootLastMarkMs = 0;
-                lootDiffDeadlineMs = 0;
+                    lootDiffDeadlineMs = 0;
             }
 
             if (currentAttackId) {
@@ -686,7 +680,6 @@ static void RamoniaTargetWorker() {
                     if (RamoniaPipeRequest(pid, {{"cmd","LOOT_MARK"}}, mark) &&
                         RamoniaLootMarkTracksTarget(mark,currentAttackId)) {
                         lootMarkedTargetId = currentAttackId;
-                        lootLastMarkMs = nowMs;
                         lootDiffDeadlineMs = 0;
                         SetRamoniaLootStatus(
                             "Loot armado no target " + std::to_string(currentAttackId));
@@ -732,6 +725,19 @@ static void RamoniaTargetWorker() {
                     SetRamoniaStatus("ATTACK_ID pendente - nova tentativa");
                 Sleep(250);
                 continue;
+            }
+
+            // Arm Loot immediately after starting combat so very weak targets
+            // cannot die before the next worker cycle creates the baseline.
+            if (lootActive && lootMarkedTargetId != target->id) {
+                nlohmann::json mark;
+                if (RamoniaPipeRequest(pid, {{"cmd","LOOT_MARK"}}, mark) &&
+                    RamoniaLootMarkTracksTarget(mark,target->id)) {
+                    lootMarkedTargetId = target->id;
+                    lootDiffDeadlineMs = 0;
+                    SetRamoniaLootStatus(
+                        "Loot armado no target " + std::to_string(target->id));
+                }
             }
         }
 
