@@ -646,7 +646,9 @@ static void RamoniaTargetWorker() {
         const auto targetCfg = GetRamoniaTargetConfig();
         const auto lootCfg = GetRamoniaLootConfig();
         const bool targetPolicyActive =
-            targetCfg.enabled && HasRamoniaTargetPolicy(targetCfg);
+            targetCfg.enabled &&
+            bridgeVersion >= 19 &&
+            HasRamoniaTargetPolicy(targetCfg);
         const bool lootActive =
             lootCfg.enabled && bridgeVersion >= 16;
 
@@ -694,7 +696,9 @@ static void RamoniaTargetWorker() {
         }
 
         if (!targetPolicyActive && !lootActive) {
-            if (targetCfg.enabled)
+            if (targetCfg.enabled && bridgeVersion < 19)
+                SetRamoniaStatus("Target: requer Bridge V19+");
+            else if (targetCfg.enabled)
                 SetRamoniaStatus("Target ativo - informe um alvo ou marque Any");
             else
                 SetRamoniaStatus("Ramonia Bridge pronta");
@@ -817,7 +821,8 @@ static void RamoniaTargetWorker() {
 }
 
 static bool TargetRuntimeReady() {
-    return g_nativeRuntimeLoaded || g_ramoniaBridgeReady.load();
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 19);
 }
 
 static bool FoodRuntimeReady() {
@@ -1986,7 +1991,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.4 Ramonia Safety");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.5 Target Ownership");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
