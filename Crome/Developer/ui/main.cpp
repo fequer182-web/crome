@@ -2041,7 +2041,7 @@ static void DrawHealing(const Theme& t) {
     static int uhId = 2273;
     static bool manaFluidEnabled = false;
     static int manaFluidMp = 50;
-    static int manaFluidId = 0;
+    static int manaFluidId = 15552;
     static bool lifeFluidEnabled = false;
     static int lifeFluidHp = 50;
     static int lifeFluidId = 0;
@@ -2086,7 +2086,7 @@ static void DrawHealing(const Theme& t) {
         g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=23;
 
     CardBegin("healing", "Healing", CardIcon::Heart,
-              ImVec4(1.0f,0.20f,0.36f,1), 140, t);
+              ImVec4(1.0f,0.20f,0.36f,1), 164, t);
 
     if(!healingRuntimeReady) ImGui::BeginDisabled();
     ImGui::Checkbox("##healing_master",&healingMaster);
@@ -2132,18 +2132,52 @@ static void DrawHealing(const Theme& t) {
 
     ImGui::Separator();
 
-    // Item-on-self actions remain native-only. Ramonia V23 enables spell
-    // healing only, through Game::talkChannel.
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
-    ImGui::Checkbox("UH",&uhEnabled); ImGui::SameLine();
-    SmallInt("##uh_hp",&uhHp,42); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::SameLine(128);
-    ImGui::Checkbox("MF",&manaFluidEnabled); ImGui::SameLine();
-    SmallInt("##mf_mp",&manaFluidMp,42); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    ImGui::SameLine(250);
-    ImGui::Checkbox("LF",&lifeFluidEnabled); ImGui::SameLine();
-    SmallInt("##lf_hp",&lifeFluidHp,42); ImGui::SameLine(); ImGui::TextDisabled("%%");
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    const bool ramoniaItemHealReady=
+        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=24;
+    const bool itemHealReady=g_nativeRuntimeLoaded || ramoniaItemHealReady;
+
+    if(ImGui::BeginTable("heal_items",5,ImGuiTableFlags_SizingStretchProp)){
+        ImGui::TableSetupColumn("##heal_item_name",0,0.95f);
+        ImGui::TableSetupColumn("##heal_item_trigger",0,0.72f);
+        ImGui::TableSetupColumn("##heal_item_kind",0,0.45f);
+        ImGui::TableSetupColumn("##heal_item_id",0,1.15f);
+        ImGui::TableSetupColumn("##heal_item_on",0,0.35f);
+
+        auto itemRow=[&](const char* label,
+                         bool* on,
+                         int* trigger,
+                         const char* triggerLabel,
+                         int* itemId,
+                         const char* idSuffix){
+            ImGui::TableNextRow();
+            ImGui::PushID(label);
+
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(label);
+
+            ImGui::TableSetColumnIndex(1);
+            SmallInt("##trigger",trigger,-1);
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextDisabled("%s",triggerLabel);
+
+            ImGui::TableSetColumnIndex(3);
+            SmallInt(idSuffix,itemId,-1);
+
+            ImGui::TableSetColumnIndex(4);
+            if(!itemHealReady) ImGui::BeginDisabled();
+            ImGui::Checkbox("##enabled",on);
+            if(!itemHealReady) ImGui::EndDisabled();
+
+            ImGui::PopID();
+        };
+
+        itemRow("UH",&uhEnabled,&uhHp,"HP%",&uhId,"##uh_item_id");
+        itemRow("Mana Fluid",&manaFluidEnabled,&manaFluidMp,"MP%",&manaFluidId,"##mf_item_id");
+        itemRow("Life Fluid",&lifeFluidEnabled,&lifeFluidHp,"HP%",&lifeFluidId,"##lf_item_id");
+
+        ImGui::EndTable();
+    }
 
     if(healingMaster && g_nativeRuntimeLoaded && g_livePlayer.valid){
         const double php=g_livePlayer.healthPercent();
@@ -2178,12 +2212,37 @@ static void DrawHealing(const Theme& t) {
         rule.priority=spellPriority[i];
         ramHeal.spells.push_back(std::move(rule));
     }
+
+    auto addItemRule=[&](const char* name,
+                         bool on,
+                         bool manaTrigger,
+                         int trigger,
+                         int itemId,
+                         int priority){
+        RamoniaHealingItemRuleUi rule;
+        rule.enabled=on;
+        rule.manaTrigger=manaTrigger;
+        rule.triggerPercent=std::clamp(trigger,0,100);
+        rule.itemId=itemId>0 ? static_cast<std::uint32_t>(itemId) : 0u;
+        rule.cooldownMs=650;
+        rule.priority=priority;
+        rule.name=name;
+        ramHeal.items.push_back(std::move(rule));
+    };
+
+    if(ramoniaItemHealReady){
+        addItemRule("UH",uhEnabled,false,uhHp,uhId,1000);
+        addItemRule("Life Fluid",lifeFluidEnabled,false,lifeFluidHp,lifeFluidId,900);
+        addItemRule("Mana Fluid",manaFluidEnabled,true,manaFluidMp,manaFluidId,500);
+    }
+
     SetRamoniaHealingConfig(ramHeal);
 
     nlohmann::json hcfg;
     hcfg["enabled"]=healingRuntimeReady && healingMaster;
     hcfg["poll_ms"]=100;
     hcfg["ramonia_spell_backend"]=ramoniaSpellReady ? "bridge_v23_talkChannel" : "unavailable";
+    hcfg["ramonia_item_backend"]=ramoniaItemHealReady ? "bridge_v24_useWithSelf" : "unavailable";
     hcfg["rules"]=nlohmann::json::array();
 
     for(int i=0;i<3;++i) hcfg["rules"].push_back({
@@ -2199,17 +2258,17 @@ static void DrawHealing(const Theme& t) {
     });
 
     hcfg["rules"].push_back({
-        {"name","uh"},{"enabled",g_nativeRuntimeLoaded&&uhEnabled},
+        {"name","uh"},{"enabled",itemHealReady&&uhEnabled},
         {"trigger","health_percent"},{"below_or_equal",uhHp},{"min_mana",0},
         {"action","item_on_self"},{"item_id",uhId},{"cooldown_ms",650},{"priority",1000}
     });
     hcfg["rules"].push_back({
-        {"name","life_fluid"},{"enabled",g_nativeRuntimeLoaded&&lifeFluidEnabled},
+        {"name","life_fluid"},{"enabled",itemHealReady&&lifeFluidEnabled},
         {"trigger","health_percent"},{"below_or_equal",lifeFluidHp},{"min_mana",0},
         {"action","item_on_self"},{"item_id",lifeFluidId},{"cooldown_ms",650},{"priority",900}
     });
     hcfg["rules"].push_back({
-        {"name","mana_fluid"},{"enabled",g_nativeRuntimeLoaded&&manaFluidEnabled},
+        {"name","mana_fluid"},{"enabled",itemHealReady&&manaFluidEnabled},
         {"trigger","mana_percent"},{"below_or_equal",manaFluidMp},{"min_mana",0},
         {"action","item_on_self"},{"item_id",manaFluidId},{"cooldown_ms",650},{"priority",500}
     });
@@ -2901,7 +2960,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.7 Passive Look ID");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.8 Editable Item Healing");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
