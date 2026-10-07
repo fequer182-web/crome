@@ -2,7 +2,9 @@
   "food": {
     "enabled": false,
     "interval_ms": 60000,
-    "item_ids": []
+    "item_ids": [
+      2696
+    ]
   },
   "anti_idle": {
     "enabled": false,
