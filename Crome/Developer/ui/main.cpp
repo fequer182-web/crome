@@ -1900,6 +1900,87 @@ static void SmallInt(const char* id, int* v, float width) {
     ImGui::InputInt(id, v, 0, 0);
 }
 
+static void DrawRamoniaLookInspectorPopup(const Theme& t) {
+    if (g_openRamoniaLookPopup) {
+        ImGui::OpenPopup("Look / IDs");
+        g_openRamoniaLookPopup=false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(620,430),ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Look / IDs",nullptr,ImGuiWindowFlags_NoResize))
+        return;
+
+    ImGui::TextDisabled(
+        "Abra a bag/corpse no Ramonia. Aqui aparecem container, slot, item ID e count.");
+    ImGui::TextColored(
+        g_ramoniaLookInspector.valid ? t.green : ImVec4(1.0f,0.58f,0.25f,1.0f),
+        "%s",
+        g_ramoniaLookInspector.status.c_str());
+
+    if (ImGui::Button("Atualizar",ImVec2(100,22)))
+        RefreshRamoniaLookInspector();
+    ImGui::SameLine();
+    if (ImGui::Button("Fechar",ImVec2(80,22)))
+        ImGui::CloseCurrentPopup();
+
+    ImGui::Separator();
+
+    ImGui::BeginChild("##look_items_scroll",ImVec2(0,-1),ImGuiChildFlags_Borders);
+
+    if (g_ramoniaLookInspector.containers.empty()) {
+        ImGui::TextDisabled("Nenhum container aberto.");
+    } else if (ImGui::BeginTable(
+            "look_ids_table",
+            6,
+            ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_BordersInnerV |
+            ImGuiTableFlags_SizingStretchProp)) {
+
+        ImGui::TableSetupColumn("Container",0,0.70f);
+        ImGui::TableSetupColumn("Nome",0,1.80f);
+        ImGui::TableSetupColumn("Slot",0,0.45f);
+        ImGui::TableSetupColumn("Item ID",0,0.70f);
+        ImGui::TableSetupColumn("Count",0,0.50f);
+        ImGui::TableSetupColumn("Copiar",0,0.55f);
+        ImGui::TableHeadersRow();
+
+        int rowId=0;
+        for (const auto& c:g_ramoniaLookInspector.containers) {
+            if (c.items.empty()) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("%u",c.id);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(c.name.empty() ? "(sem nome)" : c.name.c_str());
+                ImGui::TableSetColumnIndex(2); ImGui::TextDisabled("-");
+                ImGui::TableSetColumnIndex(3); ImGui::TextDisabled("-");
+                ImGui::TableSetColumnIndex(4); ImGui::TextDisabled("-");
+                continue;
+            }
+
+            for (const auto& item:c.items) {
+                ImGui::TableNextRow();
+                ImGui::PushID(rowId++);
+                ImGui::TableSetColumnIndex(0); ImGui::Text("%u",c.id);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(c.name.empty() ? "(sem nome)" : c.name.c_str());
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%u",item.slot);
+                ImGui::TableSetColumnIndex(3); ImGui::Text("%u",item.id);
+                ImGui::TableSetColumnIndex(4); ImGui::Text("%u",item.count);
+                ImGui::TableSetColumnIndex(5);
+                if (ImGui::SmallButton("ID")) {
+                    const auto value=std::to_string(item.id);
+                    ImGui::SetClipboardText(value.c_str());
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::EndChild();
+    ImGui::EndPopup();
+}
+
 static void DrawHealing(const Theme& t) {
     static bool healingMaster = false;
     static char spells[3][32] = {"exura", "exura gran", "exura vita"};
@@ -1977,26 +2058,11 @@ static void DrawHealing(const Theme& t) {
         ImGui::TextDisabled("aguardando backend");
     }
 
-    ImGui::SameLine(
-        ImGui::GetContentRegionAvail().x>80
-            ? ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x-48
-            : ImGui::GetCursorPosX());
-
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
-    if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("heal_ids");
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
-
-    if(ImGui::BeginPopup("heal_ids")){
-        ImGui::TextUnformatted("Item IDs");
-        ImGui::Separator();
-        ImGui::TextUnformatted("UH"); ImGui::SameLine(90);
-        SmallInt("##uh_id_popup",&uhId,90);
-        ImGui::TextUnformatted("Mana Fluid"); ImGui::SameLine(90);
-        SmallInt("##mf_id_popup",&manaFluidId,90);
-        ImGui::TextUnformatted("Life Fluid"); ImGui::SameLine(90);
-        SmallInt("##lf_id_popup",&lifeFluidId,90);
-        ImGui::EndPopup();
-    }
+    ImGui::SameLine();
+    if(!g_ramoniaBridgeReady.load()) ImGui::BeginDisabled();
+    if(ImGui::SmallButton("Look IDs"))
+        OpenRamoniaLookInspector();
+    if(!g_ramoniaBridgeReady.load()) ImGui::EndDisabled();
 
     const char* names[3]={"Light","Mid","High"};
     if(!healingRuntimeReady) ImGui::BeginDisabled();
@@ -2543,6 +2609,12 @@ static void DrawLoot(const Theme& t) {
 
     CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),170,t);
 
+    if(ramoniaLootReady){
+        ImGui::SetCursorPosX(ImGui::GetWindowSize().x-78);
+        if(ImGui::SmallButton("Look IDs"))
+            OpenRamoniaLookInspector();
+    }
+
     // Top controls: keep Ramonia-visible values inside fixed columns so
     // Destination Bag ID never gets clipped at the right edge.
     if(ImGui::BeginTable("loot_top",4,ImGuiTableFlags_SizingStretchProp)){
@@ -2780,7 +2852,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.4 Loot UI + Self-Use Prep");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.5 Look IDs");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
@@ -2828,6 +2900,8 @@ static void DrawUI() {
     DrawAlarms(t); ImGui::Dummy(ImVec2(0,rowGap));
     DrawHotkeys(t);
     ImGui::EndChild();
+
+    DrawRamoniaLookInspectorPopup(t);
 
     ImGui::Dummy(ImVec2(0,2));
     DrawFooter(t);
