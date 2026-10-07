@@ -43,7 +43,8 @@ enum PendingActionKind : LONG {
     PendingNone = 0,
     PendingAttack = 1,
     PendingUse = 2,
-    PendingMove = 3
+    PendingMove = 3,
+    PendingTalk = 4
 };
 
 volatile LONG g_lastActionCode{};
@@ -69,6 +70,10 @@ std::uint32_t g_pendingMoveCount{};
 std::uintptr_t g_pendingMoveTargetContainer{};
 std::uint32_t g_pendingMoveTargetContainerId{};
 std::uint8_t g_pendingMoveTargetSlot{};
+
+std::uint32_t g_pendingTalkMode{1};
+std::uint32_t g_pendingTalkChannel{};
+char g_pendingTalkMessage[16]{};
 
 struct Profile {
     std::string schema;
@@ -124,6 +129,12 @@ struct Profile {
     std::size_t mapViewDrawLightsOffset{};
     std::size_t mapViewMinimumAmbientOffset{};
     bool worldLightContractReady{};
+
+    std::uintptr_t talkChannelMethodRva{};
+    bool talkChannelRuntimeConfirmed{};
+    bool talkModeArgConfirmed{};
+    bool talkChannelArgConfirmed{};
+    bool talkMessageMsvcStringRefConfirmed{};
 
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
@@ -392,6 +403,36 @@ Profile loadProfile(const std::string& path) {
         }
     }
 
+    const auto* talkChannel = child(actions, "talkChannel");
+    if (talkChannel && talkChannel->isObject()) {
+        if (const auto n = integerValue(talkChannel->get("methodRva")))
+            p.talkChannelMethodRva = static_cast<std::uintptr_t>(*n);
+        p.talkChannelRuntimeConfirmed =
+            stringValue(talkChannel->get("status")) == "runtime_confirmed";
+
+        const auto* args = talkChannel->get("args");
+        if (args && args->isArray() && args->array().size() >= 3) {
+            const auto& a0=args->array()[0];
+            const auto& a1=args->array()[1];
+            const auto& a2=args->array()[2];
+            p.talkModeArgConfirmed =
+                a0.isObject() &&
+                stringValue(a0.get("semantic"))=="MessageMode" &&
+                stringValue(a0.get("abiType"))=="u32" &&
+                stringValue(a0.get("status"))=="runtime_confirmed";
+            p.talkChannelArgConfirmed =
+                a1.isObject() &&
+                stringValue(a1.get("semantic"))=="Channel" &&
+                stringValue(a1.get("abiType"))=="u32" &&
+                stringValue(a1.get("status"))=="runtime_confirmed";
+            p.talkMessageMsvcStringRefConfirmed =
+                a2.isObject() &&
+                stringValue(a2.get("semantic"))=="Message" &&
+                stringValue(a2.get("abiType"))=="msvc_string_ref" &&
+                stringValue(a2.get("status"))=="runtime_confirmed";
+        }
+    }
+
     const auto* runtime = root.get("runtime");
 
     const auto* worldLight = child(runtime, "worldLight");
@@ -611,11 +652,20 @@ static_assert(sizeof(MovePosition) == 12, "MovePosition ABI must be 12 bytes");
 typedef void (__attribute__((thiscall)) *GameAttackFn)(void*, void*, bool);
 typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
+typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
+typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
 #endif
+
+struct MsvcSmallString32 {
+    char storage[16]{};
+    std::uint32_t size{};
+    std::uint32_t capacity{15};
+};
+static_assert(sizeof(MsvcSmallString32)==24,"MSVC x86 string SSO ABI must be 24 bytes");
 
 bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
     id = 0;
