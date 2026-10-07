@@ -714,3 +714,42 @@ Runtime:
 Persistence:
 - item IDs and enable state continue to be stored in healing.json;
 - an old healing.json containing mana_fluid item_id=0 no longer overwrites the current OT default 15552 on first load.
+
+
+## Bridge V26 / Crome v0.9.9 Rune Trainer + Friends Prep
+
+### Rune Maker / Mana Trainer
+Ramonia GET_PLAYER now exposes Soul as an optional player field:
+- selectedFields.soul is read when present/valid;
+- response includes soulAvailable=true/false;
+- soul is emitted only when available;
+- Soul is not a required profile field, so builds/OTs without Soul can still use the Trainer.
+
+Crome v0.9.9 enables Rune Maker / Trainer on Ramonia Bridge V26+:
+- Enabled;
+- editable Spell;
+- Mana threshold in percent (cast when current Mana% >= configured threshold);
+- Soul Min;
+- Soul mode is automatic: if the build exposes Soul, require current Soul >= Soul Min; if Soul is unavailable, ignore Soul entirely;
+- default cooldown 1000 ms;
+- spell is sent through the already-confirmed internal SAY/talkChannel backend;
+- Healing has priority over Rune Trainer in the same worker cycle.
+
+Rune configuration persists in rune.json.
+
+### Friends / Party preparation
+Friends / Party remains preparation-only pending a suitable live OT test. friends.json persists:
+- Friend HP;
+- Your HP;
+- Follow Friends;
+- UH Friends;
+- Party Mode;
+- friend name CSV list.
+
+Prepared future semantics:
+- druid heal: exura sio "{name}";
+- UH friend: useWith UH on the selected friend ThingPtr;
+- follow: follow friend by configured name;
+- Party Mode: green shield / green skull ally semantics pending runtime validation.
+
+No Friend/Party native action is enabled yet.
