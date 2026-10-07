@@ -731,6 +731,7 @@ static void RamoniaTargetWorker() {
                         if (floorChanged || largeJump) {
                             mapTransitionUntilMs = nowMs + 1600;
                             lootMarkedTargetId = 0;
+                            lootLastTargetMarkMs = 0;
                             lootDiffDeadlineMs = 0;
                             SetRamoniaStatus("Mapa mudou - aguardando estabilizar");
                             if (lootActive)
