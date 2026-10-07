@@ -900,16 +900,6 @@ void invalidateTileCacheForFloorChange(
     ++g_tileCacheGeneration;
     ReleaseSRWLockExclusive(&g_tileCacheLock);
 
-    // A Loot baseline contains Tile* addresses from the old floor. It must
-    // never survive a z transition.
-    AcquireSRWLockExclusive(&g_lootBaselineLock);
-    g_lootBaseline = {};
-    ReleaseSRWLockExclusive(&g_lootBaselineLock);
-
-    AcquireSRWLockExclusive(&g_lootCandidateLock);
-    g_lastLootCandidates.clear();
-    ReleaseSRWLockExclusive(&g_lootCandidateLock);
-
     logLine("[TILE CACHE] invalidated immediately on floor change -> z=" +
             std::to_string(static_cast<unsigned>(pz)));
 }
