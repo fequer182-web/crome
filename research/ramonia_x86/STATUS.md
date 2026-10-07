@@ -392,3 +392,26 @@ The validated V37 attack ABI remains:
 The next A/B test is intentionally split:
 1. read-only targetscan while manually killing/moving/changing floors;
 2. active target loop only if read-only remains stable.
+
+
+## V19 Target ownership correction — probable root cause
+
+Live testing showed that Target can trigger delayed crashes even inside the cave, while Loot + Auto Food remain stable without Target.
+
+Cross-checking the Ramonia attack ABI against OTC-family source exposed a classifier error in the previous V34/V37 interpretation:
+
+- OTC `Game::attack` takes `CreaturePtr creature` by value, not a non-owning raw `Creature*`;
+- this OTC family uses pointer-sized `stdext::shared_object_ptr<Creature>`;
+- therefore the x86 stack slot contains the same pointer bits as a raw Creature*, but the caller must perform the smart-pointer copy ownership step (`add_ref`) before entering `Game::attack`;
+- the callee releases the by-value parameter on return.
+
+The previous ABI Builder special-cased attack/follow Creature arg0 as `raw_ptr` before smart-pointer ownership semantics were considered. That allowed ATTACK_ID to work immediately while potentially under-counting the Creature reference and leaving Game::m_attackingCreature with invalid ownership after a creature disappeared.
+
+V19 changes:
+- attack/follow arg0 is now `shared_object_ptr_value`;
+- profile records `refCountOffset=0x4` and `ownership=caller_add_ref_callee_release`;
+- bridge validates the intrusive refcount and increments it before the native Game::attack call, matching the normal C++ caller's CreaturePtr copy step;
+- Crome Target requires Bridge V19+; Food/Loot remain V16+;
+- ABI Builder persists this ownership metadata for future profile regeneration.
+
+This is a root-cause correction, but remains pending live confirmation. Do not mark Target stable until V19 survives repeated attacks, creature deaths, walking, and floor transitions.
