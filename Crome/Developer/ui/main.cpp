@@ -88,6 +88,7 @@ struct RamoniaLootConfigUi {
     std::uint32_t corpseItemId{2813};
     std::uint32_t targetContainerId{0};
     std::vector<std::uint32_t> itemIds;
+    std::vector<std::uint32_t> learnedCorpseIds;
 };
 
 struct RamoniaContainerItemUi {
@@ -199,12 +200,26 @@ static std::string RamoniaFoodStatusText() {
 
 static void SetRamoniaLootConfig(const RamoniaLootConfigUi& cfg) {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
-    g_ramoniaLootConfig = cfg;
+    auto merged=cfg;
+    for(const auto id:g_ramoniaLootConfig.learnedCorpseIds) {
+        if(id && std::find(merged.learnedCorpseIds.begin(),
+                           merged.learnedCorpseIds.end(),id)==merged.learnedCorpseIds.end())
+            merged.learnedCorpseIds.push_back(id);
+    }
+    g_ramoniaLootConfig=std::move(merged);
 }
 
 static RamoniaLootConfigUi GetRamoniaLootConfig() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaLootConfig;
+}
+
+static void LearnRamoniaCorpseId(std::uint32_t id) {
+    if(!id) return;
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    auto& ids=g_ramoniaLootConfig.learnedCorpseIds;
+    if(std::find(ids.begin(),ids.end(),id)==ids.end())
+        ids.push_back(id);
 }
 
 static void SetRamoniaLootStatus(const std::string& status) {
@@ -703,6 +718,10 @@ static void RamoniaTargetWorker() {
 
         const auto targetCfg = GetRamoniaTargetConfig();
         const auto lootCfg = GetRamoniaLootConfig();
+        for(const auto id:lootCfg.learnedCorpseIds)
+            if(id && std::find(lootKnownCorpseIds.begin(),lootKnownCorpseIds.end(),id)
+                      ==lootKnownCorpseIds.end())
+                lootKnownCorpseIds.push_back(id);
         if (lootCfg.corpseItemId &&
             std::find(lootKnownCorpseIds.begin(),lootKnownCorpseIds.end(),
                       lootCfg.corpseItemId)==lootKnownCorpseIds.end())
@@ -819,8 +838,9 @@ static void RamoniaTargetWorker() {
                                 opened=true;
                                 if (!knownCorpse) {
                                     lootKnownCorpseIds.push_back(corpseId);
+                                    LearnRamoniaCorpseId(corpseId);
                                     SetRamoniaLootStatus(
-                                        "Loot: aprendeu corpse ID " +
+                                        "Loot: aprendeu e salvou corpse ID " +
                                         std::to_string(corpseId));
                                 }
                                 break;
@@ -1897,6 +1917,12 @@ static void DrawLoot(const Theme& t) {
                !lj["corpse_item_ids"].empty() && lj["corpse_item_ids"][0].is_number_integer())
                 corpseId=lj["corpse_item_ids"][0].get<int>();
 
+            if(lj.contains("learned_corpse_ids") && lj["learned_corpse_ids"].is_array()) {
+                for(const auto& v:lj["learned_corpse_ids"])
+                    if(v.is_number_integer() && v.get<int>()>0)
+                        LearnRamoniaCorpseId(static_cast<std::uint32_t>(v.get<int>()));
+            }
+
             auto toCsv=[](const nlohmann::json& a){
                 std::string out;
                 if(a.is_array()) for(auto&v:a) if(v.is_number_integer()){
@@ -1980,7 +2006,17 @@ static void DrawLoot(const Theme& t) {
         for(const auto& v:lootJsonIds)
             if(v.is_number_integer() && v.get<int>()>0)
                 ramLoot.itemIds.push_back(static_cast<std::uint32_t>(v.get<int>()));
+
+    ramLoot.learnedCorpseIds=GetRamoniaLootConfig().learnedCorpseIds;
+    if(std::find(ramLoot.learnedCorpseIds.begin(),ramLoot.learnedCorpseIds.end(),2813u)
+       ==ramLoot.learnedCorpseIds.end())
+        ramLoot.learnedCorpseIds.push_back(2813u);
     SetRamoniaLootConfig(ramLoot);
+
+    const auto persistedLoot=GetRamoniaLootConfig();
+    nlohmann::json learnedCorpseIds=nlohmann::json::array();
+    for(const auto id:persistedLoot.learnedCorpseIds)
+        if(id) learnedCorpseIds.push_back(id);
 
     nlohmann::json lcfg={
       {"enabled",lootRuntimeReady&&items},
@@ -1991,6 +2027,7 @@ static void DrawLoot(const Theme& t) {
       {"target_container_id",targetBagId},
       {"auto_detect_corpse",true},
       {"corpse_item_ids",nlohmann::json::array({std::max(1,corpseId)})},
+      {"learned_corpse_ids",learnedCorpseIds},
       {"item_ids",lootJsonIds},
       {"drop_item",{
           {"enabled",g_nativeRuntimeLoaded&&dropEnabled},
