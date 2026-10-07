@@ -1887,23 +1887,36 @@ bool dispatcherReady() {
 }
 
 bool prepareGameThreadDispatcher() {
-    if (dispatcherReady()) return true;
-
-    g_gameWindow = findCurrentProcessWindow();
-    if (!g_gameWindow) {
+    // Re-resolve the current game window/thread for every on-demand action.
+    // Do not carry a cached thread id across map/floor transitions.
+    const HWND currentWindow = findCurrentProcessWindow();
+    if (!currentWindow) {
         logLine("[DISPATCH] main game window not found");
+        g_gameWindow = nullptr;
+        g_gameThreadId = 0;
         return false;
     }
 
-    g_gameThreadId = GetWindowThreadProcessId(g_gameWindow, nullptr);
-    if (!g_gameThreadId) {
+    const DWORD currentThreadId =
+        GetWindowThreadProcessId(currentWindow, nullptr);
+    if (!currentThreadId) {
         logLine("[DISPATCH] game window thread id unavailable");
         g_gameWindow = nullptr;
+        g_gameThreadId = 0;
         return false;
     }
 
-    logLine("[DISPATCH] on-demand game-thread target ready tid=" +
-            std::to_string(g_gameThreadId));
+    const bool changed =
+        currentWindow != g_gameWindow ||
+        currentThreadId != g_gameThreadId;
+
+    g_gameWindow = currentWindow;
+    g_gameThreadId = currentThreadId;
+
+    if (changed) {
+        logLine("[DISPATCH] on-demand game-thread target refreshed tid=" +
+                std::to_string(g_gameThreadId));
+    }
     return true;
 }
 
@@ -2512,7 +2525,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":16,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":17,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
