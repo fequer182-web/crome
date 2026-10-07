@@ -793,6 +793,30 @@ int main(int argc, char** argv) {
 
     bool ok = true;
 
+    if (mode == "lightstatus") {
+        std::cout << "[GET_LIGHT - PROFILE DRIVEN]\n";
+        ok &= request(pid, R"({"cmd":"GET_LIGHT"})");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "lighton") {
+        std::cout << "[SET_LIGHT ON - ambient 1.0]\n";
+        ok &= request(pid, R"({"cmd":"SET_LIGHT","enabled":1})");
+        std::cout << "\n" << (ok
+            ? "[OK] Light solicitado. Confira a claridade no mapa.\n"
+            : "[FALHOU] Light nao foi aplicado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "lightoff") {
+        std::cout << "[SET_LIGHT OFF - RESTORE]\n";
+        ok &= request(pid, R"({"cmd":"SET_LIGHT","enabled":0})");
+        std::cout << "\n" << (ok
+            ? "[OK] Light restaurado para o valor original.\n"
+            : "[FALHOU] Restore do Light nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
     if (mode == "targetscan") {
         if (wantedName.empty()) {
             std::cout << "[ERRO] Uso: CromePipeTest_x64.exe targetscan <nome|*> [PID]\n";
