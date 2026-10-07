@@ -95,9 +95,20 @@ struct RamoniaHealingSpellRuleUi {
     int priority{};
 };
 
+struct RamoniaHealingItemRuleUi {
+    bool enabled{};
+    bool manaTrigger{};
+    int triggerPercent{};
+    std::uint32_t itemId{};
+    std::uint32_t cooldownMs{650};
+    int priority{};
+    std::string name;
+};
+
 struct RamoniaHealingConfigUi {
     bool enabled{};
     std::vector<RamoniaHealingSpellRuleUi> spells;
+    std::vector<RamoniaHealingItemRuleUi> items;
 };
 
 struct RamoniaVitalsUi {
@@ -109,6 +120,10 @@ struct RamoniaVitalsUi {
 
     double healthPercent() const {
         return maxHealth>0.0 ? (health*100.0/maxHealth) : 0.0;
+    }
+
+    double manaPercent() const {
+        return maxMana>0.0 ? (mana*100.0/maxMana) : 0.0;
     }
 };
 
