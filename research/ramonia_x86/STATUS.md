@@ -281,3 +281,29 @@ Final live validation through the actual Crome UI succeeded. With Tools -> Food 
 Crome x64 UI/policy -> named pipe -> Ramonia x86 bridge V16 -> validated Container::items holder -> Game::use.
 
 Auto Food is therefore considered runtime-confirmed for this Ramonia build. CromePipeTest remains only as a diagnostic/manual validation tool for this feature.
+
+
+## V17 one-cycle Auto Loot diagnostic
+
+A one-cycle external Auto Loot diagnostic was added to CromePipeTest without changing the validated x86 bridge contracts.
+
+Command:
+
+`autoloot [corpseId=2813] [targetBagId=0] [lootItemId=2148] [waitMs=30000] [PID]`
+
+The diagnostic performs this sequence:
+
+1. reads currently open containers and verifies that the target bag is open;
+2. calls `LOOT_MARK`;
+3. polls `LOOT_DIFF` until a death-window corpse candidate with the requested corpse item id appears;
+4. calls `USE_LOOT_ITEM` to open the corpse;
+5. detects the newly opened corpse container;
+6. calls `MOVE_CONTAINER_ITEM` to move the requested loot item into the target bag;
+7. rereads the target bag and reports the resulting total.
+
+Initial defaults are intentionally limited to the already observed Ramonia Rat/Cave Rat evidence:
+- corpse item id: `2813`;
+- target bag id: `0`;
+- loot item id: gold `2148`.
+
+This stage is diagnostic-only. Continuous Loot in the Crome UI remains disabled until the complete one-cycle chain is confirmed live.
