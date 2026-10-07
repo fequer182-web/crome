@@ -272,10 +272,14 @@ std::optional<MonsterView> chooseTarget(
     const auto wanted = lowerCopy(wantedName);
     const bool wildcard = wanted == "*";
 
-    // Keep the current target while it is still alive and matches the rule.
-    for (const auto& m : monsters) {
-        if (m.id != currentAttackId || m.hpPercent == 0) continue;
-        if (wildcard || lowerCopy(m.name) == wanted) return m;
+    // Once Game::AttackTarget is nonzero, do not switch because of a
+    // transient Tile::things miss or low HP. The game itself decides when the
+    // active target is truly gone by clearing AttackTarget.
+    if (currentAttackId) {
+        for (const auto& m : monsters) {
+            if (m.id == currentAttackId) return m;
+        }
+        return std::nullopt;
     }
 
     std::optional<MonsterView> best;
