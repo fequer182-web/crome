@@ -602,3 +602,30 @@ Some monsters can place loot inside a bag/container inside the corpse. Crome v0.
 - normal corpse learning / rolling death-tile logic remains unchanged.
 
 The nested-bag feature requires the actual bag item ID for the server/build and therefore remains calibration-dependent until a live nested corpse is observed.
+
+
+## Bridge V24 / Crome v0.9.4 Loot UI + Self-Use Prep
+
+UI cleanup:
+- Loot/Looter uses balanced columns so Destination Bag ID is fully visible.
+- Nested bag configuration is labeled Corpse Bag IDs and remains backed by nested_container_ids.
+- Loot IDs and Corpse Bag IDs are shown side-by-side.
+- Ground Drop is visually separated from the Ramonia corpse workflow.
+- Tools card height was reduced without changing backend behavior.
+
+UH / potion preparation:
+The Ramonia build profile already has Game::useWith runtime-confirmed at RVA 0x784F0 with:
+- arg0 Item = shared_object_ptr_ref
+- arg1 Thing = shared_object_ptr_ref
+
+Game::localPlayer is stored at Game +0x0 and the LocalPlayer vtable is available in RTTI. Bridge V24 adds a diagnostic USE_CONTAINER_ITEM_ON_SELF path:
+- finds the requested item in an open container;
+- revalidates the real Container::items holder on the game thread;
+- validates the current LocalPlayer object;
+- calls Game::useWith(const ItemPtr&, const ThingPtr&) with the real item holder and a pointer-sized ThingPtr view of the current LocalPlayer;
+- does not yet enable automatic UH/Mana Fluid/Life Fluid rules.
+
+Pipe diagnostic:
+CromePipeTest_x64.exe useself <containerId|any> <itemId> [PID]
+
+Automatic item Healing must remain disabled until one live self-use is confirmed. After confirmation, the existing Healing HP/Mana rule engine can route UH/Life Fluid/Mana Fluid through this backend.
