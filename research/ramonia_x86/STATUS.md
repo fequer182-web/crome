@@ -448,3 +448,23 @@ Crome v0.8.7 changes Loot to death-window Auto Corpse:
 - the death remains pending for up to 4 seconds and is cleared only after a corpse opens successfully or the deadline expires.
 
 Bridge remains V19; this reliability change is external Crome policy only.
+
+
+## V20 / Crome v0.8.8 Death-Tile Loot
+
+Live testing of v0.8.7 exposed an over-broad Auto Corpse fallback. Decorative corpse-like map objects (for example a dead bear or decorative player body) could enter the generic death-window candidate list and stall the external worker while Crome repeatedly tried to open them. Target itself remained stable under V19.
+
+The Loot model is now target/tile-bound:
+
+- Bridge V20 adds `LOOT_MARK_TARGET <creatureId>`.
+- The marker commits a new Loot baseline only when that exact AttackTarget is currently visible in `Tile::things`.
+- Crome refreshes this target-specific baseline roughly every 450 ms while the target is alive, preserving the last good baseline if the target disappears between polls.
+- The baseline stores the target ID and its last confirmed Tile address.
+- On `LOOT_DIFF`, candidates are restricted to Items that are newly present on that exact tracked Tile after the tracked target disappears.
+- Existing decorative bodies/items on the Tile were already present in the baseline, so they are not candidates.
+- Items added on other Tiles are never exposed to normal Crome Loot.
+- Crome removed the v0.8.7 `allAdded` fallback completely.
+- Corpse ID 2813 remains only a preferred fallback when it is itself one of the strict death-tile candidates.
+- Loot now requires Bridge V20+; Target still requires V19+; Food still requires V16+.
+
+This implements the intended rule: only the body/object created on the Tile where the tracked target actually died is eligible for corpse opening. Decorative map corpses must remain ignored.
