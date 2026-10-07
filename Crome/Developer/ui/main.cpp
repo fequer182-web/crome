@@ -681,8 +681,7 @@ static void RamoniaTargetWorker() {
             }
 
             if (currentAttackId) {
-                if (lootMarkedTargetId != currentAttackId ||
-                    !lootLastMarkMs || nowMs - lootLastMarkMs >= 900) {
+                if (lootMarkedTargetId != currentAttackId) {
                     nlohmann::json mark;
                     if (RamoniaPipeRequest(pid, {{"cmd","LOOT_MARK"}}, mark) &&
                         RamoniaLootMarkTracksTarget(mark,currentAttackId)) {
