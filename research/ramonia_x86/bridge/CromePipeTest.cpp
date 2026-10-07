@@ -739,7 +739,8 @@ int main(int argc, char** argv) {
             try { pid = static_cast<DWORD>(std::stoul(argv[5])); }
             catch (...) {}
         }
-    } else if (mode == "useitem" || mode == "usefood") {
+    } else if (mode == "useitem" || mode == "usefood" ||
+               mode == "useself" || mode == "usewithself") {
         if (argc >= 3) {
             std::string containerArg = argv[2];
             for (auto& c : containerArg)
@@ -943,6 +944,27 @@ int main(int argc, char** argv) {
             autoFoodItemId,
             autoFoodSuccessDelayMs,
             autoFoodRetryDelayMs);
+    }
+
+    if (mode == "useself" || mode == "usewithself") {
+        if (!useContainerItemId || useContainerItemId > 0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe useself <containerId|any> <itemId> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[USE_CONTAINER_ITEM_ON_SELF - EXPERIMENTAL]\n";
+        std::string cmd =
+            "{\"cmd\":\"USE_CONTAINER_ITEM_ON_SELF\",\"itemId\":" +
+            std::to_string(useContainerItemId);
+        if (useContainerProvided)
+            cmd += ",\"sourceContainerId\":" + std::to_string(useContainerId);
+        cmd += "}";
+
+        ok &= request(pid,cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] Game::useWith(item,self) foi chamado. Confira se UH/potion foi consumido no personagem.\n"
+            : "[FALHOU] USE_CONTAINER_ITEM_ON_SELF nao foi confirmado.\n");
+        return ok ? 0 : 2;
     }
 
     if (mode == "useitem" || mode == "usefood") {
