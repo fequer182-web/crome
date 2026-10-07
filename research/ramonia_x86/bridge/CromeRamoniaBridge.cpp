@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -116,6 +117,14 @@ struct Profile {
     std::size_t tileThingsCapOffset{};
     std::size_t tileThingsElemSize{};
     bool tileThingsRuntimeConfirmed{};
+
+    std::uintptr_t uiMapVtableRva{};
+    std::uintptr_t mapViewVtableRva{};
+    std::size_t uiMapToMapViewOffset{};
+    std::size_t mapViewDrawLightsOffset{};
+    std::size_t mapViewMinimumAmbientOffset{};
+    bool worldLightContractReady{};
+
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
     bool attackCreatureSharedValueConfirmed{};
@@ -282,6 +291,20 @@ Profile loadProfile(const std::string& path) {
         if (n) p.containerVtableRva = static_cast<std::uintptr_t>(*n);
     }
 
+    const auto* uiMap = child(rtti, "UIMap");
+    const auto* uiMapVtables = child(uiMap, "vtables");
+    if (uiMapVtables && uiMapVtables->isArray() && !uiMapVtables->array().empty()) {
+        const auto n = integerValue(&uiMapVtables->array().front());
+        if (n) p.uiMapVtableRva = static_cast<std::uintptr_t>(*n);
+    }
+
+    const auto* mapView = child(rtti, "MapView");
+    const auto* mapViewVtables = child(mapView, "vtables");
+    if (mapViewVtables && mapViewVtables->isArray() && !mapViewVtables->array().empty()) {
+        const auto n = integerValue(&mapViewVtables->array().front());
+        if (n) p.mapViewVtableRva = static_cast<std::uintptr_t>(*n);
+    }
+
     const auto* actions = root.get("actions");
     const auto* attack = child(actions, "attack");
     if (attack && attack->isObject()) {
@@ -360,6 +383,31 @@ Profile loadProfile(const std::string& path) {
     }
 
     const auto* runtime = root.get("runtime");
+
+    const auto* worldLight = child(runtime, "worldLight");
+    if (worldLight && worldLight->isObject()) {
+        if (const auto n = integerValue(worldLight->get("uiMapToMapView")))
+            p.uiMapToMapViewOffset = static_cast<std::size_t>(*n);
+
+        const auto* drawLights = child(worldLight, "drawLights");
+        if (const auto n = integerValue(child(drawLights, "offset")))
+            p.mapViewDrawLightsOffset = static_cast<std::size_t>(*n);
+
+        const auto* minimumAmbient = child(worldLight, "minimumAmbient");
+        if (const auto n = integerValue(child(minimumAmbient, "offset")))
+            p.mapViewMinimumAmbientOffset = static_cast<std::size_t>(*n);
+
+        const auto contract = stringValue(worldLight->get("staticContractStatus"));
+        p.worldLightContractReady =
+            p.uiMapVtableRva &&
+            p.mapViewVtableRva &&
+            p.uiMapToMapViewOffset &&
+            p.mapViewMinimumAmbientOffset &&
+            stringValue(child(minimumAmbient, "type")) == "float" &&
+            stringValue(child(drawLights, "type")) == "u8" &&
+            contract == "semantic_uimap_mapview_setter_getter_contract";
+    }
+
     const auto* position = child(runtime, "position");
     const auto x = integerValue(child(position, "x"));
     const auto y = integerValue(child(position, "y"));
