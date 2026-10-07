@@ -801,6 +801,21 @@ int main(int argc, char** argv) {
 
     bool ok = true;
 
+    if (mode == "lookarm") {
+        std::cout << "[REAL LOOK ID - ARM]\n";
+        ok &= request(pid, R"({"cmd":"ARM_LOOK_ID"})");
+        std::cout << "\n" << (ok
+            ? "[OK] Capture armado por ate 8s. Agora de Look normal em um item no Ramonia.\n"
+            : "[FALHOU] Nao foi possivel armar o Look ID.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "lookget") {
+        std::cout << "[REAL LOOK ID - RESULT]\n";
+        ok &= request(pid, R"({"cmd":"GET_LOOK_ID"})");
+        return ok ? 0 : 2;
+    }
+
     if (mode == "say" || mode == "spell") {
         if (sayMessage.empty() || sayMessage.size()>15) {
             std::cout << "[ERRO] Uso: CromePipeTest_x64.exe say \"exura\" [PID]\n";
