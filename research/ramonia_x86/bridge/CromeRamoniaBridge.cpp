@@ -2394,6 +2394,83 @@ bool executeUseOnGameThread() {
     return true;
 }
 
+bool executeUseWithSelfOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,5);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if (!p.useWithRuntimeConfirmed ||
+        !p.useWithItemSharedRefConfirmed ||
+        !p.useWithThingSharedRefConfirmed ||
+        !p.useWithMethodRva ||
+        !p.containerContractReady ||
+        !p.itemContractReady ||
+        !p.localPlayerVtableRva) {
+        InterlockedExchange(&g_lastActionCode,26);
+        return false;
+    }
+
+    ContainerSnapshot source;
+    if (!readContainerSnapshot(g_pendingUseContainer,source) ||
+        source.id!=g_pendingUseContainerId) {
+        InterlockedExchange(&g_lastActionCode,21);
+        return false;
+    }
+
+    const ContainerItemSlot* sourceSlot=nullptr;
+    for (const auto& slot:source.items) {
+        if (slot.holderAddress==g_pendingUseHolder &&
+            slot.itemAddress==g_pendingUseItem &&
+            slot.id==g_pendingUseItemId) {
+            sourceSlot=&slot;
+            break;
+        }
+    }
+    if (!sourceSlot) {
+        InterlockedExchange(&g_lastActionCode,21);
+        return false;
+    }
+
+    const auto game=g_base+p.gameRva;
+    std::uintptr_t localPlayer{};
+    if (!safeRead(game+p.localPlayerOffset,localPlayer) || !localPlayer ||
+        !exactObjectVtable(localPlayer,p.localPlayerVtableRva)) {
+        InterlockedExchange(&g_lastActionCode,27);
+        return false;
+    }
+
+    const auto functionAddress=g_base+p.useWithMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,28);
+        return false;
+    }
+
+    // Game::useWith(const ItemPtr&, const ThingPtr&).
+    // arg0 is the real holder from Container::items. For self, construct the
+    // pointer-sized ThingPtr view expected by the const-ref ABI and keep it
+    // alive for the complete native call. The LocalPlayer object itself is
+    // still owned by Game::m_localPlayer.
+    std::uintptr_t selfThingHolder=localPlayer;
+
+    const auto fn=reinterpret_cast<GameUseWithFn>(functionAddress);
+
+    logLine("[ACTION] USE_WITH_SELF itemId=" +
+            std::to_string(static_cast<unsigned>(g_pendingUseItemId)) +
+            " sourceContainer=" +
+            std::to_string(g_pendingUseContainerId));
+
+    fn(reinterpret_cast<void*>(game),
+       reinterpret_cast<void*>(sourceSlot->holderAddress),
+       reinterpret_cast<void*>(&selfThingHolder));
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 bool executeMoveOnGameThread() {
     InterlockedExchange(&g_lastActionCode, 0);
 
@@ -2553,6 +2630,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeMoveOnGameThread();
                 else if (kind == PendingTalk)
                     executeTalkOnGameThread();
+                else if (kind == PendingUseWithSelf)
+                    executeUseWithSelfOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -2723,6 +2802,9 @@ std::string actionCodeText(LONG code) {
         case 23: return "talk_contract_not_ready";
         case 24: return "talk_message_invalid";
         case 25: return "talk_function_not_executable";
+        case 26: return "usewith_self_contract_not_ready";
+        case 27: return "local_player_holder_invalid";
+        case 28: return "usewith_function_not_executable";
         default: return "unknown_action_result";
     }
 }
@@ -3066,6 +3148,94 @@ std::string useContainerItemResponse(
     return o.str();
 }
 
+std::string useContainerItemOnSelfResponse(
+    const std::optional<std::uint32_t>& sourceContainerId,
+    std::uint16_t itemId) {
+
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM_ON_SELF","error":"build_not_validated"})";
+    if (!g_profile->useWithRuntimeConfirmed ||
+        !g_profile->useWithItemSharedRefConfirmed ||
+        !g_profile->useWithThingSharedRefConfirmed ||
+        !g_profile->containerContractReady ||
+        !g_profile->itemContractReady ||
+        !g_profile->localPlayerVtableRva)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM_ON_SELF","error":"usewith_self_contract_not_ready"})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM_ON_SELF","error":"dispatcher_not_ready"})";
+
+    const auto containers=scanOpenContainers();
+
+    const ContainerSnapshot* source=nullptr;
+    const ContainerItemSlot* sourceSlot=nullptr;
+    bool requestedContainerOpen=!sourceContainerId.has_value();
+
+    for (const auto& container:containers) {
+        if (sourceContainerId && container.id!=*sourceContainerId)
+            continue;
+
+        if (sourceContainerId && container.id==*sourceContainerId)
+            requestedContainerOpen=true;
+
+        for (const auto& slot:container.items) {
+            if (slot.id==itemId) {
+                source=&container;
+                sourceSlot=&slot;
+                break;
+            }
+        }
+        if (sourceSlot) break;
+    }
+
+    if (!requestedContainerOpen)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM_ON_SELF","error":"source_container_not_open"})";
+    if (!source || !sourceSlot)
+        return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM_ON_SELF","error":"item_not_found_in_open_containers"})";
+
+    g_pendingUseTile=0;
+    g_pendingUseContainer=source->address;
+    g_pendingUseContainerId=source->id;
+    g_pendingUseHolder=sourceSlot->holderAddress;
+    g_pendingUseItem=sourceSlot->itemAddress;
+    g_pendingUseItemId=sourceSlot->id;
+    InterlockedExchange(&g_pendingActionKind,PendingUseWithSelf);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    const auto usedContainerId=source->id;
+    const auto usedSlot=sourceSlot->index;
+    const auto usedCount=sourceSlot->count;
+
+    g_pendingUseTile=0;
+    g_pendingUseContainer=0;
+    g_pendingUseContainerId=0;
+    g_pendingUseHolder=0;
+    g_pendingUseItem=0;
+    g_pendingUseItemId=0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_CONTAINER_ITEM_ON_SELF\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code==1?"true":"false")
+      << ",\"cmd\":\"USE_CONTAINER_ITEM_ON_SELF\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"sourceContainerId\":" << usedContainerId
+      << ",\"slot\":" << usedSlot
+      << ",\"itemId\":" << itemId
+      << ",\"count\":" << usedCount
+      << ",\"itemHolderAbi\":\"shared_object_ptr_ref\""
+      << ",\"targetHolderAbi\":\"shared_object_ptr_ref\""
+      << ",\"target\":\"self\"}";
+    return o.str();
+}
+
 std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
                                       std::uint32_t targetContainerId,
                                       std::uint16_t itemId) {
@@ -3282,7 +3452,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":23,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":24,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -3351,6 +3521,18 @@ std::string handleRequest(const std::string& request) {
             return R"({"ok":false,"cmd":"USE_LOOT_ITEM","error":"invalid_item_id"})";
         return useLootItemResponse(static_cast<std::uint16_t>(*id));
     }
+    if (cmd == "USE_CONTAINER_ITEM_ON_SELF") {
+        const auto itemId=uint32FieldFromRequest(request,"itemId");
+        if (!itemId || !*itemId || *itemId>0xFFFFu)
+            return R"({"ok":false,"cmd":"USE_CONTAINER_ITEM_ON_SELF","error":"invalid_item_id"})";
+
+        const auto sourceContainerId=
+            uint32FieldAllowZeroFromRequest(request,"sourceContainerId");
+        return useContainerItemOnSelfResponse(
+            sourceContainerId,
+            static_cast<std::uint16_t>(*itemId));
+    }
+
     if (cmd == "USE_CONTAINER_ITEM") {
         const auto item = uint32FieldFromRequest(request, "itemId");
         if (!item || *item > 0xFFFFu)
@@ -3432,7 +3614,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V23 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V24 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
