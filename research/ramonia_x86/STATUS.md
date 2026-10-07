@@ -430,3 +430,21 @@ Crome v0.8.6 and CromePipeTest now use sticky AttackTarget semantics:
 - a new target is selected only after the game itself clears AttackTarget.
 
 This separates target acquisition policy from active-target retention and should prevent low-HP monsters from being abandoned before death.
+
+
+## V19 extended stability + V0.8.7 Auto Corpse
+
+A subsequent live run with the V19 CreaturePtr ownership correction remained stable for at least 15 minutes under active Target use, including repeated retargeting. No delayed crash was observed during that interval.
+
+Loot reliability was then reported at roughly two-thirds of kills while multiple creature species were being targeted. The previous Crome logic still required one configured corpse item id (2813) and attempted corpse opening with a single fixed timing assumption.
+
+Crome v0.8.7 changes Loot to death-window Auto Corpse:
+- LOOT_DIFF now supplies the item ids created when the tracked AttackTarget disappears;
+- candidates born on the exact target tile are preferred;
+- configured corpse id 2813 remains only as a fallback/proven candidate for Rat/Cave Rat;
+- other death-window item ids can be tried automatically, allowing Spider/Troll/edited creature corpse ids to be discovered without hardcoding each species first;
+- corpse opening now waits up to about 1.2 seconds for a new or reused container window rather than assuming 350 ms is always sufficient;
+- reused container ids are detected by snapshot change and do not depend on the container name starting with "dead";
+- the death remains pending for up to 4 seconds and is cleared only after a corpse opens successfully or the deadline expires.
+
+Bridge remains V19; this reliability change is external Crome policy only.
