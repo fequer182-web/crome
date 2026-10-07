@@ -567,17 +567,222 @@ static bool SameRamoniaContainerSnapshot(
     return true;
 }
 
-static bool RamoniaLootOpenAndMove(DWORD pid,
-                                   const RamoniaLootConfigUi& cfg,
-                                   std::uint32_t corpseItemId,
-                                   std::uint32_t openWaitMs) {
-    nlohmann::json beforeJson;
-    if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, beforeJson))
-        return false;
-    const auto before = ParseRamoniaContainers(beforeJson);
+static bool RamoniaIsNestedContainerId(
+    const RamoniaLootConfigUi& cfg,
+    std::uint32_t id) {
+    return id &&
+           std::find(
+               cfg.nestedContainerIds.begin(),
+               cfg.nestedContainerIds.end(),
+               id) != cfg.nestedContainerIds.end();
+}
 
-    if (!RamoniaContainerIdExists(before, cfg.targetContainerId)) {
-        SetRamoniaLootStatus("Loot: abra a bag destino ID " + std::to_string(cfg.targetContainerId));
+static std::uint32_t RamoniaMoveLootFromContainer(
+    DWORD pid,
+    const RamoniaLootConfigUi& cfg,
+    std::uint32_t sourceId) {
+
+    nlohmann::json initialJson;
+    if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},initialJson))
+        return 0;
+
+    auto containers=ParseRamoniaContainers(initialJson);
+    const auto* source=FindRamoniaContainer(containers,sourceId);
+    if (!source) return 0;
+
+    std::vector<std::uint32_t> wanted;
+    if (cfg.onlyList) {
+        for (const auto id:cfg.itemIds) {
+            if (!id || RamoniaIsNestedContainerId(cfg,id)) continue;
+            if (std::find(wanted.begin(),wanted.end(),id)==wanted.end())
+                wanted.push_back(id);
+        }
+    } else {
+        for (const auto& item:source->items) {
+            if (!item.id || RamoniaIsNestedContainerId(cfg,item.id)) continue;
+            if (std::find(wanted.begin(),wanted.end(),item.id)==wanted.end())
+                wanted.push_back(item.id);
+        }
+    }
+
+    std::uint32_t movedActions=0;
+    for (const auto itemId:wanted) {
+        for (int repeat=0;repeat<32;++repeat) {
+            nlohmann::json currentJson;
+            if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},currentJson))
+                break;
+
+            containers=ParseRamoniaContainers(currentJson);
+            const auto* currentSource=FindRamoniaContainer(containers,sourceId);
+            if (!currentSource) break;
+
+            bool found=false;
+            for (const auto& item:currentSource->items)
+                if (item.id==itemId) {
+                    found=true;
+                    break;
+                }
+            if (!found) break;
+
+            nlohmann::json moveResponse;
+            if (!RamoniaPipeRequest(
+                    pid,
+                    {{"cmd","MOVE_CONTAINER_ITEM"},
+                     {"sourceContainerId",sourceId},
+                     {"targetContainerId",cfg.targetContainerId},
+                     {"itemId",itemId}},
+                    moveResponse) ||
+                !moveResponse.value("ok",false)) {
+                const auto error=moveResponse.is_object()
+                    ? moveResponse.value("error",std::string("move_failed"))
+                    : std::string("move_failed");
+                SetRamoniaLootStatus("Loot: move falhou - "+error);
+                break;
+            }
+
+            ++movedActions;
+            Sleep(80);
+        }
+    }
+
+    return movedActions;
+}
+
+static bool RamoniaOpenNestedContainerItem(
+    DWORD pid,
+    const RamoniaLootConfigUi& cfg,
+    std::uint32_t sourceContainerId,
+    std::uint32_t itemId,
+    std::uint32_t& openedContainerId) {
+
+    openedContainerId=0;
+
+    nlohmann::json beforeJson;
+    if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},beforeJson))
+        return false;
+    const auto before=ParseRamoniaContainers(beforeJson);
+
+    const auto* source=FindRamoniaContainer(before,sourceContainerId);
+    if (!source) return false;
+
+    bool itemPresent=false;
+    for (const auto& item:source->items)
+        if (item.id==itemId) {
+            itemPresent=true;
+            break;
+        }
+    if (!itemPresent) return false;
+
+    nlohmann::json useResponse;
+    if (!RamoniaPipeRequest(
+            pid,
+            {{"cmd","USE_CONTAINER_ITEM"},
+             {"sourceContainerId",sourceContainerId},
+             {"itemId",itemId}},
+            useResponse) ||
+        !useResponse.value("ok",false))
+        return false;
+
+    const ULONGLONG deadline=GetTickCount64()+900;
+    while(GetTickCount64()<deadline) {
+        Sleep(90);
+
+        nlohmann::json afterJson;
+        if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},afterJson))
+            continue;
+        const auto after=ParseRamoniaContainers(afterJson);
+
+        // Prefer a brand-new container window.
+        for (const auto& c:after) {
+            if (c.id==cfg.targetContainerId) continue;
+            if (!RamoniaContainerIdExists(before,c.id)) {
+                openedContainerId=c.id;
+                return true;
+            }
+        }
+
+        // Some clients reuse an existing window/container id.
+        for (const auto& c:after) {
+            if (c.id==cfg.targetContainerId) continue;
+            const auto* old=FindRamoniaContainer(before,c.id);
+            if (old && !SameRamoniaContainerSnapshot(*old,c)) {
+                openedContainerId=c.id;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool RamoniaLootContainerRecursive(
+    DWORD pid,
+    const RamoniaLootConfigUi& cfg,
+    std::uint32_t sourceId,
+    int depth,
+    std::uint32_t& totalMoved,
+    std::uint32_t& nestedOpened) {
+
+    if (sourceId==cfg.targetContainerId || depth>3)
+        return true;
+
+    totalMoved += RamoniaMoveLootFromContainer(pid,cfg,sourceId);
+
+    if (depth==3 || cfg.nestedContainerIds.empty())
+        return true;
+
+    nlohmann::json currentJson;
+    if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},currentJson))
+        return false;
+    const auto containers=ParseRamoniaContainers(currentJson);
+    const auto* source=FindRamoniaContainer(containers,sourceId);
+    if (!source) return false;
+
+    std::vector<std::uint32_t> nestedToOpen;
+    for (const auto& item:source->items) {
+        if (!RamoniaIsNestedContainerId(cfg,item.id)) continue;
+        if (std::find(nestedToOpen.begin(),nestedToOpen.end(),item.id)
+            == nestedToOpen.end())
+            nestedToOpen.push_back(item.id);
+    }
+
+    for (const auto nestedItemId:nestedToOpen) {
+        std::uint32_t childId{};
+        SetRamoniaLootStatus(
+            "Loot: abrindo bag interna ID "+std::to_string(nestedItemId));
+
+        if (!RamoniaOpenNestedContainerItem(
+                pid,cfg,sourceId,nestedItemId,childId) ||
+            !childId)
+            continue;
+
+        ++nestedOpened;
+        SetRamoniaLootStatus(
+            "Loot: bag interna "+std::to_string(nestedItemId)+
+            " -> container "+std::to_string(childId));
+
+        RamoniaLootContainerRecursive(
+            pid,cfg,childId,depth+1,totalMoved,nestedOpened);
+    }
+
+    return true;
+}
+
+static bool RamoniaLootOpenAndMove(
+    DWORD pid,
+    const RamoniaLootConfigUi& cfg,
+    std::uint32_t corpseItemId,
+    std::uint32_t openWaitMs) {
+
+    nlohmann::json beforeJson;
+    if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},beforeJson))
+        return false;
+    const auto before=ParseRamoniaContainers(beforeJson);
+
+    if (!RamoniaContainerIdExists(before,cfg.targetContainerId)) {
+        SetRamoniaLootStatus(
+            "Loot: abra a bag destino ID "+
+            std::to_string(cfg.targetContainerId));
         return false;
     }
 
@@ -594,21 +799,18 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
     std::vector<RamoniaContainerUi> containers;
     std::optional<std::uint32_t> sourceIdOpt;
 
-    // Known corpse IDs get the full async-open budget. Unknown death-tile
-    // items get only a short probe so blood/splash/field items cannot consume
-    // the whole death window in crowded fights.
     const std::uint32_t budget=std::max<std::uint32_t>(180u,openWaitMs);
     const ULONGLONG openDeadline=GetTickCount64()+budget;
     int attempt=0;
+
     while(!sourceIdOpt && GetTickCount64()<openDeadline) {
         Sleep(attempt++==0 ? std::min<std::uint32_t>(180u,budget) : 70u);
 
         nlohmann::json afterJson;
-        if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, afterJson))
+        if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},afterJson))
             continue;
         containers=ParseRamoniaContainers(afterJson);
 
-        // Best signal: a brand-new non-target container.
         for (const auto& c:containers) {
             if (c.id==cfg.targetContainerId) continue;
             if (!RamoniaContainerIdExists(before,c.id)) {
@@ -618,10 +820,6 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
         }
         if (sourceIdOpt) break;
 
-        // OTC can reuse an existing container id/window for the next corpse.
-        // Any non-target container that changes immediately after the corpse
-        // Game::use is a stronger signal than relying on English "dead ..."
-        // naming, which may vary by server/client language.
         for (const auto& c:containers) {
             if (c.id==cfg.targetContainerId) continue;
             const auto* old=FindRamoniaContainer(before,c.id);
@@ -634,73 +832,31 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
 
     if (!sourceIdOpt) {
         SetRamoniaLootStatus(
-            "Loot: corpse " + std::to_string(corpseItemId) +
+            "Loot: corpse "+std::to_string(corpseItemId)+
             " ainda nao abriu");
         return false;
     }
 
-    const std::uint32_t sourceId=*sourceIdOpt;
-    const auto* source=FindRamoniaContainer(containers,sourceId);
-    if (!source) return false;
-    std::vector<std::uint32_t> wanted;
+    std::uint32_t totalMoved{};
+    std::uint32_t nestedOpened{};
+    RamoniaLootContainerRecursive(
+        pid,cfg,*sourceIdOpt,0,totalMoved,nestedOpened);
 
-    if (cfg.onlyList) {
-        wanted = cfg.itemIds;
+    if (nestedOpened) {
+        SetRamoniaLootStatus(
+            "Loot: "+std::to_string(totalMoved)+
+            " move(s), "+std::to_string(nestedOpened)+
+            " bag(s) interna(s)");
+    } else if (totalMoved) {
+        SetRamoniaLootStatus(
+            "Loot: movido para bag "+
+            std::to_string(cfg.targetContainerId));
     } else {
-        for (const auto& item : source->items) {
-            if (!item.id) continue;
-            if (std::find(wanted.begin(),wanted.end(),item.id) == wanted.end())
-                wanted.push_back(item.id);
-        }
-    }
-
-    if (wanted.empty()) {
-        SetRamoniaLootStatus("Loot: corpse aberto; lista vazia");
-        return true;
-    }
-
-    std::uint32_t movedActions = 0;
-    for (const auto itemId : wanted) {
-        for (int repeat=0; repeat<32; ++repeat) {
-            nlohmann::json currentJson;
-            if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, currentJson))
-                break;
-            containers = ParseRamoniaContainers(currentJson);
-
-            const auto* currentSource = FindRamoniaContainer(containers,sourceId);
-            if (!currentSource) break;
-
-            bool found = false;
-            for (const auto& item : currentSource->items)
-                if (item.id == itemId) { found = true; break; }
-            if (!found) break;
-
-            nlohmann::json moveResponse;
-            if (!RamoniaPipeRequest(
-                    pid,
-                    {{"cmd","MOVE_CONTAINER_ITEM"},
-                     {"sourceContainerId",sourceId},
-                     {"targetContainerId",cfg.targetContainerId},
-                     {"itemId",itemId}},
-                    moveResponse) ||
-                !moveResponse.value("ok",false)) {
-                const auto error = moveResponse.is_object()
-                    ? moveResponse.value("error",std::string("move_failed"))
-                    : std::string("move_failed");
-                SetRamoniaLootStatus("Loot: move falhou - " + error);
-                return movedActions > 0;
-            }
-
-            ++movedActions;
-            Sleep(80);
-        }
-    }
-
-    if (movedActions)
-        SetRamoniaLootStatus("Loot: movido para bag " + std::to_string(cfg.targetContainerId));
-    else
         SetRamoniaLootStatus("Loot: corpse sem itens da lista");
+    }
 
+    // Opening the corpse itself was successful even if no configured item was
+    // present. This keeps corpse learning correct.
     return true;
 }
 
