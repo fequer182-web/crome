@@ -356,6 +356,58 @@ int runTargetLoop(DWORD pid, const std::string& wantedName) {
     }
 }
 
+int runTargetScanLoop(DWORD pid, const std::string& wantedName) {
+    std::cout << "[TARGET SCAN - READ ONLY]\n"
+              << "Filtro: " << wantedName << "\n"
+              << "NAO chama ATTACK_ID. NAO instala hook.\n"
+              << "CTRL+C para encerrar.\n\n";
+
+    std::uint64_t cycles = 0;
+    std::uint32_t lastVisible = 0;
+    std::uint32_t lastAttackId = 0;
+
+    for (;;) {
+        std::string monstersJson;
+        std::string combatJson;
+
+        const bool monstersOk =
+            requestRaw(pid, R"({"cmd":"GET_VISIBLE_MONSTERS"})", monstersJson, false);
+        const bool combatOk =
+            requestRaw(pid, R"({"cmd":"GET_COMBAT_TARGETS"})", combatJson, false);
+
+        if (!monstersOk || !combatOk) {
+            std::cout << "[SCAN] Falha de leitura; tentando novamente...\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        const auto monsters = parseVisibleMonsters(monstersJson);
+        const auto attackId = parseAttackTargetId(combatJson);
+
+        std::uint32_t matching = 0;
+        const auto wanted = lowerCopy(wantedName);
+        const bool wildcard = wanted == "*";
+        for (const auto& m : monsters) {
+            if (wildcard || lowerCopy(m.name) == wanted)
+                ++matching;
+        }
+
+        ++cycles;
+        if (matching != lastVisible || attackId != lastAttackId ||
+            cycles % 10 == 0) {
+            std::cout << "[SCAN] cycle=" << cycles
+                      << " matching=" << matching
+                      << " attackTargetId=" << attackId
+                      << " visibleTotal=" << monsters.size()
+                      << "\n";
+        }
+
+        lastVisible = matching;
+        lastAttackId = attackId;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+}
+
 int runAutoLootCycle(DWORD pid,
                      std::uint32_t corpseItemId,
                      std::uint32_t targetContainerId,
@@ -623,7 +675,7 @@ int main(int argc, char** argv) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
             catch (...) {}
         }
-    } else if (mode == "target") {
+    } else if (mode == "target" || mode == "targetscan") {
         if (argc >= 3) wantedName = argv[2];
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
@@ -736,6 +788,14 @@ int main(int argc, char** argv) {
               << "PIPE : \\\\.\\pipe\\Crome.Ramonia." << pid << "\n\n";
 
     bool ok = true;
+
+    if (mode == "targetscan") {
+        if (wantedName.empty()) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe targetscan <nome|*> [PID]\n";
+            return 1;
+        }
+        return runTargetScanLoop(pid, wantedName);
+    }
 
     if (mode == "target") {
         if (wantedName.empty()) {
