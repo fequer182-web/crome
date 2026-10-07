@@ -272,3 +272,12 @@ The loop lives outside the x86 bridge. It repeatedly asks the bridge to use the 
 Extended live Auto Food validation confirmed that `USE_CONTAINER_ITEM` searches across multiple open containers rather than only Bag id=0. Cheese id `2696` was consumed successfully from container ids 0, 1, 2 and 3 during one continuous `autofood` session. When no matching food was present, the loop waited; when a new cheese appeared later, it was detected and consumed without restarting the client.
 
 The Crome UI now wires the Tools -> Food Eater control to the Ramonia V16 bridge. Food policy remains in the external x64 Crome layer, with configurable Food ID and interval, while the injected x86 bridge remains the validated ABI adapter. Other Tools remain disabled on Ramonia until their own backends are confirmed.
+
+
+## V16 Crome UI live confirmation
+
+Final live validation through the actual Crome UI succeeded. With Tools -> Food Eater enabled, Food ID 2696 and the Ramonia V16 bridge injected, Crome consumed food correctly without using CromePipeTest. This confirms the production path:
+
+Crome x64 UI/policy -> named pipe -> Ramonia x86 bridge V16 -> validated Container::items holder -> Game::use.
+
+Auto Food is therefore considered runtime-confirmed for this Ramonia build. CromePipeTest remains only as a diagnostic/manual validation tool for this feature.
