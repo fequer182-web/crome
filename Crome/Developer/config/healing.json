@@ -64,10 +64,11 @@
       "below_or_equal": 50,
       "min_mana": 0,
       "action": "item_on_self",
-      "item_id": 0,
+      "item_id": 15552,
       "cooldown_ms": 650,
       "priority": 500
     }
   ],
-  "ramonia_spell_backend": "bridge_v23_talkChannel"
+  "ramonia_spell_backend": "bridge_v23_talkChannel",
+  "ramonia_item_backend": "bridge_v24_useWithSelf"
 }
