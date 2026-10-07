@@ -2332,7 +2332,7 @@ static void DrawTools(const Theme& t) {
             if(tj.contains("reammo")){ reAmmo=tj["reammo"].value("enabled",false); if(tj["reammo"].contains("item_ids")&&tj["reammo"]["item_ids"].is_array()&&!tj["reammo"]["item_ids"].empty()) ammo=tj["reammo"]["item_ids"][0].get<int>(); }
         }
     }
-    CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),214,t);
+    CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),176,t);
     const bool foodRuntimeReady = FoodRuntimeReady();
     const bool lightRuntimeReady = LightRuntimeReady();
     if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
@@ -2495,59 +2495,85 @@ static void DrawLoot(const Theme& t) {
     const bool ramoniaLootReady=
         g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=21;
 
-    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),148,t);
+    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),170,t);
 
-    if(!lootRuntimeReady) ImGui::BeginDisabled();
-    ImGui::Checkbox("Loot Items",&items);
-    if(!lootRuntimeReady) ImGui::EndDisabled();
+    // Top controls: keep Ramonia-visible values inside fixed columns so
+    // Destination Bag ID never gets clipped at the right edge.
+    if(ImGui::BeginTable("loot_top",4,ImGuiTableFlags_SizingStretchProp)){
+        ImGui::TableSetupColumn("##loot_on",0,1.05f);
+        ImGui::TableSetupColumn("##only",0,1.15f);
+        ImGui::TableSetupColumn("##corpse",0,1.55f);
+        ImGui::TableSetupColumn("##dest",0,1.55f);
+        ImGui::TableNextRow();
 
-    ImGui::SameLine(135);
+        ImGui::TableSetColumnIndex(0);
+        if(!lootRuntimeReady) ImGui::BeginDisabled();
+        ImGui::Checkbox("Loot Items",&items);
+        if(!lootRuntimeReady) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(1);
+        if(!lootRuntimeReady) ImGui::BeginDisabled();
+        ImGui::Checkbox("Only List",&only);
+        if(!lootRuntimeReady) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(2);
+        if(ramoniaLootReady){
+            ImGui::TextDisabled("Corpse fallback");
+            ImGui::SameLine();
+            SmallInt("##corpseid",&corpseId,62);
+        }else{
+            ImGui::TextDisabled("Radius");
+            ImGui::SameLine();
+            SmallInt("##radius",&radius,52);
+        }
+
+        ImGui::TableSetColumnIndex(3);
+        if(ramoniaLootReady){
+            ImGui::TextDisabled("Destination Bag ID");
+            ImGui::SameLine();
+            SmallInt("##lootbag",&targetBagId,52);
+        }else{
+            ImGui::TextDisabled("Max Weight");
+            ImGui::SameLine();
+            SmallInt("##weight",&maxWeight,64);
+        }
+        ImGui::EndTable();
+    }
+
+    // Main Ramonia loot configuration uses two balanced columns.
+    if(ImGui::BeginTable("loot_ids_grid",2,ImGuiTableFlags_SizingStretchSame)){
+        ImGui::TableSetupColumn("##loot_ids_col");
+        ImGui::TableSetupColumn("##corpse_bags_col");
+        ImGui::TableNextRow();
+
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextDisabled("Loot IDs");
+        ImGui::SetNextItemWidth(-1);
+        if(!lootRuntimeReady) ImGui::BeginDisabled();
+        ImGui::InputText("##lootids",lootIds,sizeof(lootIds));
+        if(!lootRuntimeReady) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextDisabled("Corpse Bag IDs (abre bags dentro do corpse)");
+        ImGui::SetNextItemWidth(-1);
+        if(!ramoniaLootReady) ImGui::BeginDisabled();
+        ImGui::InputText("##nestedbagids",nestedIds,sizeof(nestedIds));
+        if(!ramoniaLootReady) ImGui::EndDisabled();
+
+        ImGui::EndTable();
+    }
+
+    // Ground Drop remains a native-only feature and is visually separated
+    // from the Ramonia corpse/bag workflow.
+    ImGui::Separator();
     if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("Ground Drop",&dropEnabled);
+    ImGui::SameLine();
     ImGui::Checkbox("Loot on Screen",&onScreen);
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
-
-    ImGui::SameLine(285);
-    if(ramoniaLootReady){
-        ImGui::TextUnformatted("Corpse fallback:");
-        ImGui::SameLine(); SmallInt("##corpseid",&corpseId,65);
-    }else{
-        ImGui::TextUnformatted("Radius:");
-        ImGui::SameLine(); SmallInt("##radius",&radius,55);
-    }
-
-    if(!lootRuntimeReady) ImGui::BeginDisabled();
-    ImGui::Checkbox("Loot Only List",&only);
-    if(!lootRuntimeReady) ImGui::EndDisabled();
-
-    ImGui::SameLine(210);
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
-    ImGui::Checkbox("DropItem -> Ground",&dropEnabled);
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
-
-    ImGui::SameLine(390);
-    if(ramoniaLootReady){
-        ImGui::TextUnformatted("Bag ID:");
-        ImGui::SameLine(); SmallInt("##lootbag",&targetBagId,55);
-    }else{
-        ImGui::TextUnformatted("Max Weight:");
-        ImGui::SameLine(); SmallInt("##weight",&maxWeight,70);
-    }
-
-    ImGui::TextDisabled("Loot IDs (comma separated)");
+    ImGui::SameLine();
+    ImGui::TextDisabled("Ground Drop IDs");
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(-1);
-    if(!lootRuntimeReady) ImGui::BeginDisabled();
-    ImGui::InputText("##lootids",lootIds,sizeof(lootIds));
-    if(!lootRuntimeReady) ImGui::EndDisabled();
-
-    ImGui::TextDisabled("Nested bag IDs (abre bags dentro do corpse)");
-    ImGui::SetNextItemWidth(-1);
-    if(!ramoniaLootReady) ImGui::BeginDisabled();
-    ImGui::InputText("##nestedbagids",nestedIds,sizeof(nestedIds));
-    if(!ramoniaLootReady) ImGui::EndDisabled();
-
-    ImGui::TextDisabled("DropItem IDs: itens retirados do corpse e jogados no chao para lootbag");
-    ImGui::SetNextItemWidth(-1);
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
     ImGui::InputText("##dropids",dropIds,sizeof(dropIds));
     if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
 
@@ -2708,7 +2734,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.3 Healing + Nested Loot");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.4 Loot UI + Self-Use Prep");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
