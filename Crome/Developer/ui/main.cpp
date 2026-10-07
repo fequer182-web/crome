@@ -1040,6 +1040,11 @@ static bool FoodRuntimeReady() {
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16);
 }
 
+static bool LightRuntimeReady() {
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 22);
+}
+
 static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 21);
@@ -1894,13 +1899,29 @@ static void DrawTools(const Theme& t) {
     }
     CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),214,t);
     const bool foodRuntimeReady = FoodRuntimeReady();
+    const bool lightRuntimeReady = LightRuntimeReady();
     if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("left",0,1.05f); ImGui::TableSetupColumn("right",0,1.05f); ImGui::TableSetupColumn("value",0,1.25f);
         auto row=[&](const char* lid,bool* lv,const char* rid,bool* rv,const char* iid,char* buf,size_t cap){ ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox(lid,lv); ImGui::TableSetColumnIndex(1); ImGui::Checkbox(rid,rv); ImGui::TableSetColumnIndex(2); SmallInput(iid,buf,cap,-1); };
 
         if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
         row("Mana Shield",&mana,"Anti-Paralyze",&para,"##para",paraSpell,sizeof(paraSpell));
-        row("Light Hack",&light,"Auto-Haste",&haste,"##haste",hasteSpell,sizeof(hasteSpell));
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        if(!lightRuntimeReady) ImGui::BeginDisabled();
+        ImGui::Checkbox("Light Hack",&light);
+        if(!lightRuntimeReady) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(1);
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+        ImGui::Checkbox("Auto-Haste",&haste);
+        ImGui::TableSetColumnIndex(2);
+        SmallInput("##haste",hasteSpell,sizeof(hasteSpell),-1);
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
         row("Anti-Idle",&antiIdle,"Advertise",&advert,"##advert",ad,sizeof(ad));
         row("Auto Fishing",&fish,"Pick Up Spear",&spear,"##spear",spears,sizeof(spears));
         if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
@@ -1933,6 +1954,8 @@ static void DrawTools(const Theme& t) {
     if(g_nativeRuntimeLoaded){
         ImGui::SameLine(); ImGui::TextDisabled("ManaShield"); ImGui::SameLine(); SmallInt("##manams",&manaInterval,70);
         ImGui::SameLine(); ImGui::TextDisabled("Haste"); ImGui::SameLine(); SmallInt("##hastems",&hasteInterval,70);
+    } else if(g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=22) {
+        ImGui::TextDisabled("%s",RamoniaLightStatusText().c_str());
     }
 
     EnsureWalkerIdCatalog();
@@ -1948,13 +1971,20 @@ static void DrawTools(const Theme& t) {
     ramFood.retryMs = 1000;
     SetRamoniaFoodConfig(ramFood);
 
+    RamoniaLightConfigUi ramLight;
+    ramLight.enabled =
+        g_ramoniaBridgeReady.load() &&
+        g_ramoniaBridgeVersion.load() >= 22 &&
+        light;
+    SetRamoniaLightConfig(ramLight);
+
     nlohmann::json tcfg={
       {"food",{{"enabled",foodRuntimeReady&&food},{"interval_ms",foodInterval},{"item_ids",foodIds}}},
       {"anti_idle",{{"enabled",g_nativeRuntimeLoaded&&antiIdle},{"min_interval_ms",idleMin},{"max_interval_ms",idleMax},{"mode","turn_only"},{"status","runtime_turn_action_pending"}}},
       {"mana_shield",{{"enabled",g_nativeRuntimeLoaded&&mana},{"spell",manaSpell},{"fallback_interval_ms",manaInterval},{"prefer_condition_state",true}}},
       {"anti_paralyze",{{"enabled",g_nativeRuntimeLoaded&&para},{"spell",paraSpell},{"prefer_condition_state",true},{"speed_baseline_mode","unhasted_base"}}},
       {"auto_haste",{{"enabled",g_nativeRuntimeLoaded&&haste},{"spell",hasteSpell},{"fallback_interval_ms",hasteInterval},{"prefer_condition_state",true}}},
-      {"light",{{"enabled",light},{"profile_gated",true}}},
+      {"light",{{"enabled",lightRuntimeReady&&light},{"profile_gated",true},{"ambient",1.0},{"ramonia_bridge_min_version",22}}},
       {"spear_pickup",{{"enabled",g_nativeRuntimeLoaded&&spear},{"item_ids",nlohmann::json::array()},{"status","requires_move_equip_backend"}}},
       {"reammo",{{"enabled",g_nativeRuntimeLoaded&&reAmmo},{"item_ids",nlohmann::json::array({ammo})},{"min_count",1},{"status","requires_move_equip_backend"}}}
     };
@@ -2219,7 +2249,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.0 Learned Loot");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.1 Persist + Light");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
