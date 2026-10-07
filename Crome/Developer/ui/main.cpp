@@ -82,6 +82,25 @@ struct RamoniaFoodConfigUi {
     std::uint32_t retryMs{1000};
 };
 
+struct RamoniaLootConfigUi {
+    bool enabled{};
+    bool onlyList{true};
+    std::uint32_t corpseItemId{2813};
+    std::uint32_t targetContainerId{0};
+    std::vector<std::uint32_t> itemIds;
+};
+
+struct RamoniaContainerItemUi {
+    std::uint32_t id{};
+    std::uint32_t count{};
+};
+
+struct RamoniaContainerUi {
+    std::uint32_t id{};
+    std::string name;
+    std::vector<RamoniaContainerItemUi> items;
+};
+
 static std::atomic<bool> g_ramoniaWorkerRun{true};
 static std::atomic<bool> g_ramoniaBridgeReady{false};
 static std::atomic<int> g_ramoniaBridgeVersion{0};
@@ -89,8 +108,10 @@ static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
 static RamoniaTargetConfigUi g_ramoniaTargetConfig;
 static RamoniaFoodConfigUi g_ramoniaFoodConfig;
+static RamoniaLootConfigUi g_ramoniaLootConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
 static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
+static std::string g_ramoniaLootStatus = "Loot aguardando";
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
 static std::uint32_t g_ramoniaCurrentTargetHp{};
@@ -167,6 +188,26 @@ static void SetRamoniaFoodStatus(const std::string& status) {
 static std::string RamoniaFoodStatusText() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaFoodStatus;
+}
+
+static void SetRamoniaLootConfig(const RamoniaLootConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaLootConfig = cfg;
+}
+
+static RamoniaLootConfigUi GetRamoniaLootConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaLootConfig;
+}
+
+static void SetRamoniaLootStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaLootStatus = status;
+}
+
+static std::string RamoniaLootStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaLootStatus;
 }
 
 static bool RamoniaPipeRequest(DWORD pid, const nlohmann::json& request, nlohmann::json& response) {
@@ -284,8 +325,202 @@ static std::optional<RamoniaMonsterUi> ChooseRamoniaTarget(
     return best;
 }
 
+
+static std::vector<RamoniaContainerUi> ParseRamoniaContainers(const nlohmann::json& j) {
+    std::vector<RamoniaContainerUi> out;
+    if (!j.is_object() || !j.value("ok",false) ||
+        !j.contains("containers") || !j["containers"].is_array())
+        return out;
+
+    for (const auto& cv : j["containers"]) {
+        if (!cv.is_object()) continue;
+        RamoniaContainerUi c;
+        c.id = cv.value("id",0u);
+        c.name = cv.value("name",std::string());
+        if (cv.contains("items") && cv["items"].is_array()) {
+            for (const auto& iv : cv["items"]) {
+                if (!iv.is_object()) continue;
+                RamoniaContainerItemUi item;
+                item.id = iv.value("id",0u);
+                item.count = iv.value("count",1u);
+                if (item.id) c.items.push_back(item);
+            }
+        }
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+static bool RamoniaContainerIdExists(const std::vector<RamoniaContainerUi>& containers,
+                                     std::uint32_t id) {
+    for (const auto& c : containers) if (c.id == id) return true;
+    return false;
+}
+
+static const RamoniaContainerUi* FindRamoniaContainer(
+    const std::vector<RamoniaContainerUi>& containers,
+    std::uint32_t id) {
+    for (const auto& c : containers) if (c.id == id) return &c;
+    return nullptr;
+}
+
+static bool RamoniaLootMarkTracksTarget(const nlohmann::json& mark,
+                                        std::uint32_t targetId) {
+    if (!mark.is_object() || !mark.value("ok",false) ||
+        !mark.contains("trackedMonsters") || !mark["trackedMonsters"].is_array())
+        return false;
+    for (const auto& m : mark["trackedMonsters"])
+        if (m.is_object() && m.value("id",0u) == targetId) return true;
+    return false;
+}
+
+static bool RamoniaLootDiffHasCorpse(const nlohmann::json& diff,
+                                     std::uint32_t targetId,
+                                     std::uint32_t corpseItemId) {
+    if (!diff.is_object() || !diff.value("ok",false)) return false;
+
+    bool targetRemoved = false;
+    if (diff.contains("removedMonsters") && diff["removedMonsters"].is_array()) {
+        for (const auto& m : diff["removedMonsters"])
+            if (m.is_object() && m.value("id",0u) == targetId) {
+                targetRemoved = true;
+                break;
+            }
+    }
+    if (!targetRemoved) return false;
+
+    if (diff.contains("addedItems") && diff["addedItems"].is_array()) {
+        for (const auto& item : diff["addedItems"])
+            if (item.is_object() && item.value("id",0u) == corpseItemId)
+                return true;
+    }
+    return false;
+}
+
+static bool RamoniaLootOpenAndMove(DWORD pid,
+                                   const RamoniaLootConfigUi& cfg) {
+    nlohmann::json beforeJson;
+    if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, beforeJson))
+        return false;
+    const auto before = ParseRamoniaContainers(beforeJson);
+
+    if (!RamoniaContainerIdExists(before, cfg.targetContainerId)) {
+        SetRamoniaLootStatus("Loot: abra a bag destino ID " + std::to_string(cfg.targetContainerId));
+        return false;
+    }
+
+    nlohmann::json useResponse;
+    if (!RamoniaPipeRequest(
+            pid,
+            {{"cmd","USE_LOOT_ITEM"},{"itemId",cfg.corpseItemId}},
+            useResponse) ||
+        !useResponse.value("ok",false)) {
+        SetRamoniaLootStatus("Loot: falha ao abrir corpse");
+        return false;
+    }
+
+    Sleep(350);
+
+    nlohmann::json afterJson;
+    if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, afterJson)) {
+        SetRamoniaLootStatus("Loot: corpse abriu, leitura de container falhou");
+        return false;
+    }
+    auto containers = ParseRamoniaContainers(afterJson);
+
+    const RamoniaContainerUi* source = nullptr;
+    for (const auto& c : containers) {
+        if (c.id == cfg.targetContainerId) continue;
+        if (!RamoniaContainerIdExists(before,c.id)) {
+            source = &c;
+            break;
+        }
+    }
+
+    if (!source) {
+        for (const auto& c : containers) {
+            if (c.id == cfg.targetContainerId) continue;
+            const auto name = LowerAscii(c.name);
+            if (name.rfind("dead ",0) == 0) {
+                source = &c;
+                break;
+            }
+        }
+    }
+
+    if (!source) {
+        SetRamoniaLootStatus("Loot: corpse abriu, container nao identificado");
+        return false;
+    }
+
+    const std::uint32_t sourceId = source->id;
+    std::vector<std::uint32_t> wanted;
+
+    if (cfg.onlyList) {
+        wanted = cfg.itemIds;
+    } else {
+        for (const auto& item : source->items) {
+            if (!item.id) continue;
+            if (std::find(wanted.begin(),wanted.end(),item.id) == wanted.end())
+                wanted.push_back(item.id);
+        }
+    }
+
+    if (wanted.empty()) {
+        SetRamoniaLootStatus("Loot: corpse aberto; lista vazia");
+        return true;
+    }
+
+    std::uint32_t movedActions = 0;
+    for (const auto itemId : wanted) {
+        for (int repeat=0; repeat<32; ++repeat) {
+            nlohmann::json currentJson;
+            if (!RamoniaPipeRequest(pid, {{"cmd","GET_OPEN_CONTAINERS"}}, currentJson))
+                break;
+            containers = ParseRamoniaContainers(currentJson);
+
+            const auto* currentSource = FindRamoniaContainer(containers,sourceId);
+            if (!currentSource) break;
+
+            bool found = false;
+            for (const auto& item : currentSource->items)
+                if (item.id == itemId) { found = true; break; }
+            if (!found) break;
+
+            nlohmann::json moveResponse;
+            if (!RamoniaPipeRequest(
+                    pid,
+                    {{"cmd","MOVE_CONTAINER_ITEM"},
+                     {"sourceContainerId",sourceId},
+                     {"targetContainerId",cfg.targetContainerId},
+                     {"itemId",itemId}},
+                    moveResponse) ||
+                !moveResponse.value("ok",false)) {
+                const auto error = moveResponse.is_object()
+                    ? moveResponse.value("error",std::string("move_failed"))
+                    : std::string("move_failed");
+                SetRamoniaLootStatus("Loot: move falhou - " + error);
+                return movedActions > 0;
+            }
+
+            ++movedActions;
+            Sleep(80);
+        }
+    }
+
+    if (movedActions)
+        SetRamoniaLootStatus("Loot: movido para bag " + std::to_string(cfg.targetContainerId));
+    else
+        SetRamoniaLootStatus("Loot: corpse sem itens da lista");
+
+    return true;
+}
+
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
+    std::uint32_t lootMarkedTargetId = 0;
+    std::uint64_t lootLastMarkMs = 0;
+    std::uint64_t lootDiffDeadlineMs = 0;
 
     while (g_ramoniaWorkerRun.load()) {
         const DWORD pid = FindRamoniaProcess();
@@ -294,8 +529,12 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeReady.store(false);
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
+            lootMarkedTargetId = 0;
+            lootLastMarkMs = 0;
+            lootDiffDeadlineMs = 0;
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
+            SetRamoniaLootStatus("Loot: Ramonia fechado");
             Sleep(700);
             continue;
         }
@@ -311,8 +550,12 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeVersion.store(
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
+            lootMarkedTargetId = 0;
+            lootLastMarkMs = 0;
+            lootDiffDeadlineMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
+            SetRamoniaLootStatus("Loot: bridge aguardando");
             Sleep(500);
             continue;
         }
@@ -321,11 +564,10 @@ static void RamoniaTargetWorker() {
         g_ramoniaBridgeReady.store(true);
         g_ramoniaBridgeVersion.store(bridgeVersion);
 
-        // Auto Food is an independent policy from Target/Loot. The x64 UI
-        // decides when to eat; the x86 bridge only validates + calls Game::use.
-        const auto foodCfg = GetRamoniaFoodConfig();
         const auto nowMs = static_cast<std::uint64_t>(GetTickCount64());
 
+        // Auto Food stays independent from Target and Loot.
+        const auto foodCfg = GetRamoniaFoodConfig();
         if (!foodCfg.enabled) {
             nextFoodAttemptMs = 0;
             SetRamoniaFoodStatus("Auto Food: desligado");
@@ -349,7 +591,7 @@ static void RamoniaTargetWorker() {
                     "Auto Food: usou " + std::to_string(foodCfg.itemId) +
                     " bag=" + std::to_string(containerId) +
                     " slot=" + std::to_string(slot));
-                nextFoodAttemptMs = nowMs + std::max<std::uint32_t>(1000u, foodCfg.intervalMs);
+                nextFoodAttemptMs = nowMs + std::max<std::uint32_t>(1000u,foodCfg.intervalMs);
             } else {
                 const std::string error =
                     (transportOk && foodResponse.is_object())
@@ -363,22 +605,33 @@ static void RamoniaTargetWorker() {
                 else if (!transportOk)
                     SetRamoniaFoodStatus("Auto Food: pipe indisponivel");
                 else
-                    SetRamoniaFoodStatus("Auto Food: " + (error.empty() ? std::string("falhou") : error));
+                    SetRamoniaFoodStatus("Auto Food: " + (error.empty()?std::string("falhou"):error));
 
-                nextFoodAttemptMs = nowMs + std::max<std::uint32_t>(250u, foodCfg.retryMs);
+                nextFoodAttemptMs = nowMs + std::max<std::uint32_t>(250u,foodCfg.retryMs);
             }
         }
 
-        const auto cfg = GetRamoniaTargetConfig();
-        if (!cfg.enabled) {
-            SetRamoniaStatus("Ramonia Bridge pronta");
-            Sleep(300);
-            continue;
+        const auto targetCfg = GetRamoniaTargetConfig();
+        const auto lootCfg = GetRamoniaLootConfig();
+        const bool targetPolicyActive =
+            targetCfg.enabled && HasRamoniaTargetPolicy(targetCfg);
+        const bool lootActive =
+            lootCfg.enabled && bridgeVersion >= 16;
+
+        if (!lootActive) {
+            lootMarkedTargetId = 0;
+            lootLastMarkMs = 0;
+            lootDiffDeadlineMs = 0;
+            SetRamoniaLootStatus(lootCfg.enabled
+                ? "Loot: requer Bridge V16+"
+                : "Loot: desligado");
         }
 
-        // Target enabled without a target policy must be a true idle state.
-        if (!HasRamoniaTargetPolicy(cfg)) {
-            SetRamoniaStatus("Target ativo - informe um alvo ou marque Any");
+        if (!targetPolicyActive && !lootActive) {
+            if (targetCfg.enabled)
+                SetRamoniaStatus("Target ativo - informe um alvo ou marque Any");
+            else
+                SetRamoniaStatus("Ramonia Bridge pronta");
             Sleep(300);
             continue;
         }
@@ -386,14 +639,76 @@ static void RamoniaTargetWorker() {
         nlohmann::json monstersJson, combatJson;
         if (!RamoniaPipeRequest(pid, {{"cmd","GET_VISIBLE_MONSTERS"}}, monstersJson) ||
             !RamoniaPipeRequest(pid, {{"cmd","GET_COMBAT_TARGETS"}}, combatJson)) {
-            SetRamoniaStatus("Target: aguardando bridge");
+            if (targetPolicyActive) SetRamoniaStatus("Target: aguardando bridge");
+            if (lootActive) SetRamoniaLootStatus("Loot: aguardando bridge");
             Sleep(300);
             continue;
         }
 
         const auto monsters = ParseRamoniaMonsters(monstersJson);
         const auto currentAttackId = ParseRamoniaAttackId(combatJson);
-        const auto target = ChooseRamoniaTarget(monsters, cfg, currentAttackId);
+
+        // Loot baseline is armed against the actual AttackTarget. This removes
+        // the manual diagnostic race where LOOT_MARK could run before a Rat was
+        // present in the tracked tile snapshot.
+        if (lootActive) {
+            if (lootMarkedTargetId && currentAttackId != lootMarkedTargetId) {
+                if (!lootDiffDeadlineMs) lootDiffDeadlineMs = nowMs + 2500;
+
+                nlohmann::json diff;
+                if (RamoniaPipeRequest(pid, {{"cmd","LOOT_DIFF"}}, diff) &&
+                    RamoniaLootDiffHasCorpse(
+                        diff,lootMarkedTargetId,lootCfg.corpseItemId)) {
+                    SetRamoniaLootStatus("Loot: corpse detectado, abrindo...");
+                    RamoniaLootOpenAndMove(pid,lootCfg);
+                    lootMarkedTargetId = 0;
+                    lootLastMarkMs = 0;
+                    lootDiffDeadlineMs = 0;
+                    Sleep(150);
+                    continue;
+                }
+
+                if (nowMs < lootDiffDeadlineMs) {
+                    SetRamoniaLootStatus("Loot: aguardando corpse...");
+                    Sleep(150);
+                    continue;
+                }
+
+                SetRamoniaLootStatus("Loot: alvo saiu sem corpse confirmado");
+                lootMarkedTargetId = 0;
+                lootLastMarkMs = 0;
+                lootDiffDeadlineMs = 0;
+            }
+
+            if (currentAttackId) {
+                if (lootMarkedTargetId != currentAttackId ||
+                    !lootLastMarkMs || nowMs - lootLastMarkMs >= 900) {
+                    nlohmann::json mark;
+                    if (RamoniaPipeRequest(pid, {{"cmd","LOOT_MARK"}}, mark) &&
+                        RamoniaLootMarkTracksTarget(mark,currentAttackId)) {
+                        lootMarkedTargetId = currentAttackId;
+                        lootLastMarkMs = nowMs;
+                        lootDiffDeadlineMs = 0;
+                        SetRamoniaLootStatus(
+                            "Loot armado no target " + std::to_string(currentAttackId));
+                    } else {
+                        SetRamoniaLootStatus("Loot: aguardando target entrar no snapshot");
+                    }
+                }
+            } else if (!lootMarkedTargetId) {
+                SetRamoniaLootStatus("Loot: aguardando AttackTarget");
+            }
+        }
+
+        if (!targetPolicyActive) {
+            SetRamoniaStatus("Ramonia Bridge pronta");
+            Sleep(300);
+            continue;
+        }
+
+        const auto currentAttackForTarget = ParseRamoniaAttackId(combatJson);
+        const auto target = ChooseRamoniaTarget(
+            monsters,targetCfg,currentAttackForTarget);
 
         if (!target) {
             SetRamoniaStatus("Target ativo - aguardando alvo");
@@ -401,7 +716,7 @@ static void RamoniaTargetWorker() {
             continue;
         }
 
-        if (target->id != currentAttackId) {
+        if (target->id != currentAttackForTarget) {
             nlohmann::json attackResponse;
             const bool transportOk =
                 RamoniaPipeRequest(pid, {{"cmd","ATTACK_ID"},{"creatureId",target->id}}, attackResponse);
@@ -412,17 +727,16 @@ static void RamoniaTargetWorker() {
                     (transportOk && attackResponse.is_object())
                         ? attackResponse.value("error",std::string())
                         : std::string();
-                if (error == "creature_id_not_visible") {
+                if (error == "creature_id_not_visible")
                     SetRamoniaStatus("Alvo sumiu - procurando proximo");
-                } else {
+                else
                     SetRamoniaStatus("ATTACK_ID pendente - nova tentativa");
-                }
                 Sleep(250);
                 continue;
             }
         }
 
-        SetRamoniaStatus("Target ativo", target->name, target->id, target->hpPercent);
+        SetRamoniaStatus("Target ativo",target->name,target->id,target->hpPercent);
         Sleep(300);
     }
 }
@@ -432,6 +746,11 @@ static bool TargetRuntimeReady() {
 }
 
 static bool FoodRuntimeReady() {
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16);
+}
+
+static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16);
 }
@@ -1354,32 +1673,137 @@ static void DrawTools(const Theme& t) {
 }
 
 static void DrawLoot(const Theme& t) {
-    static bool items=false,onScreen=false,only=false,dropEnabled=false; static int radius=3,maxWeight=3155;
-    static char lootIds[256]="3031,3035"; static char dropIds[256]="";
+    static bool items=false,onScreen=false,only=true,dropEnabled=false;
+    static int radius=3,maxWeight=3155,corpseId=2813,targetBagId=0;
+    static char lootIds[256]="2148";
+    static char dropIds[256]="";
     static std::uint64_t seenProfileLoadGeneration=0;
+
+    auto csvIds=[](const char*s){
+        nlohmann::json a=nlohmann::json::array();
+        std::istringstream ss(s?s:"");
+        std::string p;
+        while(std::getline(ss,p,',')){
+            try{int id=std::stoi(p);if(id>0)a.push_back(id);}catch(...){}
+        }
+        return a;
+    };
+
     if(seenProfileLoadGeneration!=g_profileLoadGeneration){
         seenProfileLoadGeneration=g_profileLoadGeneration;
         nlohmann::json lj;
         if(ReadJsonFile(g_baseDir/"config"/"loot.json",lj)){
-            items=lj.value("enabled",false); onScreen=lj.value("loot_on_screen",false); only=lj.value("only_list",false);
-            radius=lj.value("radius",3); maxWeight=lj.value("max_weight",3155);
-            auto toCsv=[](const nlohmann::json& a){ std::string s; if(a.is_array()) for(auto&v:a) if(v.is_number_integer()){ if(!s.empty()) s += ","; s += std::to_string(v.get<int>()); } return s; };
-            const auto li=toCsv(lj.value("item_ids",nlohmann::json::array())); std::snprintf(lootIds,sizeof(lootIds),"%s",li.c_str());
+            items=lj.value("enabled",false);
+            onScreen=lj.value("loot_on_screen",false);
+            only=lj.value("only_list",true);
+            radius=lj.value("radius",3);
+            maxWeight=lj.value("max_weight",3155);
+            targetBagId=lj.value("target_container_id",0);
+            if(lj.contains("corpse_item_ids") && lj["corpse_item_ids"].is_array() &&
+               !lj["corpse_item_ids"].empty() && lj["corpse_item_ids"][0].is_number_integer())
+                corpseId=lj["corpse_item_ids"][0].get<int>();
+
+            auto toCsv=[](const nlohmann::json& a){
+                std::string out;
+                if(a.is_array()) for(auto&v:a) if(v.is_number_integer()){
+                    if(!out.empty()) out += ",";
+                    out += std::to_string(v.get<int>());
+                }
+                return out;
+            };
+            const auto li=toCsv(lj.value("item_ids",nlohmann::json::array()));
+            std::snprintf(lootIds,sizeof(lootIds),"%s",li.c_str());
             if(lj.contains("drop_item")&&lj["drop_item"].is_object()){
                 dropEnabled=lj["drop_item"].value("enabled",false);
-                const auto di=toCsv(lj["drop_item"].value("item_ids",nlohmann::json::array())); std::snprintf(dropIds,sizeof(dropIds),"%s",di.c_str());
+                const auto di=toCsv(lj["drop_item"].value("item_ids",nlohmann::json::array()));
+                std::snprintf(dropIds,sizeof(dropIds),"%s",di.c_str());
             }
         }
     }
+
+    const bool lootRuntimeReady=LootRuntimeReady();
+    const bool ramoniaLootReady=
+        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=16;
+
     CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),125,t);
+
+    if(!lootRuntimeReady) ImGui::BeginDisabled();
+    ImGui::Checkbox("Loot Items",&items);
+    if(!lootRuntimeReady) ImGui::EndDisabled();
+
+    ImGui::SameLine(135);
     if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
-    ImGui::Checkbox("Loot Items",&items); ImGui::SameLine(135); ImGui::Checkbox("Loot on Screen",&onScreen); ImGui::SameLine(285); ImGui::TextUnformatted("Radius:"); ImGui::SameLine(); SmallInt("##radius",&radius,55);
-    ImGui::Checkbox("Loot Only List",&only); ImGui::SameLine(210); ImGui::Checkbox("DropItem -> Ground",&dropEnabled); ImGui::SameLine(390); ImGui::TextUnformatted("Max Weight:"); ImGui::SameLine(); SmallInt("##weight",&maxWeight,70);
-    ImGui::TextDisabled("Loot IDs (comma separated)"); ImGui::SetNextItemWidth(-1); ImGui::InputText("##lootids",lootIds,sizeof(lootIds));
-    ImGui::TextDisabled("DropItem IDs: itens retirados do corpse e jogados no chao para lootbag"); ImGui::SetNextItemWidth(-1); ImGui::InputText("##dropids",dropIds,sizeof(dropIds));
+    ImGui::Checkbox("Loot on Screen",&onScreen);
     if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
-    auto csvIds=[](const char*s){ nlohmann::json a=nlohmann::json::array(); std::istringstream ss(s?s:""); std::string p; while(std::getline(ss,p,',')){ try{int id=std::stoi(p);if(id>0)a.push_back(id);}catch(...){}} return a; };
-    nlohmann::json lcfg={{"enabled",g_nativeRuntimeLoaded&&items},{"loot_on_screen",onScreen},{"only_list",only},{"radius",radius},{"max_weight",maxWeight},{"item_ids",csvIds(lootIds)},{"drop_item",{{"enabled",dropEnabled},{"item_ids",csvIds(dropIds)},{"destination","ground_near_corpse"}}}};
+
+    ImGui::SameLine(285);
+    if(ramoniaLootReady){
+        ImGui::TextUnformatted("Corpse ID:");
+        ImGui::SameLine(); SmallInt("##corpseid",&corpseId,65);
+    }else{
+        ImGui::TextUnformatted("Radius:");
+        ImGui::SameLine(); SmallInt("##radius",&radius,55);
+    }
+
+    if(!lootRuntimeReady) ImGui::BeginDisabled();
+    ImGui::Checkbox("Loot Only List",&only);
+    if(!lootRuntimeReady) ImGui::EndDisabled();
+
+    ImGui::SameLine(210);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("DropItem -> Ground",&dropEnabled);
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    ImGui::SameLine(390);
+    if(ramoniaLootReady){
+        ImGui::TextUnformatted("Bag ID:");
+        ImGui::SameLine(); SmallInt("##lootbag",&targetBagId,55);
+    }else{
+        ImGui::TextUnformatted("Max Weight:");
+        ImGui::SameLine(); SmallInt("##weight",&maxWeight,70);
+    }
+
+    ImGui::TextDisabled("Loot IDs (comma separated)");
+    ImGui::SetNextItemWidth(-1);
+    if(!lootRuntimeReady) ImGui::BeginDisabled();
+    ImGui::InputText("##lootids",lootIds,sizeof(lootIds));
+    if(!lootRuntimeReady) ImGui::EndDisabled();
+
+    ImGui::TextDisabled("DropItem IDs: itens retirados do corpse e jogados no chao para lootbag");
+    ImGui::SetNextItemWidth(-1);
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::InputText("##dropids",dropIds,sizeof(dropIds));
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+    const auto lootJsonIds=csvIds(lootIds);
+
+    RamoniaLootConfigUi ramLoot;
+    ramLoot.enabled=ramoniaLootReady&&items;
+    ramLoot.onlyList=only;
+    ramLoot.corpseItemId=static_cast<std::uint32_t>(std::max(1,corpseId));
+    ramLoot.targetContainerId=static_cast<std::uint32_t>(std::max(0,targetBagId));
+    if(lootJsonIds.is_array())
+        for(const auto& v:lootJsonIds)
+            if(v.is_number_integer() && v.get<int>()>0)
+                ramLoot.itemIds.push_back(static_cast<std::uint32_t>(v.get<int>()));
+    SetRamoniaLootConfig(ramLoot);
+
+    nlohmann::json lcfg={
+      {"enabled",lootRuntimeReady&&items},
+      {"loot_on_screen",g_nativeRuntimeLoaded&&onScreen},
+      {"only_list",only},
+      {"radius",radius},
+      {"max_weight",maxWeight},
+      {"target_container_id",targetBagId},
+      {"corpse_item_ids",nlohmann::json::array({std::max(1,corpseId)})},
+      {"item_ids",lootJsonIds},
+      {"drop_item",{
+          {"enabled",g_nativeRuntimeLoaded&&dropEnabled},
+          {"item_ids",csvIds(dropIds)},
+          {"destination","ground_near_corpse"},
+          {"status",g_nativeRuntimeLoaded?"available":"requires_native_move_backend"}
+      }}
+    };
     WriteJsonIfChanged("loot.json",lcfg);
     CardEnd();
 }
@@ -1487,7 +1911,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.2 Ramonia Food");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.3 Ramonia Loot");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
