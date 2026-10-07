@@ -17,5 +17,8 @@
   "corpse_item_ids": [
     2813
   ],
-  "auto_detect_corpse": true
+  "auto_detect_corpse": true,
+  "learned_corpse_ids": [
+    2813
+  ]
 }
