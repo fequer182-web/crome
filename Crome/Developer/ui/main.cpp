@@ -82,6 +82,10 @@ struct RamoniaFoodConfigUi {
     std::uint32_t retryMs{1000};
 };
 
+struct RamoniaLightConfigUi {
+    bool enabled{};
+};
+
 struct RamoniaLootConfigUi {
     bool enabled{};
     bool onlyList{true};
@@ -116,9 +120,11 @@ static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
 static RamoniaTargetConfigUi g_ramoniaTargetConfig;
 static RamoniaFoodConfigUi g_ramoniaFoodConfig;
+static RamoniaLightConfigUi g_ramoniaLightConfig;
 static RamoniaLootConfigUi g_ramoniaLootConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
 static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
+static std::string g_ramoniaLightStatus = "Light aguardando";
 static std::string g_ramoniaLootStatus = "Loot aguardando";
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
@@ -196,6 +202,26 @@ static void SetRamoniaFoodStatus(const std::string& status) {
 static std::string RamoniaFoodStatusText() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaFoodStatus;
+}
+
+static void SetRamoniaLightConfig(const RamoniaLightConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaLightConfig=cfg;
+}
+
+static RamoniaLightConfigUi GetRamoniaLightConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaLightConfig;
+}
+
+static void SetRamoniaLightStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaLightStatus=status;
+}
+
+static std::string RamoniaLightStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaLightStatus;
 }
 
 static void SetRamoniaLootConfig(const RamoniaLootConfigUi& cfg) {
@@ -615,6 +641,8 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
 
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
+    std::uint64_t nextLightRefreshMs = 0;
+    bool lightApplied = false;
     std::uint32_t lootMarkedTargetId = 0;
     std::uint64_t lootLastTargetMarkMs = 0;
     std::uint64_t lootDiffDeadlineMs = 0;
@@ -630,6 +658,8 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeReady.store(false);
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
+            nextLightRefreshMs = 0;
+            lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
@@ -653,6 +683,8 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeVersion.store(
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
+            nextLightRefreshMs = 0;
+            lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
@@ -670,6 +702,50 @@ static void RamoniaTargetWorker() {
         g_ramoniaBridgeVersion.store(bridgeVersion);
 
         const auto nowMs = static_cast<std::uint64_t>(GetTickCount64());
+
+        // Light is independent from Target/Loot/Food and does not use the
+        // game-thread dispatcher. Bridge V22 writes the profile-confirmed
+        // MapView minimumAmbient field and restores the original on OFF.
+        const auto lightCfg=GetRamoniaLightConfig();
+        const bool bridgeReportsLight=
+            hello.is_object() && hello.value("lightEnabled",false);
+
+        if (!lightCfg.enabled) {
+            nextLightRefreshMs=0;
+            if (bridgeVersion>=22 && (lightApplied || bridgeReportsLight)) {
+                nlohmann::json lightResponse;
+                RamoniaPipeRequest(
+                    pid,
+                    {{"cmd","SET_LIGHT"},{"enabled",0}},
+                    lightResponse);
+            }
+            lightApplied=false;
+            SetRamoniaLightStatus("Light: desligado");
+        } else if (bridgeVersion<22) {
+            nextLightRefreshMs=0;
+            lightApplied=false;
+            SetRamoniaLightStatus("Light: requer Bridge V22+");
+        } else if (!nextLightRefreshMs || nowMs>=nextLightRefreshMs) {
+            nlohmann::json lightResponse;
+            const bool ok=
+                RamoniaPipeRequest(
+                    pid,
+                    {{"cmd","SET_LIGHT"},{"enabled",1}},
+                    lightResponse) &&
+                lightResponse.value("ok",false) &&
+                lightResponse.value("contractReady",false);
+
+            if (ok) {
+                lightApplied=true;
+                SetRamoniaLightStatus(
+                    "Light: ambient=" +
+                    std::to_string(lightResponse.value("ambient",1.0)));
+            } else {
+                lightApplied=false;
+                SetRamoniaLightStatus("Light: MapView aguardando");
+            }
+            nextLightRefreshMs=nowMs+500;
+        }
 
         // Auto Food stays independent from Target and Loot.
         const auto foodCfg = GetRamoniaFoodConfig();
