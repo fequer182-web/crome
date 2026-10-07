@@ -706,6 +706,7 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
     std::uint64_t nextLightRefreshMs = 0;
+    std::uint64_t nextHealAttemptMs = 0;
     bool lightApplied = false;
     std::uint32_t lootMarkedTargetId = 0;
     std::uint64_t lootLastTargetMarkMs = 0;
@@ -723,6 +724,7 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
             nextLightRefreshMs = 0;
+            nextHealAttemptMs = 0;
             lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
@@ -731,6 +733,7 @@ static void RamoniaTargetWorker() {
             mapTransitionUntilMs = 0;
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
+            SetRamoniaHealingStatus("Healing: Ramonia fechado");
             SetRamoniaLootStatus("Loot: Ramonia fechado");
             Sleep(700);
             continue;
@@ -748,6 +751,7 @@ static void RamoniaTargetWorker() {
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
             nextLightRefreshMs = 0;
+            nextHealAttemptMs = 0;
             lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
@@ -756,6 +760,7 @@ static void RamoniaTargetWorker() {
             mapTransitionUntilMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
+            SetRamoniaHealingStatus("Healing: bridge aguardando");
             SetRamoniaLootStatus("Loot: bridge aguardando");
             Sleep(500);
             continue;
