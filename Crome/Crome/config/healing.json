@@ -68,5 +68,6 @@
       "priority": 500,
       "trigger": "mana_percent"
     }
-  ]
+  ],
+  "ramonia_spell_backend": "bridge_v23_talkChannel"
 }
