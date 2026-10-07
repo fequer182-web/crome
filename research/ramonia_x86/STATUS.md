@@ -468,3 +468,19 @@ The Loot model is now target/tile-bound:
 - Loot now requires Bridge V20+; Target still requires V19+; Food still requires V16+.
 
 This implements the intended rule: only the body/object created on the Tile where the tracked target actually died is eligible for corpse opening. Decorative map corpses must remain ignored.
+
+
+## V21 / Crome v0.8.9 Rolling Loot
+
+After V20/v0.8.8 removed decorative corpse false positives, Loot still succeeded on only about one third of kills. The remaining failure mode is consistent with last-moment creature movement and death-transition timing.
+
+V21 changes the target-specific Loot baseline from one Tile to a rolling history of the last six confirmed Tiles occupied by the same live AttackTarget. Each frame stores the item identities already present on that Tile while the target was alive.
+
+On death:
+- Loot checks only those recent target Tiles;
+- an item is a corpse candidate only if it is newly present relative to that Tile's own live-target baseline;
+- decorative corpses/items already present on those Tiles remain excluded;
+- duplicate candidates are suppressed;
+- the baseline is never updated from a target snapshot with hpPercent=0, preventing a just-created corpse from being accidentally absorbed into the baseline.
+
+Crome v0.8.9 refreshes the target-specific Loot mark every worker cycle (~250-300 ms) and requires Bridge V21+ for Ramonia Loot. Target remains V19+ and Food remains V16+.
