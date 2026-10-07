@@ -86,6 +86,32 @@ struct RamoniaLightConfigUi {
     bool enabled{};
 };
 
+struct RamoniaHealingSpellRuleUi {
+    bool enabled{};
+    int hpPercent{};
+    double minMana{};
+    std::string spell;
+    std::uint32_t cooldownMs{850};
+    int priority{};
+};
+
+struct RamoniaHealingConfigUi {
+    bool enabled{};
+    std::vector<RamoniaHealingSpellRuleUi> spells;
+};
+
+struct RamoniaVitalsUi {
+    bool valid{};
+    double health{};
+    double maxHealth{};
+    double mana{};
+    double maxMana{};
+
+    double healthPercent() const {
+        return maxHealth>0.0 ? (health*100.0/maxHealth) : 0.0;
+    }
+};
+
 struct RamoniaLootConfigUi {
     bool enabled{};
     bool onlyList{true};
@@ -121,10 +147,12 @@ static std::mutex g_ramoniaMutex;
 static RamoniaTargetConfigUi g_ramoniaTargetConfig;
 static RamoniaFoodConfigUi g_ramoniaFoodConfig;
 static RamoniaLightConfigUi g_ramoniaLightConfig;
+static RamoniaHealingConfigUi g_ramoniaHealingConfig;
 static RamoniaLootConfigUi g_ramoniaLootConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
 static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
 static std::string g_ramoniaLightStatus = "Light aguardando";
+static std::string g_ramoniaHealingStatus = "Healing aguardando";
 static std::string g_ramoniaLootStatus = "Loot aguardando";
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
@@ -222,6 +250,41 @@ static void SetRamoniaLightStatus(const std::string& status) {
 static std::string RamoniaLightStatusText() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaLightStatus;
+}
+
+static void SetRamoniaHealingConfig(const RamoniaHealingConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaHealingConfig=cfg;
+}
+
+static RamoniaHealingConfigUi GetRamoniaHealingConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaHealingConfig;
+}
+
+static void SetRamoniaHealingStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaHealingStatus=status;
+}
+
+static std::string RamoniaHealingStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaHealingStatus;
+}
+
+static RamoniaVitalsUi ParseRamoniaVitals(const nlohmann::json& j) {
+    RamoniaVitalsUi out;
+    if (!j.is_object() || !j.value("ok",false) ||
+        !j.contains("player") || !j["player"].is_object())
+        return out;
+
+    const auto& p=j["player"];
+    out.health=p.value("health",0.0);
+    out.maxHealth=p.value("maxHealth",0.0);
+    out.mana=p.value("mana",0.0);
+    out.maxMana=p.value("maxMana",0.0);
+    out.valid=out.maxHealth>0.0 && out.health>=0.0 && out.mana>=0.0;
+    return out;
 }
 
 static void SetRamoniaLootConfig(const RamoniaLootConfigUi& cfg) {
