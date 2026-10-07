@@ -161,7 +161,7 @@ struct Profile {
         std::string type;
         bool valid{};
     };
-    Field health, maxHealth, mana, maxMana;
+    Field health, maxHealth, mana, maxMana, soul;
 };
 
 std::optional<Profile> g_profile;
@@ -566,6 +566,7 @@ Profile loadProfile(const std::string& path) {
     p.maxHealth = readField(fields, "maxHealth");
     p.mana = readField(fields, "mana");
     p.maxMana = readField(fields, "maxMana");
+    p.soul = readField(fields, "soul");
 
     const auto itemId = readField(fields, "itemId");
     const auto itemCount = readField(fields, "itemCount");
@@ -3220,7 +3221,7 @@ std::string playerResponse(const Profile& p, std::uintptr_t base) {
 
     std::uint32_t x{}, y{};
     std::uint8_t z{};
-    double hp{}, maxHp{}, mana{}, maxMana{};
+    double hp{}, maxHp{}, mana{}, maxMana{}, soul{};
     const bool ok =
         safeRead(localPlayer + p.posX, x) &&
         safeRead(localPlayer + p.posY, y) &&
@@ -3232,12 +3233,23 @@ std::string playerResponse(const Profile& p, std::uintptr_t base) {
 
     if (!ok) return R"({"ok":false,"cmd":"GET_PLAYER","error":"snapshot_read_failed"})";
 
+    const bool soulAvailable =
+        p.soul.valid &&
+        readNumber(localPlayer + p.soul.offset,p.soul.type,soul) &&
+        std::isfinite(soul) &&
+        soul >= 0.0;
+
     std::ostringstream o;
     o << std::fixed << std::setprecision(2)
       << "{\"ok\":true,\"cmd\":\"GET_PLAYER\",\"player\":{"
       << "\"health\":" << hp << ",\"maxHealth\":" << maxHp
       << ",\"mana\":" << mana << ",\"maxMana\":" << maxMana
-      << ",\"position\":{\"x\":" << x << ",\"y\":" << y << ",\"z\":"
+      << ",\"soulAvailable\":" << (soulAvailable ? "true" : "false");
+
+    if (soulAvailable)
+        o << ",\"soul\":" << soul;
+
+    o << ",\"position\":{\"x\":" << x << ",\"y\":" << y << ",\"z\":"
       << static_cast<unsigned>(z) << "}}}";
     return o.str();
 }
@@ -3783,7 +3795,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":25,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":26,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -3950,7 +3962,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V25 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V26 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
