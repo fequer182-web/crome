@@ -886,6 +886,34 @@ bool refreshTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz) {
     return true;
 }
 
+void invalidateTileCacheForFloorChange(
+    std::uint32_t px,
+    std::uint32_t py,
+    std::uint8_t pz) {
+
+    AcquireSRWLockExclusive(&g_tileCacheLock);
+    g_tileCache.clear();
+    g_tileCacheTick = 0;
+    g_tileCacheOriginX = px;
+    g_tileCacheOriginY = py;
+    g_tileCacheOriginZ = pz;
+    ++g_tileCacheGeneration;
+    ReleaseSRWLockExclusive(&g_tileCacheLock);
+
+    // A Loot baseline contains Tile* addresses from the old floor. It must
+    // never survive a z transition.
+    AcquireSRWLockExclusive(&g_lootBaselineLock);
+    g_lootBaseline = {};
+    ReleaseSRWLockExclusive(&g_lootBaselineLock);
+
+    AcquireSRWLockExclusive(&g_lootCandidateLock);
+    g_lastLootCandidates.clear();
+    ReleaseSRWLockExclusive(&g_lootCandidateLock);
+
+    logLine("[TILE CACHE] invalidated immediately on floor change -> z=" +
+            std::to_string(static_cast<unsigned>(pz)));
+}
+
 bool ensureTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz,
                      bool force = false) {
     const auto info = tileCacheInfo();
@@ -893,9 +921,16 @@ bool ensureTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz,
     const auto dy = py > info.originY ? py - info.originY : info.originY - py;
     const auto moved = std::max(dx, dy);
 
+    // Floor changes are special: never reuse Tile* addresses from the
+    // previous z, even briefly. Invalidate immediately and let the next poll
+    // rebuild the cache after the client has had time to settle.
+    if (info.count != 0 && info.originZ != pz) {
+        invalidateTileCacheForFloorChange(px, py, pz);
+        return false;
+    }
+
     bool refresh = force || info.count == 0;
     if (!refresh && info.ageMs >= kTileCacheMaxAgeMs) refresh = true;
-    if (!refresh && info.originZ != pz && info.ageMs >= 1000) refresh = true;
     if (!refresh && moved >= kTileCacheMoveRefresh &&
         info.ageMs >= kTileCacheMinRefreshMs)
         refresh = true;
