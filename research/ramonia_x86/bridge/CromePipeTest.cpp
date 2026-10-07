@@ -117,6 +117,107 @@ struct MonsterView {
     std::uint32_t distance{};
 };
 
+struct ContainerItemView {
+    std::uint32_t slot{};
+    std::uint32_t id{};
+    std::uint32_t count{};
+};
+
+struct ContainerView {
+    std::uint32_t id{};
+    std::string name;
+    std::uint32_t capacity{};
+    std::vector<ContainerItemView> items;
+};
+
+std::vector<ContainerView> parseOpenContainers(const std::string& json) {
+    std::vector<ContainerView> out;
+    try {
+        const auto root = crome::json::parse(json);
+        const auto* containers = root.get("containers");
+        if (!containers || !containers->isArray()) return out;
+
+        for (const auto& v : containers->array()) {
+            if (!v.isObject()) continue;
+            const auto* id = v.get("id");
+            const auto* name = v.get("name");
+            const auto* capacity = v.get("capacity");
+            const auto* items = v.get("items");
+            if (!id || !id->isNumber() || !items || !items->isArray())
+                continue;
+
+            ContainerView c;
+            c.id = static_cast<std::uint32_t>(id->number());
+            if (name && name->isString()) c.name = name->string();
+            if (capacity && capacity->isNumber())
+                c.capacity = static_cast<std::uint32_t>(capacity->number());
+
+            for (const auto& iv : items->array()) {
+                if (!iv.isObject()) continue;
+                const auto* slot = iv.get("slot");
+                const auto* itemId = iv.get("id");
+                const auto* count = iv.get("count");
+                if (!slot || !slot->isNumber() || !itemId || !itemId->isNumber())
+                    continue;
+
+                ContainerItemView item;
+                item.slot = static_cast<std::uint32_t>(slot->number());
+                item.id = static_cast<std::uint32_t>(itemId->number());
+                item.count = (count && count->isNumber())
+                    ? static_cast<std::uint32_t>(count->number()) : 1u;
+                c.items.push_back(item);
+            }
+            out.push_back(std::move(c));
+        }
+    } catch (...) {}
+    return out;
+}
+
+bool containerHasItem(const ContainerView& c, std::uint32_t itemId) {
+    for (const auto& item : c.items)
+        if (item.id == itemId) return true;
+    return false;
+}
+
+bool hasContainerId(const std::vector<ContainerView>& containers,
+                    std::uint32_t id) {
+    for (const auto& c : containers)
+        if (c.id == id) return true;
+    return false;
+}
+
+bool lootDiffHasCorpseCandidate(const std::string& json,
+                                std::uint32_t corpseItemId,
+                                std::string& removedMonsterName) {
+    removedMonsterName.clear();
+    try {
+        const auto root = crome::json::parse(json);
+        const auto* removed = root.get("removedMonsters");
+        const auto* added = root.get("addedItems");
+        if (!removed || !removed->isArray() || removed->array().empty() ||
+            !added || !added->isArray())
+            return false;
+
+        for (const auto& rv : removed->array()) {
+            if (!rv.isObject()) continue;
+            const auto* name = rv.get("name");
+            if (name && name->isString()) {
+                removedMonsterName = name->string();
+                break;
+            }
+        }
+
+        for (const auto& av : added->array()) {
+            if (!av.isObject()) continue;
+            const auto* id = av.get("id");
+            if (id && id->isNumber() &&
+                static_cast<std::uint32_t>(id->number()) == corpseItemId)
+                return true;
+        }
+    } catch (...) {}
+    return false;
+}
+
 std::string lowerCopy(std::string value) {
     for (auto& c : value)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -255,6 +356,152 @@ int runTargetLoop(DWORD pid, const std::string& wantedName) {
     }
 }
 
+int runAutoLootCycle(DWORD pid,
+                     std::uint32_t corpseItemId,
+                     std::uint32_t targetContainerId,
+                     std::uint32_t lootItemId,
+                     std::uint32_t waitMs) {
+    std::cout << "[AUTO LOOT - ONE CYCLE]\n"
+              << "Corpse itemId : " << corpseItemId << "\n"
+              << "Loot itemId   : " << lootItemId << "\n"
+              << "Target bag ID : " << targetContainerId << "\n"
+              << "Wait timeout  : " << waitMs << " ms\n\n";
+
+    std::string beforeJson;
+    if (!requestRaw(pid, R"({"cmd":"GET_OPEN_CONTAINERS"})", beforeJson, false)) {
+        std::cout << "[FALHOU] Nao foi possivel ler os containers antes do loot.\n";
+        return 2;
+    }
+    const auto before = parseOpenContainers(beforeJson);
+    if (!hasContainerId(before, targetContainerId)) {
+        std::cout << "[FALHOU] A bag destino ID " << targetContainerId
+                  << " nao esta aberta. Abra a bag e tente novamente.\n";
+        return 2;
+    }
+
+    std::string markJson;
+    if (!requestRaw(pid, R"({"cmd":"LOOT_MARK"})", markJson, false)) {
+        std::cout << "[FALHOU] LOOT_MARK nao foi aceito.\n";
+        return 2;
+    }
+
+    std::cout << "[LOOT] Snapshot criado. Agora mate UMA criatura.\n"
+              << "[LOOT] Aguardando corpse " << corpseItemId << "...\n";
+
+    const auto started = std::chrono::steady_clock::now();
+    std::string removedMonsterName;
+    bool corpseFound = false;
+
+    while (!corpseFound) {
+        std::string diffJson;
+        if (requestRaw(pid, R"({"cmd":"LOOT_DIFF"})", diffJson, false) &&
+            lootDiffHasCorpseCandidate(
+                diffJson, corpseItemId, removedMonsterName)) {
+            corpseFound = true;
+            break;
+        }
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        if (elapsed >= static_cast<long long>(waitMs)) {
+            std::cout << "[FALHOU] Timeout aguardando corpse " << corpseItemId
+                      << ".\n";
+            return 2;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    std::cout << "[LOOT] Corpse detectado";
+    if (!removedMonsterName.empty())
+        std::cout << " apos morte de " << removedMonsterName;
+    std::cout << ". Abrindo...\n";
+
+    const std::string useCmd =
+        "{\"cmd\":\"USE_LOOT_ITEM\",\"itemId\":" +
+        std::to_string(corpseItemId) + "}";
+
+    std::string useJson;
+    if (!requestRaw(pid, useCmd, useJson, false)) {
+        std::cout << "[FALHOU] USE_LOOT_ITEM falhou: " << useJson << "\n";
+        return 2;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    std::string afterOpenJson;
+    if (!requestRaw(pid, R"({"cmd":"GET_OPEN_CONTAINERS"})", afterOpenJson, false)) {
+        std::cout << "[FALHOU] Corpse foi usado, mas nao consegui reler os containers.\n";
+        return 2;
+    }
+    const auto afterOpen = parseOpenContainers(afterOpenJson);
+
+    const ContainerView* source = nullptr;
+
+    // Prefer a container that did not exist before the corpse was opened.
+    for (const auto& c : afterOpen) {
+        if (c.id == targetContainerId || hasContainerId(before, c.id))
+            continue;
+        if (containerHasItem(c, lootItemId)) {
+            source = &c;
+            break;
+        }
+    }
+
+    // Fallback: any non-target open container containing the requested loot.
+    if (!source) {
+        for (const auto& c : afterOpen) {
+            if (c.id == targetContainerId) continue;
+            if (containerHasItem(c, lootItemId)) {
+                source = &c;
+                break;
+            }
+        }
+    }
+
+    if (!source) {
+        std::cout << "[LOOT] Corpse abriu, mas item " << lootItemId
+                  << " nao foi encontrado nele. Containers atuais:\n";
+        for (const auto& c : afterOpen)
+            std::cout << "       id=" << c.id << " name=" << c.name
+                      << " items=" << c.items.size() << "\n";
+        return 3;
+    }
+
+    std::cout << "[LOOT] Source container id=" << source->id
+              << " name=" << source->name
+              << " contem item " << lootItemId << ". Movendo...\n";
+
+    const std::string moveCmd =
+        "{\"cmd\":\"MOVE_CONTAINER_ITEM\",\"sourceContainerId\":" +
+        std::to_string(source->id) +
+        ",\"targetContainerId\":" + std::to_string(targetContainerId) +
+        ",\"itemId\":" + std::to_string(lootItemId) + "}";
+
+    std::string moveJson;
+    if (!requestRaw(pid, moveCmd, moveJson, false)) {
+        std::cout << "[FALHOU] MOVE_CONTAINER_ITEM falhou: " << moveJson << "\n";
+        return 2;
+    }
+
+    std::cout << "[OK] Loot movido. " << moveJson << "\n";
+
+    std::string finalJson;
+    if (requestRaw(pid, R"({"cmd":"GET_OPEN_CONTAINERS"})", finalJson, false)) {
+        const auto finalContainers = parseOpenContainers(finalJson);
+        for (const auto& c : finalContainers) {
+            if (c.id != targetContainerId) continue;
+            std::uint32_t total = 0;
+            for (const auto& item : c.items)
+                if (item.id == lootItemId) total += item.count;
+            std::cout << "[LOOT] Bag destino agora possui total="
+                      << total << " do item " << lootItemId << ".\n";
+            break;
+        }
+    }
+
+    return 0;
+}
+
 int runAutoFoodLoop(DWORD pid,
                     std::uint32_t itemId,
                     std::uint32_t successDelayMs,
@@ -344,6 +591,10 @@ int main(int argc, char** argv) {
     std::uint32_t autoFoodItemId = 2696;
     std::uint32_t autoFoodSuccessDelayMs = 60000;
     std::uint32_t autoFoodRetryDelayMs = 2000;
+    std::uint32_t lootCycleCorpseId = 2813;
+    std::uint32_t lootCycleTargetContainerId = 0;
+    std::uint32_t lootCycleItemId = 2148;
+    std::uint32_t lootCycleWaitMs = 30000;
     bool useContainerProvided = false;
     bool sourceContainerProvided = false;
     bool targetContainerProvided = false;
@@ -385,6 +636,27 @@ int main(int argc, char** argv) {
         }
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "autoloot" || mode == "lootcycle") {
+        if (argc >= 3) {
+            try { lootCycleCorpseId = static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { lootCycleTargetContainerId = static_cast<std::uint32_t>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+        if (argc >= 5) {
+            try { lootCycleItemId = static_cast<std::uint32_t>(std::stoul(argv[4])); }
+            catch (...) {}
+        }
+        if (argc >= 6) {
+            try { lootCycleWaitMs = static_cast<std::uint32_t>(std::stoul(argv[5])); }
+            catch (...) {}
+        }
+        if (argc >= 7) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[6])); }
             catch (...) {}
         }
     } else if (mode == "autofood") {
@@ -526,6 +798,21 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok ? "[OK] Game::use foi chamado no holder do Item. Confira se o corpse abriu.\n"
                                    : "[FALHOU] USE_LOOT_ITEM nao foi confirmado.\n");
         return ok ? 0 : 2;
+    }
+
+    if (mode == "autoloot" || mode == "lootcycle") {
+        if (!lootCycleCorpseId || lootCycleCorpseId > 0xFFFFu ||
+            !lootCycleItemId || lootCycleItemId > 0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe autoloot [corpseId=2813] [targetBagId=0] [lootItemId=2148] [waitMs=30000] [PID]\n";
+            return 1;
+        }
+        if (lootCycleWaitMs < 1000) lootCycleWaitMs = 1000;
+        return runAutoLootCycle(
+            pid,
+            lootCycleCorpseId,
+            lootCycleTargetContainerId,
+            lootCycleItemId,
+            lootCycleWaitMs);
     }
 
     if (mode == "autofood") {
