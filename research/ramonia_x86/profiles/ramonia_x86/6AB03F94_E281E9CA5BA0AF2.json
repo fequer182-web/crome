@@ -716,7 +716,10 @@
           "abiType": "msvc_string_ref",
           "status": "runtime_confirmed"
         }
-      ]
+      ],
+      "messageSayValue": 1,
+      "defaultChannel": 0,
+      "messageSayStatus": "otclient_family_game_talk_wrapper_crosschecked_pending_live"
     }
   },
   "gameLayout": {
