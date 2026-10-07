@@ -638,6 +638,7 @@ int main(int argc, char** argv) {
     std::string mode = "baseline";
     std::uint32_t creatureId = 0;
     std::string wantedName;
+    std::string sayMessage="exura";
     std::uint32_t lootItemId = 2813;
     std::uint32_t sourceContainerId = 0;
     std::uint32_t targetContainerId = 0;
@@ -681,6 +682,12 @@ int main(int argc, char** argv) {
         }
     } else if (mode == "target" || mode == "targetscan") {
         if (argc >= 3) wantedName = argv[2];
+        if (argc >= 4) {
+            try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "say" || mode == "spell") {
+        if (argc >= 3) sayMessage = argv[2];
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
             catch (...) {}
@@ -792,6 +799,27 @@ int main(int argc, char** argv) {
               << "PIPE : \\\\.\\pipe\\Crome.Ramonia." << pid << "\n\n";
 
     bool ok = true;
+
+    if (mode == "say" || mode == "spell") {
+        if (sayMessage.empty() || sayMessage.size()>15) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe say \"exura\" [PID]\n";
+            return 1;
+        }
+        for(const unsigned char c:sayMessage) {
+            if(c<0x20 || c>0x7E || c=='"' || c=='\\') {
+                std::cout << "[ERRO] Mensagem deve ser ASCII simples, sem aspas/backslash.\n";
+                return 1;
+            }
+        }
+        std::cout << "[SAY - Game::talkChannel]\n";
+        const std::string cmd=
+            "{\"cmd\":\"SAY\",\"message\":\""+sayMessage+"\"}";
+        ok &= request(pid,cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] SAY enviado pelo talkChannel interno. Confira a magia no jogo.\n"
+            : "[FALHOU] SAY nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
 
     if (mode == "lightstatus") {
         std::cout << "[GET_LIGHT - PROFILE DRIVEN]\n";
