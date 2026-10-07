@@ -1666,6 +1666,11 @@ static bool HealingRuntimeReady() {
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 23);
 }
 
+static bool RuneRuntimeReady() {
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 26);
+}
+
 static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 21);
