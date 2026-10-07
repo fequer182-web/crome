@@ -1218,6 +1218,11 @@ static bool LightRuntimeReady() {
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 22);
 }
 
+static bool HealingRuntimeReady() {
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 23);
+}
+
 static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 21);
