@@ -20,5 +20,7 @@
   "auto_detect_corpse": true,
   "learned_corpse_ids": [
     2813
-  ]
+  ],
+  "nested_container_ids": [],
+  "recursive_container_depth": 3
 }
