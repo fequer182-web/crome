@@ -265,3 +265,10 @@ The x64 pipe client now also exposes a continuous policy loop:
 `autofood [itemId=2696] [successDelayMs=60000] [retryDelayMs=2000] [PID]`
 
 The loop lives outside the x86 bridge. It repeatedly asks the bridge to use the configured food in any open container. After a successful use it waits `successDelayMs`; while food is absent it polls using `retryDelayMs`. This preserves the architecture rule that the x64 Crome layer owns bot policy/scheduling while the x86 bridge remains a validated ABI adapter.
+
+
+## V16 UI integration and multi-container live confirmation
+
+Extended live Auto Food validation confirmed that `USE_CONTAINER_ITEM` searches across multiple open containers rather than only Bag id=0. Cheese id `2696` was consumed successfully from container ids 0, 1, 2 and 3 during one continuous `autofood` session. When no matching food was present, the loop waited; when a new cheese appeared later, it was detected and consumed without restarting the client.
+
+The Crome UI now wires the Tools -> Food Eater control to the Ramonia V16 bridge. Food policy remains in the external x64 Crome layer, with configurable Food ID and interval, while the injected x86 bridge remains the validated ABI adapter. Other Tools remain disabled on Ramonia until their own backends are confirmed.
