@@ -500,6 +500,7 @@ struct RamoniaLookCaptureUi {
     std::uint64_t nextArmMs{};
 };
 static RamoniaLookCaptureUi g_ramoniaLookCapture;
+static std::atomic<std::uint32_t> g_ramoniaPassiveLookId{0};
 
 static void UpdateRamoniaPassiveLookId() {
     const DWORD pid=g_ramoniaPid.load();
@@ -526,13 +527,7 @@ static void UpdateRamoniaPassiveLookId() {
                 if (id) {
                     g_ramoniaLookCapture.id=id;
 
-                    // Feed the existing Runtime / Build display.
-                    g_lastLook.valid=true;
-                    g_lastLook.id=static_cast<int>(id);
-                    g_lastLook.onGround=false;
-                    g_lastLook.x=0;
-                    g_lastLook.y=0;
-                    g_lastLook.z=0;
+                    g_ramoniaPassiveLookId.store(id);
                 }
             }
 
@@ -2726,6 +2721,18 @@ static void DrawHotkeys(const Theme& t) {
 static void DrawFooter(const Theme& t) {
     RefreshLookResult();
     UpdateRamoniaPassiveLookId();
+
+    if(g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=25){
+        const auto id=g_ramoniaPassiveLookId.load();
+        if(id){
+            g_lastLook.valid=true;
+            g_lastLook.id=static_cast<int>(id);
+            g_lastLook.onGround=false;
+            g_lastLook.x=0;
+            g_lastLook.y=0;
+            g_lastLook.z=0;
+        }
+    }
     ImGui::PushStyleColor(ImGuiCol_ChildBg,t.panel); ImGui::PushStyleColor(ImGuiCol_Border,t.border); ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,7);
     ImGui::BeginChild("footer",ImVec2(0,92),ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     ImDrawList* d=ImGui::GetWindowDrawList(); ImVec2 wp=ImGui::GetWindowPos(); DrawCardIcon(d,CardIcon::Info,ImVec2(wp.x+17,wp.y+15),Col(t.blue));
