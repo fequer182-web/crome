@@ -1562,10 +1562,10 @@ std::string lootMarkTargetResponse(std::uint32_t targetId) {
     // Critical safety rule: if the requested target is already gone, DO NOT
     // overwrite the previous good baseline. That preserved baseline is the
     // last confirmed tile where the creature was alive.
-    if (!tracked) {
+    if (!tracked || tracked->monster.hpPercent == 0) {
         std::ostringstream o;
         o << "{\"ok\":false,\"cmd\":\"LOOT_MARK_TARGET\","
-          << "\"error\":\"target_not_visible\",\"targetId\":" << targetId << "}";
+          << "\"error\":\"target_not_alive\",\"targetId\":" << targetId << "}";
         return o.str();
     }
 
