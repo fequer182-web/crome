@@ -135,6 +135,8 @@ struct Profile {
     bool talkModeArgConfirmed{};
     bool talkChannelArgConfirmed{};
     bool talkMessageMsvcStringRefConfirmed{};
+    std::uint32_t talkSayModeValue{1};
+    std::uint32_t talkDefaultChannel{};
 
     std::uintptr_t attackMethodRva{};
     bool attackRuntimeConfirmed{};
@@ -409,6 +411,10 @@ Profile loadProfile(const std::string& path) {
             p.talkChannelMethodRva = static_cast<std::uintptr_t>(*n);
         p.talkChannelRuntimeConfirmed =
             stringValue(talkChannel->get("status")) == "runtime_confirmed";
+        if (const auto n=integerValue(talkChannel->get("messageSayValue")))
+            p.talkSayModeValue=static_cast<std::uint32_t>(*n);
+        if (const auto n=integerValue(talkChannel->get("defaultChannel")))
+            p.talkDefaultChannel=static_cast<std::uint32_t>(*n);
 
         const auto* args = talkChannel->get("args");
         if (args && args->isArray() && args->array().size() >= 3) {
@@ -3203,8 +3209,8 @@ std::string sayResponse(const std::string& message) {
     // OTC-family Game::talk is talkChannel(MessageSay,0,message).
     // MessageSay=1 is cross-checked against upstream OTClient/OTCv8 source;
     // the Ramonia talkChannel ABI itself is runtime-confirmed in this profile.
-    g_pendingTalkMode=1;
-    g_pendingTalkChannel=0;
+    g_pendingTalkMode=g_profile->talkSayModeValue;
+    g_pendingTalkChannel=g_profile->talkDefaultChannel;
     InterlockedExchange(&g_pendingActionKind,PendingTalk);
 
     DWORD win32{};
@@ -3223,7 +3229,8 @@ std::string sayResponse(const std::string& message) {
     std::ostringstream o;
     o << "{\"ok\":" << (code==1?"true":"false")
       << ",\"cmd\":\"SAY\",\"result\":\"" << actionCodeText(code)
-      << "\",\"mode\":1,\"channel\":0"
+      << "\",\"mode\":" << g_profile->talkSayModeValue
+      << ",\"channel\":" << g_profile->talkDefaultChannel
       << ",\"message\":\"" << jsonEscape(message) << "\"}";
     return o.str();
 }
