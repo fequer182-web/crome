@@ -111,12 +111,22 @@ struct RamoniaHealingConfigUi {
     std::vector<RamoniaHealingItemRuleUi> items;
 };
 
+struct RamoniaRuneConfigUi {
+    bool enabled{};
+    int manaPercent{70};
+    int soulMin{5};
+    std::string spell{"exura"};
+    std::uint32_t cooldownMs{1000};
+};
+
 struct RamoniaVitalsUi {
     bool valid{};
     double health{};
     double maxHealth{};
     double mana{};
     double maxMana{};
+    bool soulAvailable{};
+    double soul{};
 
     double healthPercent() const {
         return maxHealth>0.0 ? (health*100.0/maxHealth) : 0.0;
@@ -165,11 +175,13 @@ static RamoniaTargetConfigUi g_ramoniaTargetConfig;
 static RamoniaFoodConfigUi g_ramoniaFoodConfig;
 static RamoniaLightConfigUi g_ramoniaLightConfig;
 static RamoniaHealingConfigUi g_ramoniaHealingConfig;
+static RamoniaRuneConfigUi g_ramoniaRuneConfig;
 static RamoniaLootConfigUi g_ramoniaLootConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
 static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
 static std::string g_ramoniaLightStatus = "Light aguardando";
 static std::string g_ramoniaHealingStatus = "Healing aguardando";
+static std::string g_ramoniaRuneStatus = "Trainer aguardando";
 static std::string g_ramoniaLootStatus = "Loot aguardando";
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
@@ -289,6 +301,26 @@ static std::string RamoniaHealingStatusText() {
     return g_ramoniaHealingStatus;
 }
 
+static void SetRamoniaRuneConfig(const RamoniaRuneConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaRuneConfig=cfg;
+}
+
+static RamoniaRuneConfigUi GetRamoniaRuneConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaRuneConfig;
+}
+
+static void SetRamoniaRuneStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaRuneStatus=status;
+}
+
+static std::string RamoniaRuneStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaRuneStatus;
+}
+
 static RamoniaVitalsUi ParseRamoniaVitals(const nlohmann::json& j) {
     RamoniaVitalsUi out;
     if (!j.is_object() || !j.value("ok",false) ||
@@ -300,7 +332,10 @@ static RamoniaVitalsUi ParseRamoniaVitals(const nlohmann::json& j) {
     out.maxHealth=p.value("maxHealth",0.0);
     out.mana=p.value("mana",0.0);
     out.maxMana=p.value("maxMana",0.0);
-    out.valid=out.maxHealth>0.0 && out.health>=0.0 && out.mana>=0.0;
+    out.soulAvailable=p.value("soulAvailable",false);
+    out.soul=out.soulAvailable ? p.value("soul",0.0) : 0.0;
+    out.valid=out.maxHealth>0.0 && out.maxMana>=0.0 &&
+              out.health>=0.0 && out.mana>=0.0;
     return out;
 }
 
