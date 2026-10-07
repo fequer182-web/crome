@@ -113,6 +113,10 @@ struct Profile {
     bool useRuntimeConfirmed{};
     bool useItemSharedRefConfirmed{};
 
+    std::uintptr_t lookMethodRva{};
+    bool lookRuntimeConfirmed{};
+    bool lookItemSharedRefConfirmed{};
+
     std::uintptr_t useWithMethodRva{};
     bool useWithRuntimeConfirmed{};
     bool useWithItemSharedRefConfirmed{};
@@ -171,6 +175,20 @@ struct WorldLightTargetState {
 std::vector<WorldLightTargetState> g_worldLightTargets;
 bool g_worldLightEnabled{};
 constexpr float kWorldLightHackAmbient = 1.0f;
+
+// One-shot real Game::look capture. No breakpoint/VEH remains armed while idle.
+SRWLOCK g_lookCaptureLock = SRWLOCK_INIT;
+PVOID g_lookVehHandle{};
+HANDLE g_lookCaptureEvent{};
+volatile LONG g_lookCaptureWorkerActive{};
+volatile LONG g_lookCaptureArmed{};
+volatile LONG g_lookCaptureCaptured{};
+std::uintptr_t g_lookCaptureAddress{};
+std::uint8_t g_lookCaptureOriginalByte{};
+std::uint32_t g_lookCapturedId{};
+std::uintptr_t g_lookCapturedHolder{};
+std::uintptr_t g_lookCapturedItem{};
+ULONGLONG g_lookCapturedTick{};
 
 SRWLOCK g_monsterCacheLock = SRWLOCK_INIT;
 ULONGLONG g_monsterCacheTick{};
@@ -390,6 +408,24 @@ Profile loadProfile(const std::string& path) {
                 stringValue(a0.get("semantic")) == "Item" &&
                 stringValue(a0.get("abiType")) == "shared_object_ptr_ref" &&
                 stringValue(a0.get("status")) == "runtime_confirmed";
+        }
+    }
+
+    const auto* look = child(actions, "look");
+    if (look && look->isObject()) {
+        if (const auto n=integerValue(look->get("methodRva")))
+            p.lookMethodRva=static_cast<std::uintptr_t>(*n);
+        p.lookRuntimeConfirmed=
+            stringValue(look->get("status"))=="runtime_confirmed";
+
+        const auto* args=look->get("args");
+        if (args && args->isArray() && !args->array().empty()) {
+            const auto& a0=args->array()[0];
+            p.lookItemSharedRefConfirmed=
+                a0.isObject() &&
+                stringValue(a0.get("semantic"))=="Item" &&
+                stringValue(a0.get("abiType"))=="shared_object_ptr_ref" &&
+                stringValue(a0.get("status"))=="runtime_confirmed";
         }
     }
 
