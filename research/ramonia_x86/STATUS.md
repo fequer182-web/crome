@@ -561,3 +561,44 @@ Crome v0.9.2 changes scheduling only:
 - new target acquisition ignores hpPercent=0 creatures.
 
 Bridge remains V22; no Game::attack ABI, dispatcher, Light backend, or Loot bridge contract changed in this step.
+
+
+## Bridge V23 / Crome v0.9.3 Healing + Nested Loot
+
+### Internal spell / SAY
+Ramonia profile already had Game::talkChannel runtime-confirmed:
+- method RVA: 0x79750
+- x86 thiscall-like
+- arg0 MessageMode u32
+- arg1 Channel u32
+- arg2 MSVC std::string const-ref
+
+For the normal SAY path the build profile now stores:
+- messageSayValue: 1
+- defaultChannel: 0
+- source/status: OTC-family Game::talk -> talkChannel(MessageSay, 0, message), pending Ramonia live spell confirmation.
+
+Bridge V23 adds an on-demand PendingTalk action through the same temporary game-thread dispatcher used by the stable native actions. Because the bridge is MinGW while Ramonia uses MSVC ABI, it does not pass a MinGW std::string. It builds the 24-byte x86 MSVC small-string layout manually and intentionally limits SAY messages to 15 ASCII characters. This covers exura, exura gran and exura vita.
+
+Pipe diagnostic:
+- CromePipeTest_x64.exe say "exura"
+
+Crome Healing:
+- spell Healing is available on Ramonia with Bridge V23+;
+- reads GET_PLAYER HP/maxHP/mana;
+- chooses highest-priority matching spell rule: High -> Mid -> Light;
+- default cooldown remains 850 ms;
+- UH/Mana Fluid/Life Fluid remain native-only until their self-use ABI is validated.
+
+### Recursive nested corpse containers
+Some monsters can place loot inside a bag/container inside the corpse. Crome v0.9.3 adds safe recursive Loot:
+- loot.json field: nested_container_ids
+- UI field: Nested bag IDs
+- existing global Walker IDs -> Corpse Bag IDs is used as fallback when nested_container_ids is empty
+- only explicitly configured container item IDs are opened; arbitrary unknown corpse items are never auto-used
+- direct configured loot is moved first, then configured nested bags are opened and their contents processed
+- nested depth is capped at 3
+- nested containers are opened through the already-confirmed USE_CONTAINER_ITEM sourceContainerId path
+- normal corpse learning / rolling death-tile logic remains unchanged.
+
+The nested-bag feature requires the actual bag item ID for the server/build and therefore remains calibration-dependent until a live nested corpse is observed.
