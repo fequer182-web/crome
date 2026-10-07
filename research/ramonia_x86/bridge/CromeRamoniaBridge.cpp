@@ -1080,11 +1080,21 @@ struct TileItemDiagnostic {
     std::uint32_t tileThingCount{};
 };
 
+struct LootTargetTileFrame {
+    std::uintptr_t tileAddress{};
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint8_t z{};
+    ULONGLONG tick{};
+    std::vector<TileItemDiagnostic> items;
+};
+
 struct LootBaselineState {
     bool valid{};
     std::uint64_t tileGeneration{};
     std::uint32_t trackedTargetId{};
     std::uintptr_t trackedTargetTile{};
+    std::vector<LootTargetTileFrame> targetTileHistory;
     std::vector<std::uintptr_t> tiles;
     std::vector<TileItemDiagnostic> items;
     std::vector<TileMonsterDiagnostic> monsters;
@@ -1559,7 +1569,41 @@ std::string lootMarkTargetResponse(std::uint32_t targetId) {
         return o.str();
     }
 
+    std::vector<TileItemDiagnostic> targetTileItems;
+    for (const auto& item : items) {
+        if (item.tileAddress == tracked->tileAddress)
+            targetTileItems.push_back(item);
+    }
+
     AcquireSRWLockExclusive(&g_lootBaselineLock);
+
+    // A different creature ID starts a fresh death-tile history. For the same
+    // target, keep a short rolling history so a last-moment step cannot move
+    // the corpse outside the single most recent sample.
+    if (g_lootBaseline.trackedTargetId != targetId)
+        g_lootBaseline.targetTileHistory.clear();
+
+    LootTargetTileFrame frame;
+    frame.tileAddress = tracked->tileAddress;
+    frame.x = tracked->monster.x;
+    frame.y = tracked->monster.y;
+    frame.z = tracked->monster.z;
+    frame.tick = GetTickCount64();
+    frame.items = std::move(targetTileItems);
+
+    if (!g_lootBaseline.targetTileHistory.empty() &&
+        g_lootBaseline.targetTileHistory.back().tileAddress == frame.tileAddress) {
+        g_lootBaseline.targetTileHistory.back() = std::move(frame);
+    } else {
+        g_lootBaseline.targetTileHistory.push_back(std::move(frame));
+        constexpr std::size_t kLootTargetTileHistory = 6;
+        if (g_lootBaseline.targetTileHistory.size() > kLootTargetTileHistory)
+            g_lootBaseline.targetTileHistory.erase(
+                g_lootBaseline.targetTileHistory.begin(),
+                g_lootBaseline.targetTileHistory.begin() +
+                (g_lootBaseline.targetTileHistory.size() - kLootTargetTileHistory));
+    }
+
     g_lootBaseline.valid = true;
     g_lootBaseline.tileGeneration = cache.generation;
     g_lootBaseline.trackedTargetId = targetId;
@@ -1567,6 +1611,7 @@ std::string lootMarkTargetResponse(std::uint32_t targetId) {
     g_lootBaseline.tiles = tiles;
     g_lootBaseline.items = items;
     g_lootBaseline.monsters = monsters;
+    const auto historyCount = g_lootBaseline.targetTileHistory.size();
     ReleaseSRWLockExclusive(&g_lootBaselineLock);
 
     AcquireSRWLockExclusive(&g_lootCandidateLock);
@@ -1578,6 +1623,7 @@ std::string lootMarkTargetResponse(std::uint32_t targetId) {
       << "\"targetId\":" << targetId
       << ",\"targetName\":\"" << jsonEscape(tracked->monster.name) << "\""
       << ",\"targetTileSlot\":" << tileSlotOf(tiles, tracked->tileAddress)
+      << ",\"targetTileHistory\":" << historyCount
       << ",\"tileGeneration\":" << cache.generation
       << ",\"baselineItems\":" << items.size()
       << "}";
@@ -1625,10 +1671,39 @@ std::string lootDiffResponse() {
                 break;
             }
         }
+
         if (trackedRemoved) {
-            for (const auto& item : added) {
-                if (item.tileAddress == baseline.trackedTargetTile)
-                    deathTileCandidates.push_back(item);
+            auto pushCandidateUnique=[](
+                std::vector<TileItemDiagnostic>& dst,
+                const TileItemDiagnostic& item) {
+                for (const auto& existing : dst) {
+                    if (sameItemIdentity(existing,item))
+                        return;
+                }
+                dst.push_back(item);
+            };
+
+            // Compare each recently confirmed target tile against the exact
+            // item identities that existed there while the target was alive.
+            // Decorative corpses/objects were already present in frame.items,
+            // therefore they are never emitted as "new".
+            for (auto fit = baseline.targetTileHistory.rbegin();
+                 fit != baseline.targetTileHistory.rend(); ++fit) {
+
+                const auto nowOnTile =
+                    scanTileItemsFromSnapshot({fit->tileAddress});
+
+                for (const auto& nowItem : nowOnTile) {
+                    bool existed = false;
+                    for (const auto& oldItem : fit->items) {
+                        if (sameItemIdentity(nowItem,oldItem)) {
+                            existed = true;
+                            break;
+                        }
+                    }
+                    if (!existed)
+                        pushCandidateUnique(deathTileCandidates,nowItem);
+                }
             }
         }
     } else if (!removed.empty()) {
@@ -1653,7 +1728,8 @@ std::string lootDiffResponse() {
       << (baseline.trackedTargetTile
             ? tileSlotOf(tiles, baseline.trackedTargetTile)
             : 0xFFFFFFFFu)
-      << ",\"candidatePolicy\":\"strict_tracked_target_death_tile\","
+      << ",\"trackedTargetTileHistory\":" << baseline.targetTileHistory.size()
+      << ",\"candidatePolicy\":\"rolling_tracked_target_death_tiles\","
       << "\"addedCount\":" << emittedItems.size()
       << ",\"addedItems\":[";
 
@@ -2701,7 +2777,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":20,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":21,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
