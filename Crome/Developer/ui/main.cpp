@@ -123,6 +123,7 @@ struct RamoniaLootConfigUi {
 };
 
 struct RamoniaContainerItemUi {
+    std::uint32_t slot{};
     std::uint32_t id{};
     std::uint32_t count{};
 };
@@ -479,6 +480,7 @@ static std::vector<RamoniaContainerUi> ParseRamoniaContainers(const nlohmann::js
             for (const auto& iv : cv["items"]) {
                 if (!iv.is_object()) continue;
                 RamoniaContainerItemUi item;
+                item.slot = iv.value("slot",0u);
                 item.id = iv.value("id",0u);
                 item.count = iv.value("count",1u);
                 if (item.id) c.items.push_back(item);
@@ -487,6 +489,50 @@ static std::vector<RamoniaContainerUi> ParseRamoniaContainers(const nlohmann::js
         out.push_back(std::move(c));
     }
     return out;
+}
+
+struct RamoniaLookInspectorUi {
+    bool valid{};
+    std::string status{"Abra a bag/corpse e clique Atualizar"};
+    std::vector<RamoniaContainerUi> containers;
+};
+static RamoniaLookInspectorUi g_ramoniaLookInspector;
+static bool g_openRamoniaLookPopup{};
+
+static bool RefreshRamoniaLookInspector() {
+    const DWORD pid=g_ramoniaPid.load();
+    if (!pid || !g_ramoniaBridgeReady.load()) {
+        g_ramoniaLookInspector.valid=false;
+        g_ramoniaLookInspector.containers.clear();
+        g_ramoniaLookInspector.status="Ramonia Bridge nao esta pronta";
+        return false;
+    }
+
+    nlohmann::json response;
+    if (!RamoniaPipeRequest(pid,{{"cmd","GET_OPEN_CONTAINERS"}},response) ||
+        !response.value("ok",false)) {
+        g_ramoniaLookInspector.valid=false;
+        g_ramoniaLookInspector.containers.clear();
+        g_ramoniaLookInspector.status="Falha ao ler containers abertos";
+        return false;
+    }
+
+    g_ramoniaLookInspector.containers=ParseRamoniaContainers(response);
+    g_ramoniaLookInspector.valid=true;
+
+    std::size_t totalItems{};
+    for (const auto& c:g_ramoniaLookInspector.containers)
+        totalItems += c.items.size();
+
+    g_ramoniaLookInspector.status=
+        std::to_string(g_ramoniaLookInspector.containers.size())+
+        " container(s), "+std::to_string(totalItems)+" item(ns)";
+    return true;
+}
+
+static void OpenRamoniaLookInspector() {
+    RefreshRamoniaLookInspector();
+    g_openRamoniaLookPopup=true;
 }
 
 static bool RamoniaContainerIdExists(const std::vector<RamoniaContainerUi>& containers,
