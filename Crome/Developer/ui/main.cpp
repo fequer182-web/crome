@@ -497,78 +497,65 @@ struct RamoniaLookCaptureUi {
     bool captured{};
     std::uint32_t id{};
     std::uint64_t nextPollMs{};
-    std::string status{"Clique Look ID e depois de Look normal no item dentro do Ramonia"};
+    std::uint64_t nextArmMs{};
 };
 static RamoniaLookCaptureUi g_ramoniaLookCapture;
-static bool g_openRamoniaLookPopup{};
 
-static bool RefreshRamoniaRealLookCapture() {
+static void UpdateRamoniaPassiveLookId() {
     const DWORD pid=g_ramoniaPid.load();
-    if (!pid || !g_ramoniaBridgeReady.load() ||
-        g_ramoniaBridgeVersion.load()<25) {
-        g_ramoniaLookCapture.armed=false;
-        g_ramoniaLookCapture.busy=false;
-        g_ramoniaLookCapture.status="Look ID requer Bridge V25+";
-        return false;
+    const int bridgeVersion=g_ramoniaBridgeVersion.load();
+    if (!pid || !g_ramoniaBridgeReady.load() || bridgeVersion<25)
+        return;
+
+    const auto now=static_cast<std::uint64_t>(GetTickCount64());
+
+    // Poll the current one-shot state at a low rate.
+    if (!g_ramoniaLookCapture.nextPollMs ||
+        now>=g_ramoniaLookCapture.nextPollMs) {
+
+        nlohmann::json response;
+        if (RamoniaPipeRequest(pid,{{"cmd","GET_LOOK_ID"}},response) &&
+            response.value("ok",false)) {
+
+            g_ramoniaLookCapture.armed=response.value("armed",false);
+            g_ramoniaLookCapture.busy=response.value("busy",false);
+            g_ramoniaLookCapture.captured=response.value("captured",false);
+
+            if (g_ramoniaLookCapture.captured) {
+                const auto id=response.value("id",0u);
+                if (id) {
+                    g_ramoniaLookCapture.id=id;
+
+                    // Feed the existing Runtime / Build display.
+                    g_lastLook.valid=true;
+                    g_lastLook.id=static_cast<int>(id);
+                    g_lastLook.onGround=false;
+                    g_lastLook.x=0;
+                    g_lastLook.y=0;
+                    g_lastLook.z=0;
+                }
+            }
+
+            // When the previous capture finished or timed out, re-arm shortly
+            // afterward. No UI action is required from the user.
+            if (!g_ramoniaLookCapture.armed &&
+                !g_ramoniaLookCapture.busy &&
+                now>=g_ramoniaLookCapture.nextArmMs) {
+
+                nlohmann::json arm;
+                if (RamoniaPipeRequest(pid,{{"cmd","ARM_LOOK_ID"}},arm) &&
+                    arm.value("ok",false)) {
+                    g_ramoniaLookCapture.armed=true;
+                    g_ramoniaLookCapture.busy=true;
+                    g_ramoniaLookCapture.nextArmMs=now+500;
+                } else {
+                    g_ramoniaLookCapture.nextArmMs=now+500;
+                }
+            }
+        }
+
+        g_ramoniaLookCapture.nextPollMs=now+150;
     }
-
-    nlohmann::json response;
-    if (!RamoniaPipeRequest(pid,{{"cmd","GET_LOOK_ID"}},response) ||
-        !response.value("ok",false)) {
-        g_ramoniaLookCapture.status="Falha ao consultar Look ID";
-        return false;
-    }
-
-    g_ramoniaLookCapture.armed=response.value("armed",false);
-    g_ramoniaLookCapture.busy=response.value("busy",false);
-    g_ramoniaLookCapture.captured=response.value("captured",false);
-
-    if (g_ramoniaLookCapture.captured) {
-        g_ramoniaLookCapture.id=response.value("id",0u);
-        g_ramoniaLookCapture.status=
-            g_ramoniaLookCapture.id
-                ? "ID capturado: "+std::to_string(g_ramoniaLookCapture.id)
-                : "Game::look disparou, mas o item nao foi validado";
-    } else if (g_ramoniaLookCapture.armed) {
-        g_ramoniaLookCapture.status="ARMADO: agora de Look normal no item no Ramonia";
-    } else if (g_ramoniaLookCapture.busy) {
-        g_ramoniaLookCapture.status="Finalizando captura...";
-    } else {
-        g_ramoniaLookCapture.status="Nenhum ID capturado. Clique Re-armar.";
-    }
-    return true;
-}
-
-static bool ArmRamoniaRealLookCapture() {
-    const DWORD pid=g_ramoniaPid.load();
-    if (!pid || !g_ramoniaBridgeReady.load() ||
-        g_ramoniaBridgeVersion.load()<25) {
-        g_ramoniaLookCapture.status="Look ID requer Bridge V25+";
-        return false;
-    }
-
-    nlohmann::json response;
-    if (!RamoniaPipeRequest(pid,{{"cmd","ARM_LOOK_ID"}},response) ||
-        !response.value("ok",false)) {
-        const auto error=response.is_object()
-            ? response.value("error",std::string("falha_desconhecida"))
-            : std::string("falha_de_transporte");
-        g_ramoniaLookCapture.status="Look ID: "+error;
-        return false;
-    }
-
-    g_ramoniaLookCapture.armed=true;
-    g_ramoniaLookCapture.busy=true;
-    g_ramoniaLookCapture.captured=false;
-    g_ramoniaLookCapture.id=0;
-    g_ramoniaLookCapture.nextPollMs=0;
-    g_ramoniaLookCapture.status="ARMADO: agora de Look normal no item no Ramonia";
-    return true;
-}
-
-static void OpenRamoniaLookInspector() {
-    ArmRamoniaRealLookCapture();
-    g_openRamoniaLookPopup=true;
 }
 
 
@@ -1605,6 +1592,11 @@ struct LookResultUi {
 static LookResultUi g_lastLook;
 static void RefreshLookResult() {
     const auto now=GetTickCount64(); if(now-g_lastLook.lastRead<150) return; g_lastLook.lastRead=now;
+
+    // Ramonia V25+ feeds g_lastLook directly from the real Game::look capture.
+    if(g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=25)
+        return;
+
     try {
         std::ifstream f(g_baseDir / "config" / "look_result.json"); if(!f) return;
         nlohmann::json j; f>>j;
@@ -1937,61 +1929,6 @@ static void SmallInt(const char* id, int* v, float width) {
     ImGui::InputInt(id, v, 0, 0);
 }
 
-static void DrawRamoniaLookInspectorPopup(const Theme& t) {
-    if (g_openRamoniaLookPopup) {
-        ImGui::OpenPopup("Look ID");
-        g_openRamoniaLookPopup=false;
-    }
-
-    ImGui::SetNextWindowSize(ImVec2(460,220),ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Look ID",nullptr,ImGuiWindowFlags_NoResize))
-        return;
-
-    const auto now=static_cast<std::uint64_t>(GetTickCount64());
-    if ((g_ramoniaLookCapture.armed || g_ramoniaLookCapture.busy) &&
-        (!g_ramoniaLookCapture.nextPollMs ||
-         now>=g_ramoniaLookCapture.nextPollMs)) {
-        RefreshRamoniaRealLookCapture();
-        g_ramoniaLookCapture.nextPollMs=now+120;
-    }
-
-    ImGui::TextWrapped(
-        "1. Clique Re-armar se necessario.  2. No Ramonia, use o Look normal no item. "
-        "O primeiro Game::look e capturado e desarmado automaticamente.");
-
-    ImGui::Separator();
-
-    if (g_ramoniaLookCapture.captured && g_ramoniaLookCapture.id) {
-        ImGui::TextColored(t.green,"Item ID: %u",g_ramoniaLookCapture.id);
-        ImGui::SameLine();
-        if (ImGui::Button("Copiar ID")) {
-            const auto value=std::to_string(g_ramoniaLookCapture.id);
-            ImGui::SetClipboardText(value.c_str());
-        }
-    } else if (g_ramoniaLookCapture.armed) {
-        ImGui::TextColored(
-            ImVec4(1.0f,0.78f,0.20f,1.0f),
-            "ARMADO - de Look no item agora");
-    } else {
-        ImGui::TextDisabled("Item ID: -");
-    }
-
-    ImGui::TextWrapped("%s",g_ramoniaLookCapture.status.c_str());
-
-    ImGui::Separator();
-
-    if (ImGui::Button("Re-armar",ImVec2(100,24)))
-        ArmRamoniaRealLookCapture();
-    ImGui::SameLine();
-    if (ImGui::Button("Atualizar",ImVec2(90,24)))
-        RefreshRamoniaRealLookCapture();
-    ImGui::SameLine();
-    if (ImGui::Button("Fechar",ImVec2(80,24)))
-        ImGui::CloseCurrentPopup();
-
-    ImGui::EndPopup();
-}
-
 
 static void DrawHealing(const Theme& t) {
     static bool healingMaster = false;
@@ -2069,14 +2006,6 @@ static void DrawHealing(const Theme& t) {
     } else {
         ImGui::TextDisabled("aguardando backend");
     }
-
-    ImGui::SameLine();
-    const bool ramoniaRealLookReady=
-        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=25;
-    if(!ramoniaRealLookReady) ImGui::BeginDisabled();
-    if(ImGui::SmallButton("Look ID"))
-        OpenRamoniaLookInspector();
-    if(!ramoniaRealLookReady) ImGui::EndDisabled();
 
     const char* names[3]={"Light","Mid","High"};
     if(!healingRuntimeReady) ImGui::BeginDisabled();
@@ -2623,12 +2552,6 @@ static void DrawLoot(const Theme& t) {
 
     CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),170,t);
 
-    if(g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=25){
-        ImGui::SetCursorPosX(ImGui::GetWindowSize().x-74);
-        if(ImGui::SmallButton("Look ID"))
-            OpenRamoniaLookInspector();
-    }
-
     // Top controls: keep Ramonia-visible values inside fixed columns so
     // Destination Bag ID never gets clipped at the right edge.
     if(ImGui::BeginTable("loot_top",4,ImGuiTableFlags_SizingStretchProp)){
@@ -2802,6 +2725,7 @@ static void DrawHotkeys(const Theme& t) {
 
 static void DrawFooter(const Theme& t) {
     RefreshLookResult();
+    UpdateRamoniaPassiveLookId();
     ImGui::PushStyleColor(ImGuiCol_ChildBg,t.panel); ImGui::PushStyleColor(ImGuiCol_Border,t.border); ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,7);
     ImGui::BeginChild("footer",ImVec2(0,92),ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     ImDrawList* d=ImGui::GetWindowDrawList(); ImVec2 wp=ImGui::GetWindowPos(); DrawCardIcon(d,CardIcon::Info,ImVec2(wp.x+17,wp.y+15),Col(t.blue));
@@ -2866,7 +2790,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.6 Real Look ID");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.7 Passive Look ID");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
@@ -2914,8 +2838,6 @@ static void DrawUI() {
     DrawAlarms(t); ImGui::Dummy(ImVec2(0,rowGap));
     DrawHotkeys(t);
     ImGui::EndChild();
-
-    DrawRamoniaLookInspectorPopup(t);
 
     ImGui::Dummy(ImVec2(0,2));
     DrawFooter(t);
