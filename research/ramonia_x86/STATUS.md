@@ -504,3 +504,39 @@ Crome v0.9.0 adds runtime corpse learning:
 - strict V21 rolling death-tile filtering remains unchanged, so decorative bodies outside/newly-unrelated to the tracked death do not return as candidates.
 
 Bridge remains V21 for this step; v0.9.0 is an external Crome policy optimization.
+
+
+## V22 / Crome v0.9.1 Persist + Light
+
+Loot corpse learning is now persistent. Crome stores automatically confirmed corpse IDs in:
+`loot.json -> learned_corpse_ids`.
+
+The manually editable `corpse_item_ids` value remains a fallback and is not overwritten by automatic learning. On startup, Crome reloads `learned_corpse_ids`; when an unknown strict death-tile candidate successfully opens a corpse container, the ID is added to the shared Loot config and persisted by the UI JSON writer.
+
+Ramonia Light is now wired from the existing build-profile contract rather than from a copied/hardcoded Classic offset.
+
+Current profile evidence for build `6AB03F94 / E281E9CA5BA0AF2`:
+- `UIMap` vtable RVA: `0x774284`
+- `MapView` vtable RVA: `0x773E60`
+- `UIMap -> MapView`: `+0x2EC`
+- `MapView::drawLights`: `+0x1D4` (`u8`)
+- `MapView::minimumAmbient`: `+0x1D8` (`float`)
+- contract source: matching setter/getter wrapper shapes for draw-lights and minimum-ambient in this exact build profile.
+
+Bridge V22:
+- discovers UIMap instances by the exact profile vtable;
+- validates the linked MapView by its exact profile vtable;
+- snapshots the original `minimumAmbient`;
+- `SET_LIGHT enabled=1` writes ambient `1.0f`;
+- `SET_LIGHT enabled=0` restores the original value;
+- no Target/game-thread hook is installed for Light;
+- exposes `GET_LIGHT`, `SET_LIGHT`, and HELLO `lightReady/lightEnabled`;
+- attempts restore on bridge-thread shutdown.
+
+Crome v0.9.1:
+- enables the existing Tools -> Light Hack checkbox for Ramonia only with Bridge V22+;
+- refreshes Light every ~500 ms so floor/map changes can reapply the desired ambient;
+- keeps all other unsupported Ramonia Tools gated;
+- adds `lightstatus`, `lighton`, and `lightoff` diagnostics to CromePipeTest.
+
+This V22 Light backend is profile-driven but has not yet been runtime-confirmed visually on Ramonia. Compilation/runtime validation remains pending the next live test.
