@@ -411,66 +411,40 @@ static std::vector<std::uint32_t> RamoniaLootCorpseCandidates(
     std::uint32_t targetId,
     std::uint32_t fallbackCorpseItemId) {
 
-    std::vector<std::uint32_t> exactTile;
-    std::vector<std::uint32_t> allAdded;
-    if (!diff.is_object() || !diff.value("ok",false)) return {};
+    std::vector<std::uint32_t> out;
+    if (!diff.is_object() || !diff.value("ok",false)) return out;
+    if (diff.value("trackedTargetId",0u) != targetId) return out;
 
-    bool targetRemoved = false;
+    bool targetRemoved=false;
     if (diff.contains("removedMonsters") && diff["removedMonsters"].is_array()) {
-        for (const auto& m : diff["removedMonsters"]) {
-            if (m.is_object() && m.value("id",0u) == targetId) {
-                targetRemoved = true;
+        for (const auto& m:diff["removedMonsters"]) {
+            if (m.is_object() && m.value("id",0u)==targetId) {
+                targetRemoved=true;
                 break;
             }
         }
     }
-    if (!targetRemoved) return {};
+    if (!targetRemoved) return out;
 
     auto pushUnique=[](std::vector<std::uint32_t>& dst,std::uint32_t id){
         if (!id) return;
         if (std::find(dst.begin(),dst.end(),id)==dst.end()) dst.push_back(id);
     };
 
+    std::vector<std::uint32_t> strictIds;
     if (diff.contains("addedItems") && diff["addedItems"].is_array()) {
-        for (const auto& item : diff["addedItems"]) {
+        for (const auto& item:diff["addedItems"]) {
             if (!item.is_object()) continue;
             const auto id=item.value("id",0u);
-            if (!id) continue;
-            pushUnique(allAdded,id);
-
-            bool exact=false;
-            if (item.contains("baselineMonsters") &&
-                item["baselineMonsters"].is_array()) {
-                for (const auto& bm : item["baselineMonsters"]) {
-                    if (bm.is_object() && bm.value("id",0u)==targetId) {
-                        exact=true;
-                        break;
-                    }
-                }
-            }
-            if (exact) pushUnique(exactTile,id);
+            if (id) pushUnique(strictIds,id);
         }
     }
 
-    std::vector<std::uint32_t> out;
-    // Known/fallback corpse first when the death transition actually produced
-    // it, then every item born on the exact target tile.
     if (fallbackCorpseItemId &&
-        std::find(exactTile.begin(),exactTile.end(),fallbackCorpseItemId)!=exactTile.end())
+        std::find(strictIds.begin(),strictIds.end(),fallbackCorpseItemId)!=strictIds.end())
         pushUnique(out,fallbackCorpseItemId);
 
-    for (const auto id:exactTile) pushUnique(out,id);
-
-    // If the monster moved between LOOT_MARK and death, the corpse may be on a
-    // tile that did not contain it in the baseline. Preserve the proven fixed
-    // corpse fallback when it appeared anywhere in the death window.
-    if (fallbackCorpseItemId &&
-        std::find(allAdded.begin(),allAdded.end(),fallbackCorpseItemId)!=allAdded.end())
-        pushUnique(out,fallbackCorpseItemId);
-
-    // Last-resort auto discovery: try the other items created in this exact
-    // death window. USE_LOOT_ITEM still revalidates the live Tile holder.
-    for (const auto id:allAdded) pushUnique(out,id);
+    for (const auto id:strictIds) pushUnique(out,id);
     return out;
 }
 
@@ -623,6 +597,7 @@ static bool RamoniaLootOpenAndMove(DWORD pid,
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
     std::uint32_t lootMarkedTargetId = 0;
+    std::uint64_t lootLastTargetMarkMs = 0;
     std::uint64_t lootDiffDeadlineMs = 0;
 
     RamoniaPositionUi lastPosition{};
@@ -636,6 +611,7 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
             lootMarkedTargetId = 0;
+            lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
             lastPosition = {};
             mapTransitionUntilMs = 0;
@@ -658,6 +634,7 @@ static void RamoniaTargetWorker() {
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
             lootMarkedTargetId = 0;
+            lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
             lastPosition = {};
             mapTransitionUntilMs = 0;
@@ -726,13 +703,14 @@ static void RamoniaTargetWorker() {
             bridgeVersion >= 19 &&
             HasRamoniaTargetPolicy(targetCfg);
         const bool lootActive =
-            lootCfg.enabled && bridgeVersion >= 16;
+            lootCfg.enabled && bridgeVersion >= 20;
 
         if (!lootActive) {
             lootMarkedTargetId = 0;
+            lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
             SetRamoniaLootStatus(lootCfg.enabled
-                ? "Loot: requer Bridge V16+"
+                ? "Loot: requer Bridge V20+"
                 : "Loot: desligado");
         }
 
@@ -822,6 +800,7 @@ static void RamoniaTargetWorker() {
 
                         if (opened) {
                             lootMarkedTargetId=0;
+                            lootLastTargetMarkMs=0;
                             lootDiffDeadlineMs=0;
                             Sleep(120);
                             continue;
@@ -837,20 +816,37 @@ static void RamoniaTargetWorker() {
 
                 SetRamoniaLootStatus("Loot: morte sem corpse abrivel confirmado");
                 lootMarkedTargetId=0;
+                lootLastTargetMarkMs=0;
                 lootDiffDeadlineMs=0;
             }
 
             if (currentAttackId) {
-                if (lootMarkedTargetId != currentAttackId) {
+                const bool newTarget = lootMarkedTargetId != currentAttackId;
+                const bool refreshDue =
+                    !lootLastTargetMarkMs || nowMs - lootLastTargetMarkMs >= 450;
+
+                if (newTarget || refreshDue) {
                     nlohmann::json mark;
-                    if (RamoniaPipeRequest(pid, {{"cmd","LOOT_MARK"}}, mark) &&
-                        RamoniaLootMarkTracksTarget(mark,currentAttackId)) {
-                        lootMarkedTargetId = currentAttackId;
-                        lootDiffDeadlineMs = 0;
+                    const bool marked =
+                        RamoniaPipeRequest(
+                            pid,
+                            {{"cmd","LOOT_MARK_TARGET"},{"creatureId",currentAttackId}},
+                            mark) &&
+                        mark.value("ok",false) &&
+                        mark.value("targetId",0u)==currentAttackId;
+
+                    if (marked) {
+                        lootMarkedTargetId=currentAttackId;
+                        lootLastTargetMarkMs=nowMs;
+                        lootDiffDeadlineMs=0;
                         SetRamoniaLootStatus(
-                            "Loot armado no target " + std::to_string(currentAttackId));
-                    } else {
-                        SetRamoniaLootStatus("Loot: aguardando target entrar no snapshot");
+                            "Loot: acompanhando target " +
+                            std::to_string(currentAttackId) +
+                            " tile=" +
+                            std::to_string(mark.value("targetTileSlot",0u)));
+                    } else if (newTarget) {
+                        SetRamoniaLootStatus(
+                            "Loot: aguardando target entrar no tile snapshot");
                     }
                 }
             } else if (!lootMarkedTargetId) {
@@ -898,18 +894,10 @@ static void RamoniaTargetWorker() {
                 continue;
             }
 
-            // Arm Loot immediately after starting combat so very weak targets
-            // cannot die before the next worker cycle creates the baseline.
-            if (lootActive && lootMarkedTargetId != target->id) {
-                nlohmann::json mark;
-                if (RamoniaPipeRequest(pid, {{"cmd","LOOT_MARK"}}, mark) &&
-                    RamoniaLootMarkTracksTarget(mark,target->id)) {
-                    lootMarkedTargetId = target->id;
-                    lootDiffDeadlineMs = 0;
-                    SetRamoniaLootStatus(
-                        "Loot armado no target " + std::to_string(target->id));
-                }
-            }
+            // Bridge V20 creates a target-specific baseline on the next worker
+            // cycle. Never fall back to broad LOOT_MARK here.
+            if (lootActive && lootMarkedTargetId != target->id)
+                lootLastTargetMarkMs = 0;
         }
 
         SetRamoniaStatus("Target ativo",target->name,target->id,target->hpPercent);
@@ -929,7 +917,7 @@ static bool FoodRuntimeReady() {
 
 static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
-           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 16);
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 20);
 }
 
 static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
@@ -1900,7 +1888,7 @@ static void DrawLoot(const Theme& t) {
 
     const bool lootRuntimeReady=LootRuntimeReady();
     const bool ramoniaLootReady=
-        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=16;
+        g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=20;
 
     CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),125,t);
 
@@ -2089,7 +2077,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.7 Auto Corpse");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.8.8 Death-Tile Loot");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
