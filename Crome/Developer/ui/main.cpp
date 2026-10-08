@@ -1862,7 +1862,7 @@ static void RamoniaTargetWorker() {
             else if (bridgeVersion<31)
                 SetRamoniaCaveStatus("Cavebot: requer Bridge V31+");
             else
-                SetRamoniaCaveStatus("Cavebot: AutoWalk V38 aguardando validacao");
+                SetRamoniaCaveStatus("Cavebot: AutoWalk V39 aguardando validacao");
         }
 
         if (!lootActive) {
@@ -3278,6 +3278,23 @@ static void DrawCavebot(const Theme& t) {
         recordInitialized=false;
     }
     ImGui::EndGroup();
+
+    if(!g_nativeRuntimeLoaded){
+        const auto caveStatus=RamoniaCaveStatusText();
+        const auto cavePos=GetRamoniaPlayerPosition();
+        if(cavePos.valid){
+            ImGui::TextDisabled(
+                "%s | Pos %u,%u,%u | Bridge V%d",
+                caveStatus.c_str(),
+                cavePos.x,cavePos.y,cavePos.z,
+                g_ramoniaBridgeVersion.load());
+        } else {
+            ImGui::TextDisabled(
+                "%s | Pos -- | Bridge V%d",
+                caveStatus.c_str(),
+                g_ramoniaBridgeVersion.load());
+        }
+    }
 
     if(ImGui::BeginPopupModal("Walker IDs",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
         EnsureWalkerIdCatalog();
