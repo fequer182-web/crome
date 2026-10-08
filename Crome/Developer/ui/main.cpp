@@ -1222,6 +1222,7 @@ static void RamoniaTargetWorker() {
     std::uint64_t nextLightRefreshMs = 0;
     std::uint64_t nextHealAttemptMs = 0;
     std::uint64_t nextRuneAttemptMs = 0;
+    std::uint64_t nextPlayerSnapshotMs = 0;
     bool lightApplied = false;
     std::uint32_t lootMarkedTargetId = 0;
     std::uint64_t lootLastTargetMarkMs = 0;
@@ -1242,6 +1243,7 @@ static void RamoniaTargetWorker() {
             nextLightRefreshMs = 0;
             nextHealAttemptMs = 0;
             nextRuneAttemptMs = 0;
+            nextPlayerSnapshotMs = 0;
             lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
@@ -1249,6 +1251,7 @@ static void RamoniaTargetWorker() {
             ResetRamoniaCaveWorkerState(caveState);
             lastPosition = {};
             mapTransitionUntilMs = 0;
+            SetRamoniaPlayerPosition({});
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
             SetRamoniaHealingStatus("Healing: Ramonia fechado");
@@ -1273,6 +1276,7 @@ static void RamoniaTargetWorker() {
             nextLightRefreshMs = 0;
             nextHealAttemptMs = 0;
             nextRuneAttemptMs = 0;
+            nextPlayerSnapshotMs = 0;
             lightApplied = false;
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
@@ -1280,6 +1284,7 @@ static void RamoniaTargetWorker() {
             ResetRamoniaCaveWorkerState(caveState);
             lastPosition = {};
             mapTransitionUntilMs = 0;
+            SetRamoniaPlayerPosition({});
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
             SetRamoniaHealingStatus("Healing: bridge aguardando");
@@ -1295,6 +1300,16 @@ static void RamoniaTargetWorker() {
         g_ramoniaBridgeVersion.store(bridgeVersion);
 
         const auto nowMs = static_cast<std::uint64_t>(GetTickCount64());
+
+        if (!nextPlayerSnapshotMs || nowMs>=nextPlayerSnapshotMs) {
+            nlohmann::json playerSnapshot;
+            if (RamoniaPipeRequest(pid,{{"cmd","GET_PLAYER"}},playerSnapshot)) {
+                const auto pos=ParseRamoniaPlayerPosition(playerSnapshot);
+                if (pos.valid)
+                    SetRamoniaPlayerPosition(pos);
+            }
+            nextPlayerSnapshotMs=nowMs+150;
+        }
 
         // Light is independent from Target/Loot/Food and does not use the
         // game-thread dispatcher. Bridge V22 writes the profile-confirmed
