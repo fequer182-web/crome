@@ -640,6 +640,9 @@ int main(int argc, char** argv) {
     std::string wantedName;
     std::string sayMessage="exura";
     std::uint32_t walkX{},walkY{},walkZ{};
+    std::uint32_t tileActionX{},tileActionY{},tileActionZ{};
+    std::uint32_t tileActionItemId{};
+    std::uint32_t tileToolItemId{};
     std::uint32_t lootItemId = 2813;
     std::uint32_t sourceContainerId = 0;
     std::uint32_t targetContainerId = 0;
@@ -703,6 +706,32 @@ int main(int argc, char** argv) {
         }
         if (argc >= 6) {
             try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
+            catch (...) {}
+        }
+    } else if (mode == "usetile") {
+        if (argc >= 6) {
+            try {
+                tileActionX=static_cast<std::uint32_t>(std::stoul(argv[2]));
+                tileActionY=static_cast<std::uint32_t>(std::stoul(argv[3]));
+                tileActionZ=static_cast<std::uint32_t>(std::stoul(argv[4]));
+                tileActionItemId=static_cast<std::uint32_t>(std::stoul(argv[5]));
+            } catch (...) {}
+        }
+        if (argc >= 7) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[6])); }
+            catch (...) {}
+        }
+    } else if (mode == "usewithtile") {
+        if (argc >= 6) {
+            try {
+                tileToolItemId=static_cast<std::uint32_t>(std::stoul(argv[2]));
+                tileActionX=static_cast<std::uint32_t>(std::stoul(argv[3]));
+                tileActionY=static_cast<std::uint32_t>(std::stoul(argv[4]));
+                tileActionZ=static_cast<std::uint32_t>(std::stoul(argv[5]));
+            } catch (...) {}
+        }
+        if (argc >= 7) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[6])); }
             catch (...) {}
         }
     } else if (mode == "usecorpse" || mode == "useloot") {
@@ -843,6 +872,42 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok
             ? "[OK] Rota enviada ao Game::autoWalk. Confira o movimento.\n"
             : "[FALHOU] AUTO_WALK_TO nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "usetile") {
+        if (!tileActionX || !tileActionY || tileActionZ>0xFFu ||
+            tileActionItemId>0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe usetile <x> <y> <z> <itemId|0> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[USE_TILE_ITEM_AT]\n";
+        const std::string cmd=
+            "{\"cmd\":\"USE_TILE_ITEM_AT\",\"x\":"+
+            std::to_string(tileActionX)+
+            ",\"y\":"+std::to_string(tileActionY)+
+            ",\"z\":"+std::to_string(tileActionZ)+
+            ",\"itemId\":"+std::to_string(tileActionItemId)+"}";
+        ok &= request(pid,cmd);
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "usewithtile") {
+        if (!tileToolItemId || tileToolItemId>0xFFFFu ||
+            !tileActionX || !tileActionY || tileActionZ>0xFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe usewithtile <toolItemId> <x> <y> <z> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[USE_WITH_TILE_AT]\n";
+        const std::string cmd=
+            "{\"cmd\":\"USE_WITH_TILE_AT\",\"toolItemId\":"+
+            std::to_string(tileToolItemId)+
+            ",\"x\":"+std::to_string(tileActionX)+
+            ",\"y\":"+std::to_string(tileActionY)+
+            ",\"z\":"+std::to_string(tileActionZ)+"}";
+        ok &= request(pid,cmd);
         return ok ? 0 : 2;
     }
 
