@@ -1250,3 +1250,20 @@ Diagnostics:
 - CromePipeTest_x64.exe uncovertile <x> <y> <z> <targetItemId>
 
 Ground -> ground Game::move destination encoding uses normal world Position x/y/z and is EXPERIMENTAL until live-confirmed. Automatic repeated uncover is intentionally not enabled yet.
+
+
+### V37 uncover ordering evidence
+
+Live Ramonia tile evidence:
+- tile 1220,1280,7 contained:
+  - ID 103 stackIndex 0
+  - ID 16845 stackIndex 1
+  - ID 20159 stackIndex 2
+  - spear ID 2389 stackIndex 3
+- user confirmed ID 20159 was the object visually covering the spear;
+- therefore "highest stackIndex = visual blocker" is false for this build;
+- this is consistent with classic OTClient top-move semantics walking Tile::things toward the first common/movable item.
+
+V37 changes the experimental uncover candidate for an exact target to the nearest Item before the target in Tile::things. For the validated example, spear 2389 selects blocker 20159.
+
+This is still one-layer experimental behavior. Ground -> ground Game::move must be live-confirmed before automatic uncover is enabled for Pick Up Spear or Cavebot.
