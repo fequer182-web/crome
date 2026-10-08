@@ -142,6 +142,9 @@ struct Profile {
     std::uintptr_t autoWalkMethodRva{};
     bool autoWalkRuntimeConfirmed{};
     bool autoWalkDirectionsVectorRefConfirmed{};
+    // V29 safety gate: V37 only classified Directions. Do not call the
+    // native function again until V38 confirms the start Position ABI too.
+    bool autoWalkStartPositionValueConfirmed{};
 
     std::uintptr_t tileVtableRva{};
     std::size_t tileThingsOffset{};
@@ -511,6 +514,15 @@ Profile loadProfile(const std::string& path) {
                 stringValue(a0.get("semantic")) == "Directions" &&
                 stringValue(a0.get("abiType")) == "vector_direction_u32_ref" &&
                 stringValue(a0.get("status")) == "runtime_confirmed";
+
+            if (args->array().size() >= 2) {
+                const auto& a1 = args->array()[1];
+                p.autoWalkStartPositionValueConfirmed =
+                    a1.isObject() &&
+                    stringValue(a1.get("semantic")) == "Position" &&
+                    stringValue(a1.get("abiType")) == "position_u32_u32_u8_value" &&
+                    stringValue(a1.get("status")) == "runtime_confirmed";
+            }
         }
     }
 
@@ -2970,6 +2982,7 @@ bool executeAutoWalkOnGameThread() {
     const auto& p=*g_profile;
     if (!p.autoWalkRuntimeConfirmed ||
         !p.autoWalkDirectionsVectorRefConfirmed ||
+        !p.autoWalkStartPositionValueConfirmed ||
         !p.autoWalkMethodRva ||
         !p.localPlayerVtableRva) {
         InterlockedExchange(&g_lastActionCode,29);
@@ -4135,8 +4148,9 @@ std::string autoWalkToResponse(
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"build_not_validated"})";
     if (!g_profile->autoWalkRuntimeConfirmed ||
         !g_profile->autoWalkDirectionsVectorRefConfirmed ||
+        !g_profile->autoWalkStartPositionValueConfirmed ||
         !g_profile->autoWalkMethodRva)
-        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready"})";
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready_v38_required"})";
     if (!prepareGameThreadDispatcher())
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"dispatcher_not_ready"})";
 
@@ -4295,7 +4309,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":28,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":29,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4305,7 +4319,8 @@ std::string handleRequest(const std::string& request) {
                g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
           << ",\"walkReady\":"
           << ((g_profile && g_profile->autoWalkRuntimeConfirmed &&
-               g_profile->autoWalkDirectionsVectorRefConfirmed) ? "true" : "false")
+               g_profile->autoWalkDirectionsVectorRefConfirmed &&
+               g_profile->autoWalkStartPositionValueConfirmed) ? "true" : "false")
           << ",\"lightReady\":"
           << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
           << ",\"lightEnabled\":" << (g_worldLightEnabled ? "true" : "false")
@@ -4504,7 +4519,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V28 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V29 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
