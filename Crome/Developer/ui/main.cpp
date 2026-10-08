@@ -119,6 +119,22 @@ struct RamoniaRuneConfigUi {
     std::uint32_t cooldownMs{1000};
 };
 
+struct RamoniaCaveNodeUi {
+    std::string type;
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t z{};
+    std::uint32_t itemId{};
+    std::uint32_t waitMs{};
+    std::string text;
+};
+
+struct RamoniaCaveConfigUi {
+    bool enabled{};
+    bool loop{true};
+    std::vector<RamoniaCaveNodeUi> nodes;
+};
+
 struct RamoniaVitalsUi {
     bool valid{};
     double health{};
@@ -176,12 +192,14 @@ static RamoniaFoodConfigUi g_ramoniaFoodConfig;
 static RamoniaLightConfigUi g_ramoniaLightConfig;
 static RamoniaHealingConfigUi g_ramoniaHealingConfig;
 static RamoniaRuneConfigUi g_ramoniaRuneConfig;
+static RamoniaCaveConfigUi g_ramoniaCaveConfig;
 static RamoniaLootConfigUi g_ramoniaLootConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
 static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
 static std::string g_ramoniaLightStatus = "Light aguardando";
 static std::string g_ramoniaHealingStatus = "Healing aguardando";
 static std::string g_ramoniaRuneStatus = "Trainer aguardando";
+static std::string g_ramoniaCaveStatus = "Cavebot aguardando";
 static std::string g_ramoniaLootStatus = "Loot aguardando";
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
@@ -319,6 +337,26 @@ static void SetRamoniaRuneStatus(const std::string& status) {
 static std::string RamoniaRuneStatusText() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaRuneStatus;
+}
+
+static void SetRamoniaCaveConfig(const RamoniaCaveConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaCaveConfig=cfg;
+}
+
+static RamoniaCaveConfigUi GetRamoniaCaveConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaCaveConfig;
+}
+
+static void SetRamoniaCaveStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaCaveStatus=status;
+}
+
+static std::string RamoniaCaveStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaCaveStatus;
 }
 
 static RamoniaVitalsUi ParseRamoniaVitals(const nlohmann::json& j) {
