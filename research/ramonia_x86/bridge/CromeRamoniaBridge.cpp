@@ -39,10 +39,9 @@ HHOOK g_gameThreadHook{};
 HANDLE g_actionEvent{};
 constexpr UINT kActionMessage = WM_APP + 0x620;
 
-// V29 hard safety latch. V38 will recapture the complete autoWalk ABI first.
-// Flip/remove this only after the live capture proves the extra Position
-// layout and the active-call typedef/call site is updated to match it.
-constexpr bool kAutoWalkActiveCallV38Implemented = false;
+// V30 active-call gate. V38 live capture confirmed Directions by reference
+// followed by a 12-byte Position passed by value on this exact build.
+constexpr bool kAutoWalkActiveCallV38Implemented = true;
 
 enum PendingActionKind : LONG {
     PendingNone = 0,
@@ -787,14 +786,14 @@ typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
 typedef void (__attribute__((thiscall)) *GameUseWithFn)(void*, void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
-typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*);
+typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*, MovePosition);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
 typedef void (__thiscall *GameUseWithFn)(void*, void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
-typedef void (__thiscall *GameAutoWalkFn)(void*, const void*);
+typedef void (__thiscall *GameAutoWalkFn)(void*, const void*, MovePosition);
 #endif
 
 struct MsvcSmallString32 {
@@ -3023,6 +3022,14 @@ bool executeAutoWalkOnGameThread() {
         return true;
     }
 
+    // V38 live capture confirmed autoWalk(Game*, Directions&, Position-by-value).
+    // Preserve the start position exactly as observed before x/y are advanced
+    // while constructing the direction vector.
+    MovePosition startPos{};
+    startPos.x=x;
+    startPos.y=y;
+    startPos.z=z;
+
     std::uint32_t directions[127]{};
     std::size_t count{};
 
@@ -3083,7 +3090,7 @@ bool executeAutoWalkOnGameThread() {
             std::to_string(static_cast<unsigned>(g_pendingWalkZ)) +
             " directions=" + std::to_string(count));
 
-    fn(reinterpret_cast<void*>(game),&dirs);
+    fn(reinterpret_cast<void*>(game),&dirs,startPos);
 
     InterlockedExchange(&g_lastActionCode,1);
     return true;
@@ -4317,7 +4324,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":29,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":30,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4528,7 +4535,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V29 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V30 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
