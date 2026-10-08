@@ -8,7 +8,7 @@ set "PKG_DIR=%BUILD_DIR%\Ramonia_x86_Test"
 set "PROFILE_SRC=%~dp0profiles\ramonia_x86\6AB03F94_E281E9CA5BA0AF2.json"
 set "PROFILE_DIR=%PKG_DIR%\profiles\ramonia_x86"
 set "INJECTOR_CPP=%~dp0..\..\tools\injector\PID_Injector.cpp"
-set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V37.dll"
+set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V38.dll"
 set "OUT_INJECTOR=%PKG_DIR%\PID_Injector_x86.exe"
 set "BRIDGE_SRC=%~dp0bridge\CromeRamoniaBridge.cpp"
 set "PIPE_TEST_SRC=%~dp0bridge\CromePipeTest.cpp"
@@ -17,7 +17,7 @@ set "OUT_BRIDGE=%PKG_DIR%\CromeRamoniaBridge_x86.dll"
 set "OUT_PIPE_TEST=%PKG_DIR%\CromePipeTest_x64.exe"
 
 echo ============================================================
-echo          Crome - Ramonia x86 Research Probe V37
+echo          Crome - Ramonia x86 Research Probe V38
 echo                     BUILD X86
 echo ============================================================
 echo.
@@ -81,7 +81,7 @@ if errorlevel 1 (
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%PROFILE_DIR%" >nul 2>&1
 
-echo [BUILD] Compilando RamoniaResearchProbe_V37.dll...
+echo [BUILD] Compilando RamoniaResearchProbe_V38.dll...
 "%CXX%" ^
     -std=c++20 ^
     -O2 ^
@@ -307,7 +307,7 @@ if exist "%CXX64_DIR%objdump.exe" (
 echo [ARCH] Pipe client PE32+ x86-64: OK
 
 (
-    echo Crome Ramonia x86 - Pipe Bridge V1
+    echo Crome Ramonia x86 - Pipe Bridge V29 - AutoWalk Safety Gate
     echo.
     echo Bridge x86:
     echo   CromeRamoniaBridge_x86.dll
@@ -325,7 +325,11 @@ echo [ARCH] Pipe client PE32+ x86-64: OK
     echo   4. Execute CromePipeTest_x64.exe.
     echo   5. Esperado: HELLO, BUILD_INFO e GET_PLAYER com [OK].
     echo.
-    echo O Research Probe V37 continua no pacote apenas como ferramenta de pesquisa.
+    echo.
+    echo IMPORTANTE - Cavebot:
+    echo   AUTO_WALK_TO fica BLOQUEADO com seguranca ate o V38 recapturar o contrato completo.
+    echo   Para pesquisa, injete RamoniaResearchProbe_V38.dll separadamente e capture autoWalk natural.
+    echo   Nao force Enabled enquanto walkReady=false.
 ) > "%PKG_DIR%\TESTE.txt"
 
 echo.
