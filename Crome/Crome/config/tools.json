@@ -55,6 +55,9 @@
     "capacity_baseline": "free_capacity_at_enable",
     "hand_policy": "existing_spear_else_free_hand",
     "right_hand_slot": 5,
-    "left_hand_slot": 6
+    "left_hand_slot": 6,
+    "tile_match_policy": "exact_item_id_any_stack_index",
+    "ignore_other_tile_items": true,
+    "top_item_only": false
   }
 }
