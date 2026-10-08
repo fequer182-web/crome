@@ -3036,6 +3036,7 @@ std::string nearbyItemResponse(
       << ",\"found\":" << (match ? "true" : "false");
 
     if (match) {
+        const auto access=inspectTileTargetAccess(*match);
         o << ",\"item\":{"
           << "\"id\":" << match->id
           << ",\"count\":" << match->count
@@ -3044,7 +3045,15 @@ std::string nearbyItemResponse(
           << ",\"z\":" << static_cast<unsigned>(match->z)
           << ",\"stackIndex\":" << match->stackIndex
           << ",\"tileThingCount\":" << match->tileThingCount
-          << "}";
+          << ",\"accessible\":" << (access.valid && access.accessible ? "true" : "false");
+        if(access.blocker) {
+            o << ",\"blocker\":{"
+              << "\"id\":" << access.blocker->id
+              << ",\"count\":" << access.blocker->count
+              << ",\"stackIndex\":" << access.blocker->stackIndex
+              << "}";
+        }
+        o << "}";
     }
 
     o << "}";
@@ -4714,6 +4723,23 @@ std::string moveNearbyItemToHandResponse(std::uint16_t itemId) {
     if (!target)
         return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"item_not_found_in_3x3"})";
 
+    const auto access=inspectTileTargetAccess(*target);
+    if(!access.valid)
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"item_stack_changed"})";
+    if(access.blocker) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\","
+          << "\"error\":\"item_covered\","
+          << "\"itemId\":" << itemId
+          << ",\"targetStackIndex\":" << access.target.stackIndex
+          << ",\"blocker\":{"
+          << "\"id\":" << access.blocker->id
+          << ",\"count\":" << access.blocker->count
+          << ",\"stackIndex\":" << access.blocker->stackIndex
+          << "}}";
+        return o.str();
+    }
+
     InventorySlotSnapshot right,left;
     if (!readInventorySlot(5u,right) || !readInventorySlot(6u,left))
         return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"inventory_read_failed"})";
@@ -4776,6 +4802,128 @@ std::string moveNearbyItemToHandResponse(std::uint16_t itemId) {
       << ",\"leftBefore\":" << (left.occupied?std::to_string(left.id):std::string("0"))
       << "}";
     return o.str();
+}
+
+std::string uncoverTileTargetResponse(
+    const char* command,
+    const TileItemDiagnostic& target) {
+
+    if(!g_profile || !g_buildMatched)
+        return std::string("{\"ok\":false,\"cmd\":\"") + command +
+               "\",\"error\":\"build_not_validated\"}";
+    if(!g_profile->moveRuntimeConfirmed ||
+       !g_profile->moveItemSharedRefConfirmed ||
+       !g_profile->movePositionRefConfirmed ||
+       !g_profile->moveCountConfirmed ||
+       !g_profile->itemContractReady ||
+       !g_profile->tileThingsRuntimeConfirmed)
+        return std::string("{\"ok\":false,\"cmd\":\"") + command +
+               "\",\"error\":\"tile_ground_move_contract_not_ready\"}";
+
+    const auto access=inspectTileTargetAccess(target);
+    if(!access.valid)
+        return std::string("{\"ok\":false,\"cmd\":\"") + command +
+               "\",\"error\":\"target_stack_changed\"}";
+
+    if(!access.blocker) {
+        std::ostringstream o;
+        o << "{\"ok\":true,\"cmd\":\"" << command << "\""
+          << ",\"moved\":false"
+          << ",\"exposed\":true"
+          << ",\"target\":{\"id\":" << access.target.id
+          << ",\"x\":" << access.target.x
+          << ",\"y\":" << access.target.y
+          << ",\"z\":" << static_cast<unsigned>(access.target.z)
+          << ",\"stackIndex\":" << access.target.stackIndex
+          << "}}";
+        return o.str();
+    }
+
+    const auto destination=chooseAdjacentGroundDestination(
+        access.target.x,access.target.y,access.target.z);
+    if(!destination)
+        return std::string("{\"ok\":false,\"cmd\":\"") + command +
+               "\",\"error\":\"no_adjacent_ground_destination\"}";
+
+    if(!prepareGameThreadDispatcher())
+        return std::string("{\"ok\":false,\"cmd\":\"") + command +
+               "\",\"error\":\"dispatcher_not_ready\"}";
+
+    const auto blocker=*access.blocker;
+    g_pendingMoveSourceTile=blocker.tileAddress;
+    g_pendingMoveTileExpectedItem=blocker.address;
+    g_pendingMoveTileItemId=blocker.id;
+    g_pendingMoveInventorySlot=0;
+    g_pendingMoveGroundX=destination->x;
+    g_pendingMoveGroundY=destination->y;
+    g_pendingMoveGroundZ=destination->z;
+    g_pendingMoveGroundCount=blocker.count ? blocker.count : 1u;
+    InterlockedExchange(&g_pendingActionKind,PendingMoveTileToGround);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    const auto moveCount=g_pendingMoveGroundCount;
+    g_pendingMoveSourceTile=0;
+    g_pendingMoveTileExpectedItem=0;
+    g_pendingMoveTileItemId=0;
+    g_pendingMoveInventorySlot=0;
+    g_pendingMoveGroundX=0;
+    g_pendingMoveGroundY=0;
+    g_pendingMoveGroundZ=0;
+    g_pendingMoveGroundCount=0;
+
+    if(!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"" << command << "\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code==1?"true":"false")
+      << ",\"cmd\":\"" << command << "\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"moved\":" << (code==1?"true":"false")
+      << ",\"exposed\":false"
+      << ",\"target\":{\"id\":" << access.target.id
+      << ",\"x\":" << access.target.x
+      << ",\"y\":" << access.target.y
+      << ",\"z\":" << static_cast<unsigned>(access.target.z)
+      << ",\"stackIndex\":" << access.target.stackIndex << "}"
+      << ",\"blocker\":{\"id\":" << blocker.id
+      << ",\"count\":" << moveCount
+      << ",\"stackIndex\":" << blocker.stackIndex << "}"
+      << ",\"destination\":{\"x\":" << destination->x
+      << ",\"y\":" << destination->y
+      << ",\"z\":" << static_cast<unsigned>(destination->z) << "}"
+      << ",\"destinationEncoding\":\"world_position_experimental\""
+      << "}";
+    return o.str();
+}
+
+std::string uncoverNearbyItemResponse(std::uint16_t itemId) {
+    const auto target=findNearbyTileItemById(itemId,1u);
+    if(!target)
+        return R"({"ok":false,"cmd":"UNCOVER_NEARBY_ITEM","error":"item_not_found_in_3x3"})";
+    return uncoverTileTargetResponse("UNCOVER_NEARBY_ITEM",*target);
+}
+
+std::string uncoverTileTargetAtResponse(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z,
+    std::uint16_t itemId) {
+
+    if(!itemId)
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"target_item_id_required"})";
+
+    const auto target=findTileItemAt(x,y,z,itemId,true);
+    if(!target)
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"target_item_not_found"})";
+
+    return uncoverTileTargetResponse("UNCOVER_TILE_TARGET_AT",*target);
 }
 
 std::string useTileItemAtResponse(
@@ -5142,7 +5290,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":35,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":36,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -5246,6 +5394,24 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
     if (cmd == "GET_HANDS") return handsResponse();
+    if (cmd == "UNCOVER_NEARBY_ITEM") {
+        const auto itemId=uint32FieldFromRequest(request,"itemId");
+        if(!itemId || !*itemId || *itemId>0xFFFFu)
+            return R"({"ok":false,"cmd":"UNCOVER_NEARBY_ITEM","error":"invalid_item_id"})";
+        return uncoverNearbyItemResponse(static_cast<std::uint16_t>(*itemId));
+    }
+    if (cmd == "UNCOVER_TILE_TARGET_AT") {
+        const auto x=uint32FieldFromRequest(request,"x");
+        const auto y=uint32FieldFromRequest(request,"y");
+        const auto z=uint32FieldAllowZeroFromRequest(request,"z");
+        const auto itemId=uint32FieldFromRequest(request,"itemId");
+        if(!x || !y || !z || !itemId ||
+           *z>0xFFu || *itemId>0xFFFFu)
+            return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"invalid_arguments"})";
+        return uncoverTileTargetAtResponse(
+            *x,*y,static_cast<std::uint8_t>(*z),
+            static_cast<std::uint16_t>(*itemId));
+    }
     if (cmd == "MOVE_NEARBY_ITEM_TO_HAND") {
         const auto itemId=uint32FieldFromRequest(request,"itemId");
         if (!itemId || !*itemId || *itemId>0xFFFFu)
@@ -5381,7 +5547,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V35 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V36 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
