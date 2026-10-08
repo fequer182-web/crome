@@ -56,7 +56,8 @@ enum PendingActionKind : LONG {
     PendingAutoWalk = 6,
     PendingUseWithTile = 7,
     PendingMoveTileToInventory = 8,
-    PendingMoveTileToGround = 9
+    PendingMoveTileToGround = 9,
+    PendingTopMoveRead = 10
 };
 
 volatile LONG g_lastActionCode{};
@@ -105,6 +106,21 @@ std::uint32_t g_pendingWalkX{};
 std::uint32_t g_pendingWalkY{};
 std::uint8_t g_pendingWalkZ{};
 ULONGLONG g_lastAutoWalkDispatchTick{};
+
+// One-shot Tile::getTopMoveThing runtime diagnostic. This is intentionally
+// separate from pickup/uncover and never moves an item.
+std::uintptr_t g_pendingTopMoveTile{};
+std::uint32_t g_pendingTopMoveX{};
+std::uint32_t g_pendingTopMoveY{};
+std::uint8_t g_pendingTopMoveZ{};
+std::uintptr_t g_topMoveThing{};
+std::uintptr_t g_topMoveVtable{};
+std::uint16_t g_topMoveItemId{};
+std::uint16_t g_topMoveItemCount{};
+std::uint32_t g_topMoveRefsAfterCall{};
+std::uint32_t g_topMoveRefsAfterRelease{};
+bool g_topMoveWasItem{};
+bool g_topMoveRefReleased{};
 
 struct Profile {
     std::string schema;
@@ -835,6 +851,7 @@ typedef void (__attribute__((thiscall)) *GameUseWithFn)(void*, void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
 typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*, MovePosition);
+typedef void (__attribute__((thiscall)) *TileGetTopMoveThingFn)(void*, void*);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
@@ -842,6 +859,7 @@ typedef void (__thiscall *GameUseWithFn)(void*, void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
 typedef void (__thiscall *GameAutoWalkFn)(void*, const void*, MovePosition);
+typedef void (__thiscall *TileGetTopMoveThingFn)(void*, void*);
 #endif
 
 struct MsvcSmallString32 {
@@ -1326,6 +1344,30 @@ bool ensureTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz,
         refresh = true;
 
     return !refresh || refreshTileCache(px, py, pz);
+}
+
+std::optional<std::uintptr_t> cachedTileAtPosition(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z,
+    bool forceRefresh) {
+
+    std::uint32_t px{},py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px,py,pz) ||
+        !ensureTileCache(px,py,pz,forceRefresh))
+        return std::nullopt;
+
+    std::optional<std::uintptr_t> found;
+    AcquireSRWLockShared(&g_tileCacheLock);
+    for (const auto& entry:g_tileCoordCache) {
+        if (entry.x==x && entry.y==y && entry.z==z) {
+            found=entry.tile;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_tileCacheLock);
+    return found;
 }
 
 bool snapshotMonsterFromThing(std::uintptr_t thing,
@@ -3999,6 +4041,82 @@ bool executeTalkOnGameThread() {
     return true;
 }
 
+
+bool executeTopMoveReadOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+    g_topMoveThing=0;
+    g_topMoveVtable=0;
+    g_topMoveItemId=0;
+    g_topMoveItemCount=0;
+    g_topMoveRefsAfterCall=0;
+    g_topMoveRefsAfterRelease=0;
+    g_topMoveWasItem=false;
+    g_topMoveRefReleased=false;
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,50);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if (!p.getTopMoveThingMethodRva || !p.tileVtableRva ||
+        !g_pendingTopMoveTile ||
+        !exactObjectVtable(g_pendingTopMoveTile,p.tileVtableRva)) {
+        InterlockedExchange(&g_lastActionCode,51);
+        return false;
+    }
+
+    const auto functionAddress=g_base+p.getTopMoveThingMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,52);
+        return false;
+    }
+
+    // V39 static ABI evidence:
+    //   ECX = Tile*
+    //   [EBP+8] = hidden shared_object_ptr<Thing> return storage
+    //   RET 4 = callee cleans the hidden storage pointer.
+    std::uintptr_t returnedThing{};
+    const auto fn=reinterpret_cast<TileGetTopMoveThingFn>(functionAddress);
+    fn(reinterpret_cast<void*>(g_pendingTopMoveTile),&returnedThing);
+
+    g_topMoveThing=returnedThing;
+    if (!returnedThing) {
+        InterlockedExchange(&g_lastActionCode,1);
+        return true;
+    }
+
+    if (!safeRead(returnedThing,g_topMoveVtable)) {
+        InterlockedExchange(&g_lastActionCode,53);
+        return false;
+    }
+
+    if (p.itemContractReady &&
+        g_topMoveVtable==g_base+p.itemVtableRva) {
+        g_topMoveWasItem=true;
+        safeRead(returnedThing+p.itemIdOffset,g_topMoveItemId);
+        safeRead(returnedThing+p.itemCountOffset,g_topMoveItemCount);
+    }
+
+    // getTopMoveThing add_refs the returned Thing at +0x4. Balance only when
+    // the count is readable, sane and still at least two references.
+    const auto refAddress=returnedThing+0x4u;
+    std::uint32_t refs{};
+    if (safeRead(refAddress,refs)) {
+        g_topMoveRefsAfterCall=refs;
+        if (refs>=2u && refs<=1000000u && isWritableAddress(refAddress)) {
+            const LONG after=InterlockedDecrement(
+                reinterpret_cast<volatile LONG*>(refAddress));
+            g_topMoveRefsAfterRelease=
+                after>0 ? static_cast<std::uint32_t>(after) : 0u;
+            g_topMoveRefReleased=true;
+        }
+    }
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         auto* msg = reinterpret_cast<MSG*>(lParam);
@@ -4029,6 +4147,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeMoveTileToInventoryOnGameThread();
                 else if (kind == PendingMoveTileToGround)
                     executeMoveTileToGroundOnGameThread();
+                else if (kind == PendingTopMoveRead)
+                    executeTopMoveReadOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -4882,6 +5002,93 @@ std::string topMoveAbiResponse() {
     return o.str();
 }
 
+
+std::string topMoveAtResponse(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z) {
+
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"build_not_validated"})";
+    if (!g_profile->getTopMoveThingMethodRva)
+        return R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"getTopMoveThing_rva_missing"})";
+
+    const auto tile=cachedTileAtPosition(x,y,z,true);
+    if (!tile)
+        return R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"tile_not_found"})";
+    if (!exactObjectVtable(*tile,g_profile->tileVtableRva))
+        return R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"tile_vtable_mismatch"})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"dispatcher_not_ready"})";
+
+    g_pendingTopMoveTile=*tile;
+    g_pendingTopMoveX=x;
+    g_pendingTopMoveY=y;
+    g_pendingTopMoveZ=z;
+    InterlockedExchange(&g_pendingActionKind,PendingTopMoveRead);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    std::vector<std::uintptr_t> things;
+    bool containsLocalPlayer=false;
+    bool matchedTileEntry=false;
+    std::size_t stackIndex=0;
+    if (dispatched && code==1 && g_topMoveThing &&
+        readStableTileThings(*tile,things,containsLocalPlayer)) {
+        for (std::size_t i=0;i<things.size();++i) {
+            if (things[i]==g_topMoveThing) {
+                matchedTileEntry=true;
+                stackIndex=i;
+                break;
+            }
+        }
+    }
+
+    g_pendingTopMoveTile=0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{"ok":false,"cmd":"GET_TOP_MOVE_AT","
+          << ""error":"dispatcher_timeout","win32":" << win32 << "}";
+        return o.str();
+    }
+    if (code!=1) {
+        std::ostringstream o;
+        o << "{"ok":false,"cmd":"GET_TOP_MOVE_AT","
+          << ""error":"runtime_call_failed","actionCode":" << code << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{"ok":true,"cmd":"GET_TOP_MOVE_AT""
+      << ","diagnosticOnly":true,"movesItem":false"
+      << ","x":" << x << ","y":" << y
+      << ","z":" << static_cast<unsigned>(z)
+      << ","tile":"0x" << std::hex << std::uppercase << *tile << """
+      << ","thing":"0x" << g_topMoveThing << """
+      << ","vtable":"0x" << g_topMoveVtable << """ << std::dec
+      << ","nullResult":" << (g_topMoveThing?"false":"true")
+      << ","isItem":" << (g_topMoveWasItem?"true":"false");
+
+    if (g_topMoveWasItem) {
+        o << ","itemId":" << g_topMoveItemId
+          << ","count":" << g_topMoveItemCount;
+    }
+
+    o << ","matchedTileEntry":" << (matchedTileEntry?"true":"false");
+    if (matchedTileEntry)
+        o << ","stackIndex":" << stackIndex;
+    o << ","tileThingCount":" << things.size()
+      << ","refCountAfterCall":" << g_topMoveRefsAfterCall
+      << ","refReleased":" << (g_topMoveRefReleased?"true":"false")
+      << ","refCountAfterRelease":" << g_topMoveRefsAfterRelease
+      << "}";
+
+    return o.str();
+}
+
 std::string handsResponse() {
     if (!g_profile || !g_profile->inventoryContractReady ||
         !g_profile->itemContractReady)
@@ -5609,6 +5816,14 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
     if (cmd == "GET_HANDS") return handsResponse();
     if (cmd == "GET_TOP_MOVE_ABI") return topMoveAbiResponse();
+    if (cmd == "GET_TOP_MOVE_AT") {
+        const auto x=uint32FieldFromRequest(request,"x");
+        const auto y=uint32FieldFromRequest(request,"y");
+        const auto z=uint32FieldAllowZeroFromRequest(request,"z");
+        if (!x || !y || !z || *z>0xFFu)
+            return R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"invalid_position"})";
+        return topMoveAtResponse(*x,*y,static_cast<std::uint8_t>(*z));
+    }
     if (cmd == "UNCOVER_NEARBY_ITEM") {
         const auto itemId=uint32FieldFromRequest(request,"itemId");
         if(!itemId || !*itemId || *itemId>0xFFFFu)
