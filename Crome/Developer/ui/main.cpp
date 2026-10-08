@@ -2676,7 +2676,13 @@ static void DrawCavebot(const Theme& t) {
     } else if(!recording) recordInitialized=false;
 
     const bool targetRuntimeReady = TargetRuntimeReady();
-    CardBegin("cave","Cavebot",CardIcon::Pin,ImVec4(0.12f,0.62f,1.0f,1),245,t);
+
+    // The main left column has a fixed height. Use exactly the remaining
+    // vertical space so Cavebot cannot be clipped by its parent child window.
+    const float caveCardHeight =
+        std::max(196.0f,ImGui::GetContentRegionAvail().y);
+    CardBegin("cave","Cavebot",CardIcon::Pin,
+              ImVec4(0.12f,0.62f,1.0f,1),caveCardHeight,t);
     if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
     ImGui::Checkbox("Enabled",&enabled);
     if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
@@ -2691,7 +2697,11 @@ static void DrawCavebot(const Theme& t) {
         if(!targetRuntimeReady) targeting=false;
     }
 
-    ImVec2 listSize(ImGui::GetContentRegionAvail().x-100,92);
+    const float waypointListHeight =
+        g_nativeRuntimeLoaded ? 66.0f : 56.0f;
+    ImVec2 listSize(
+        ImGui::GetContentRegionAvail().x-100,
+        waypointListHeight);
     ImGui::BeginChild("##wps",listSize,ImGuiChildFlags_Borders);
     if(wps.empty()) ImGui::TextDisabled("Nenhum waypoint carregado");
     for(int i=0;i<(int)wps.size();++i) if(ImGui::Selectable(wps[i].c_str(),selected==i)) selected=i;
@@ -2750,7 +2760,7 @@ static void DrawCavebot(const Theme& t) {
     }
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Profile:"); ImGui::SameLine(); ImGui::TextDisabled("salva toda a configuracao, inclusive Cavebot/Loot/Tools");
+    ImGui::TextUnformatted("Profile:"); ImGui::SameLine(); ImGui::TextDisabled("Cavebot / Loot / Tools");
     ImGui::SameLine(); if(ImGui::SmallButton("Save Profile...")) { std::filesystem::path p; if(PickProfilePath(true,p)) SaveCromeProfileBundle(p); }
     ImGui::SameLine(); if(ImGui::SmallButton("Load Profile...")) { std::filesystem::path p; if(PickProfilePath(false,p) && LoadCromeProfileBundle(p)) g_walkerIds.loaded=false; }
     if(!targetRuntimeReady) ImGui::BeginDisabled();
@@ -3232,7 +3242,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.10 Compact UI");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.11 Cavebot UI Fix");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
