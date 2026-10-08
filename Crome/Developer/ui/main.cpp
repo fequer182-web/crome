@@ -1013,6 +1013,199 @@ static bool RamoniaLootOpenAndMove(
     return true;
 }
 
+struct RamoniaCaveWorkerState {
+    std::size_t index{};
+    std::uint64_t waitUntilMs{};
+    std::uint64_t nextActionMs{};
+    std::uint64_t lastProgressMs{};
+    RamoniaPositionUi lastPosition{};
+    int retries{};
+};
+
+static void ResetRamoniaCaveWorkerState(RamoniaCaveWorkerState& state) {
+    state={};
+}
+
+static void AdvanceRamoniaCaveNode(
+    const RamoniaCaveConfigUi& cfg,
+    RamoniaCaveWorkerState& state) {
+
+    ++state.index;
+    if (state.index>=cfg.nodes.size() && cfg.loop)
+        state.index=0;
+
+    state.waitUntilMs=0;
+    state.nextActionMs=0;
+    state.lastProgressMs=0;
+    state.lastPosition={};
+    state.retries=0;
+}
+
+static void RunRamoniaCaveCycle(
+    DWORD pid,
+    const RamoniaCaveConfigUi& cfg,
+    RamoniaCaveWorkerState& state,
+    std::uint64_t nowMs,
+    bool pausedForCombat) {
+
+    if (!cfg.enabled) {
+        ResetRamoniaCaveWorkerState(state);
+        SetRamoniaCaveStatus("Cavebot: desligado");
+        return;
+    }
+
+    if (cfg.nodes.empty()) {
+        ResetRamoniaCaveWorkerState(state);
+        SetRamoniaCaveStatus("Cavebot: nenhum waypoint");
+        return;
+    }
+
+    if (state.index>=cfg.nodes.size()) {
+        if (cfg.loop)
+            state.index=0;
+        else {
+            SetRamoniaCaveStatus("Cavebot: rota concluida");
+            return;
+        }
+    }
+
+    if (pausedForCombat) {
+        SetRamoniaCaveStatus("Cavebot: pausado por Target/Loot");
+        return;
+    }
+
+    const auto& node=cfg.nodes[state.index];
+
+    if (node.type=="wait") {
+        if (!state.waitUntilMs)
+            state.waitUntilMs=nowMs+std::max<std::uint32_t>(1u,node.waitMs);
+
+        if (nowMs>=state.waitUntilMs) {
+            SetRamoniaCaveStatus(
+                "Cavebot: wait concluido #" + std::to_string(state.index));
+            AdvanceRamoniaCaveNode(cfg,state);
+        } else {
+            SetRamoniaCaveStatus(
+                "Cavebot: wait #" + std::to_string(state.index));
+        }
+        return;
+    }
+
+    if (node.type=="say") {
+        if (node.text.empty() || node.text.size()>15) {
+            SetRamoniaCaveStatus(
+                "Cavebot: Say invalido #" + std::to_string(state.index));
+            return;
+        }
+        if (state.nextActionMs && nowMs<state.nextActionMs)
+            return;
+
+        nlohmann::json response;
+        const bool ok=
+            RamoniaPipeRequest(
+                pid,
+                {{"cmd","SAY"},{"message",node.text}},
+                response) &&
+            response.value("ok",false);
+
+        if (ok) {
+            SetRamoniaCaveStatus(
+                "Cavebot: Say " + node.text);
+            AdvanceRamoniaCaveNode(cfg,state);
+        } else {
+            SetRamoniaCaveStatus("Cavebot: Say pendente");
+            state.nextActionMs=nowMs+500;
+        }
+        return;
+    }
+
+    if (node.type!="walk" && node.type!="stand") {
+        SetRamoniaCaveStatus(
+            "Cavebot: " + node.type + " aguardando backend");
+        return;
+    }
+
+    nlohmann::json playerJson;
+    if (!RamoniaPipeRequest(pid,{{"cmd","GET_PLAYER"}},playerJson)) {
+        SetRamoniaCaveStatus("Cavebot: aguardando player");
+        return;
+    }
+
+    const auto pos=ParseRamoniaPlayerPosition(playerJson);
+    if (!pos.valid) {
+        SetRamoniaCaveStatus("Cavebot: posicao indisponivel");
+        return;
+    }
+
+    if (pos.x==node.x && pos.y==node.y && pos.z==node.z) {
+        SetRamoniaCaveStatus(
+            "Cavebot: chegou #" + std::to_string(state.index));
+        AdvanceRamoniaCaveNode(cfg,state);
+        return;
+    }
+
+    if (pos.z!=node.z) {
+        SetRamoniaCaveStatus(
+            "Cavebot: waypoint em outro andar #" +
+            std::to_string(state.index));
+        return;
+    }
+
+    if (!state.lastPosition.valid ||
+        pos.x!=state.lastPosition.x ||
+        pos.y!=state.lastPosition.y ||
+        pos.z!=state.lastPosition.z) {
+
+        state.lastPosition=pos;
+        state.lastProgressMs=nowMs;
+        state.retries=0;
+    } else if (state.lastProgressMs &&
+               nowMs-state.lastProgressMs>=3500) {
+
+        ++state.retries;
+        state.lastProgressMs=nowMs;
+        state.nextActionMs=0;
+
+        SetRamoniaCaveStatus(
+            "Cavebot: retry " + std::to_string(state.retries) +
+            " waypoint #" + std::to_string(state.index));
+    }
+
+    if (state.nextActionMs && nowMs<state.nextActionMs)
+        return;
+
+    nlohmann::json walkResponse;
+    const bool walked=
+        RamoniaPipeRequest(
+            pid,
+            {{"cmd","AUTO_WALK_TO"},
+             {"x",node.x},
+             {"y",node.y},
+             {"z",node.z}},
+            walkResponse) &&
+        walkResponse.value("ok",false);
+
+    if (walked) {
+        SetRamoniaCaveStatus(
+            "Cavebot: indo #" + std::to_string(state.index) +
+            " -> " + std::to_string(node.x) + "," +
+            std::to_string(node.y) + "," +
+            std::to_string(node.z));
+        state.nextActionMs=nowMs+750;
+        if (!state.lastProgressMs)
+            state.lastProgressMs=nowMs;
+    } else {
+        const auto error=
+            walkResponse.is_object()
+                ? walkResponse.value("error",
+                    walkResponse.value("result",std::string("walk_failed")))
+                : std::string("pipe_failed");
+
+        SetRamoniaCaveStatus("Cavebot: " + error);
+        state.nextActionMs=nowMs+650;
+    }
+}
+
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
     std::uint64_t nextLightRefreshMs = 0;
