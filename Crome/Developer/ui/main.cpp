@@ -1314,9 +1314,13 @@ static void RunRamoniaCaveCycle(
                 candidateIds.push_back(u);
         };
 
-        // Preserve the exact waypoint ID first. Then try all known IDs for the
-        // semantic category. This keeps Olders IDs usable while allowing the
-        // same route type to work on Ramonia builds with different item IDs.
+        // Structural map actions are best expressed like a normal client
+        // "use top thing on this tile": itemId=0 lets the Bridge resolve the
+        // current top Item from fresh Tile::things, avoiding build-specific IDs.
+        // Keep explicit/catalog IDs only as fallback and diagnostics.
+        if(node.type=="ladder" || node.type=="use_with_ground")
+            candidateIds.push_back(0);
+
         pushCandidate(static_cast<int>(node.itemId));
         if(node.type=="ladder") {
             for(int id:CatalogIds("ladder")) pushCandidate(id);
@@ -1324,7 +1328,7 @@ static void RunRamoniaCaveCycle(
             for(int id:CatalogIds("openHoles")) pushCandidate(id);
         }
 
-        // Generic Use may intentionally use itemId=0 to select the top Item.
+        // Generic Use with no explicit ID uses the same top-item semantics.
         if(candidateIds.empty() && node.type=="use")
             candidateIds.push_back(0);
 
