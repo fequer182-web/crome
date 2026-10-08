@@ -1107,3 +1107,24 @@ Policy:
 - select the exact Item whose ID is 2389 regardless of stackIndex;
 - corpses, blood, gold or other objects on the same tile do not block spear detection;
 - itemId=0/top-item semantics remain for structural Use/Ladder/Hole, not spear pickup.
+
+
+### Bridge V34 - local 3x3 spear discovery
+
+Prepared for Pick Up Spear without broad per-cycle tile reads.
+
+Policy:
+- feature is intended to poll only while Pick Up Spear is enabled;
+- spear ID is 2389;
+- search radius is 1 Chebyshev tile: player center + 8 neighbors (maximum 9 tiles);
+- exact item ID matching is used at any stackIndex; corpses/other tile objects do not hide the spear;
+- the broad Tile discovery remains part of the shared cache refresh only, not each spear poll;
+- V34 builds a Tile* -> x/y/z coordinate index when the Tile cache refreshes;
+- normal nearby polls use that coordinate index and open Tile::things only for the matching 3x3 tiles.
+
+New read-only diagnostic:
+`CromePipeTest_x64.exe nearbyitem 2389 1 [PID]`
+
+Expected response includes `scannedTiles` (normally up to 9), `found`, and exact spear x/y/z/stackIndex when present.
+
+This validates discovery only. Ground -> equipment Game::move destination encoding is still pending one live test before automatic pickup is enabled.
