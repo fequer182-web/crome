@@ -80,6 +80,9 @@ if(CROME_BUILD_DEV_TOOLS)
 
     add_executable(profile_inspector tools/profile_inspector.cpp)
     target_link_libraries(profile_inspector PRIVATE crome_core)
+
+    add_executable(cavebot_runtime_smoke tests/cavebot_runtime_smoke.cpp)
+    target_include_directories(cavebot_runtime_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 # Native Olders runtime restored from the previously validated Crome SDK v21.6.
