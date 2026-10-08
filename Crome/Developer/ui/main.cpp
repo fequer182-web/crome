@@ -1599,6 +1599,7 @@ static void RamoniaTargetWorker() {
 
         const auto targetCfg = GetRamoniaTargetConfig();
         const auto lootCfg = GetRamoniaLootConfig();
+        const auto caveCfg = GetRamoniaCaveConfig();
         for(const auto id:lootCfg.learnedCorpseIds)
             if(id && std::find(lootKnownCorpseIds.begin(),lootKnownCorpseIds.end(),id)
                       ==lootKnownCorpseIds.end())
@@ -1613,6 +1614,15 @@ static void RamoniaTargetWorker() {
             HasRamoniaTargetPolicy(targetCfg);
         const bool lootActive =
             lootCfg.enabled && bridgeVersion >= 21;
+        const bool caveActive =
+            caveCfg.enabled && bridgeVersion >= 27;
+
+        if (!caveActive) {
+            if (!caveCfg.enabled)
+                SetRamoniaCaveStatus("Cavebot: desligado");
+            else
+                SetRamoniaCaveStatus("Cavebot: requer Bridge V27+");
+        }
 
         if (!lootActive) {
             lootMarkedTargetId = 0;
@@ -1626,7 +1636,7 @@ static void RamoniaTargetWorker() {
         // Tile::things must not be queried while the client is changing
         // floor/map. A floor transition can destroy/rebuild Tile objects while
         // Target/Loot still hold a snapshot from the previous floor.
-        if (targetPolicyActive || lootActive) {
+        if (targetPolicyActive || lootActive || caveActive) {
             nlohmann::json playerJson;
             if (RamoniaPipeRequest(pid, {{"cmd","GET_PLAYER"}}, playerJson)) {
                 const auto pos = ParseRamoniaPlayerPosition(playerJson);
@@ -1666,7 +1676,11 @@ static void RamoniaTargetWorker() {
                 SetRamoniaStatus("Target ativo - informe um alvo ou marque Any");
             else
                 SetRamoniaStatus("Ramonia Bridge pronta");
-            Sleep(300);
+
+            if (caveActive)
+                RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,false);
+
+            Sleep(caveActive ? 120 : 300);
             continue;
         }
 
