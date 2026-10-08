@@ -787,3 +787,54 @@ Second Cavebot UI pass after live screenshot:
 - bottom Target controls remain visible without covering Runtime / Build.
 
 No Cavebot/Target backend behavior changed.
+
+
+## Bridge V28 / Ramonia Cavebot backend
+
+Cavebot backend was completed without further UI/layout changes.
+
+### Movement
+Bridge V27 introduced AUTO_WALK_TO using the build-profile runtime-confirmed Game::autoWalk contract:
+- RVA 0x76860;
+- x86 thiscall-like, ECX=Game;
+- Directions argument = vector_direction_u32_ref;
+- bridge builds the 12-byte MSVC x86 vector view manually;
+- directions use the OTClient enum North=0, East=1, South=2, West=3, NE=4, SE=5, SW=6, NW=7;
+- route length is capped at 127 directions;
+- action is dispatched on demand on the game thread.
+
+Pipe diagnostic:
+CromePipeTest_x64.exe walkto <x> <y> <z> [PID]
+
+Crome Cavebot now executes the existing waypoint types:
+- Walk / Stand: AUTO_WALK_TO, exact-position completion;
+- Wait: external timer;
+- Say: existing internal SAY/talkChannel;
+- Use / Ladder: USE_TILE_ITEM_AT;
+- Rope / Shovel / Hole(use_with_ground): USE_WITH_TILE_AT.
+
+The Cavebot state machine:
+- loops the existing waypoint list;
+- advances only after the current action is confirmed;
+- tracks progress and retries after ~3.5 s without movement;
+- pauses while Target/combat is active;
+- naturally pauses while Loot holds the worker on a pending corpse;
+- participates in the existing floor/map transition guard.
+
+Add/Record now use the shared Ramonia GET_PLAYER position snapshot when the native Olders runtime is not active.
+
+### Tile actions
+Bridge V28 adds Tile item positioning and tile-targeted actions:
+- TileItemDiagnostic now reads Thing position x/y/z from the profile-confirmed Thing base layout;
+- findTileItemAt(x,y,z,id?) resolves the real Item in Tile::things;
+- USE_TILE_ITEM_AT revalidates the actual Tile::things holder before Game::use;
+- USE_WITH_TILE_AT finds the tool item in an open container, revalidates both source and target holders, then calls runtime-confirmed Game::useWith;
+- no mouse simulation is used.
+
+For Rope/Shovel/Hole, the configured Item ID is the tool item ID and the tool must currently be inside an open container. The target is the top matching Item at the waypoint tile.
+
+Pipe diagnostics:
+- CromePipeTest_x64.exe usetile <x> <y> <z> <itemId|0> [PID]
+- CromePipeTest_x64.exe usewithtile <toolItemId> <x> <y> <z> [PID]
+
+Bridge HELLO is now version 28 and continues to report walkReady. These Cavebot changes are not yet compile/live-confirmed; validate AUTO_WALK_TO first before running a full route.
