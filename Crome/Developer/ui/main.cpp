@@ -1574,6 +1574,7 @@ static void RamoniaTargetWorker() {
             g_ramoniaWalkReady.store(false);
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
+            nextSpearAttemptMs = 0;
             nextLightRefreshMs = 0;
             nextHealAttemptMs = 0;
             nextRuneAttemptMs = 0;
@@ -1588,6 +1589,7 @@ static void RamoniaTargetWorker() {
             SetRamoniaPlayerPosition({});
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
+            SetRamoniaSpearStatus("Pick Up Spear: Ramonia fechado");
             SetRamoniaHealingStatus("Healing: Ramonia fechado");
             SetRamoniaRuneStatus("Trainer: Ramonia fechado");
             SetRamoniaCaveStatus("Cavebot: Ramonia fechado");
@@ -1622,6 +1624,7 @@ static void RamoniaTargetWorker() {
             SetRamoniaPlayerPosition({});
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
+            SetRamoniaSpearStatus("Pick Up Spear: bridge aguardando");
             SetRamoniaHealingStatus("Healing: bridge aguardando");
             SetRamoniaRuneStatus("Trainer: bridge aguardando");
             SetRamoniaCaveStatus("Cavebot: bridge aguardando");
@@ -2001,6 +2004,7 @@ static void RamoniaTargetWorker() {
         const auto targetCfg = GetRamoniaTargetConfig();
         const auto lootCfg = GetRamoniaLootConfig();
         const auto caveCfg = GetRamoniaCaveConfig();
+        const auto spearCfg = GetRamoniaSpearConfig();
         for(const auto id:lootCfg.learnedCorpseIds)
             if(id && std::find(lootKnownCorpseIds.begin(),lootKnownCorpseIds.end(),id)
                       ==lootKnownCorpseIds.end())
@@ -2019,6 +2023,19 @@ static void RamoniaTargetWorker() {
             bridgeVersion>=33 && g_ramoniaWalkReady.load();
         const bool caveActive =
             caveCfg.enabled && caveWalkReady;
+        const bool spearActive =
+            spearCfg.enabled && bridgeVersion>=35 && !spearCfg.itemIds.empty();
+
+        if (!spearCfg.enabled) {
+            nextSpearAttemptMs=0;
+            SetRamoniaSpearStatus("Pick Up Spear: desligado");
+        } else if (bridgeVersion<35) {
+            nextSpearAttemptMs=0;
+            SetRamoniaSpearStatus("Pick Up Spear: requer Bridge V35+");
+        } else if (spearCfg.itemIds.empty()) {
+            nextSpearAttemptMs=0;
+            SetRamoniaSpearStatus("Pick Up Spear: informe um Item ID");
+        }
 
         if (!caveActive) {
             if (!caveCfg.enabled)
@@ -2041,7 +2058,7 @@ static void RamoniaTargetWorker() {
         // Tile::things must not be queried while the client is changing
         // floor/map. A floor transition can destroy/rebuild Tile objects while
         // Target/Loot still hold a snapshot from the previous floor.
-        if (targetPolicyActive || lootActive || caveActive) {
+        if (targetPolicyActive || lootActive || caveActive || spearActive) {
             nlohmann::json playerJson;
             if (RamoniaPipeRequest(pid, {{"cmd","GET_PLAYER"}}, playerJson)) {
                 const auto pos = ParseRamoniaPlayerPosition(playerJson);
@@ -2072,6 +2089,76 @@ static void RamoniaTargetWorker() {
             }
             if (mapTransitionUntilMs && nowMs >= mapTransitionUntilMs)
                 mapTransitionUntilMs = 0;
+        }
+
+        // Pick Up Spear is intentionally local and dormant when OFF.
+        // Bridge V35 scans only the player 3x3 window and moves one exact-ID
+        // item at a time to the existing-spear hand or an empty hand.
+        if (spearActive &&
+            (!nextSpearAttemptMs || nowMs>=nextSpearAttemptMs)) {
+
+            bool moved=false;
+            bool transportFailed=false;
+            std::string lastError="item_not_found_in_3x3";
+            std::uint32_t movedItemId=0;
+            std::uint32_t destinationSlot=0;
+
+            for(const auto itemId:spearCfg.itemIds) {
+                if(!itemId || itemId>0xFFFFu) continue;
+
+                nlohmann::json moveJson;
+                const bool transportOk=
+                    RamoniaPipeRequest(
+                        pid,
+                        {{"cmd","MOVE_NEARBY_ITEM_TO_HAND"},
+                         {"itemId",itemId}},
+                        moveJson);
+
+                if(!transportOk) {
+                    transportFailed=true;
+                    break;
+                }
+
+                if(moveJson.value("ok",false)) {
+                    moved=true;
+                    movedItemId=itemId;
+                    destinationSlot=moveJson.value("destinationSlot",0u);
+                    break;
+                }
+
+                lastError=moveJson.value("error",std::string("pickup_failed"));
+                if(lastError=="item_not_found_in_3x3")
+                    continue;
+
+                // Any real action/equipment error stops this cycle. Do not try
+                // other IDs after a hand/state race.
+                break;
+            }
+
+            if(moved) {
+                SetRamoniaSpearStatus(
+                    "Pick Up Spear: pegou " +
+                    std::to_string(movedItemId) +
+                    " -> mao slot " +
+                    std::to_string(destinationSlot));
+                nextSpearAttemptMs=
+                    nowMs+std::max<std::uint32_t>(150u,spearCfg.retryMs);
+            } else {
+                if(transportFailed)
+                    SetRamoniaSpearStatus("Pick Up Spear: pipe indisponivel");
+                else if(lastError=="item_not_found_in_3x3")
+                    SetRamoniaSpearStatus("Pick Up Spear: procurando 3x3");
+                else if(lastError=="both_hands_occupied_by_other_items" ||
+                        lastError=="inventory_hand_occupied_by_other_item")
+                    SetRamoniaSpearStatus("Pick Up Spear: duas maos ocupadas");
+                else if(lastError=="tile_pickup_item_changed")
+                    SetRamoniaSpearStatus("Pick Up Spear: item mudou - tentando novamente");
+                else
+                    SetRamoniaSpearStatus("Pick Up Spear: "+lastError);
+
+                nextSpearAttemptMs=
+                    nowMs+std::max<std::uint32_t>(200u,spearCfg.retryMs);
+            }
         }
 
         if (!targetPolicyActive && !lootActive) {
