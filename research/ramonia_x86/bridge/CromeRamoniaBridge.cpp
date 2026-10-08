@@ -46,7 +46,8 @@ enum PendingActionKind : LONG {
     PendingMove = 3,
     PendingTalk = 4,
     PendingUseWithSelf = 5,
-    PendingAutoWalk = 6
+    PendingAutoWalk = 6,
+    PendingUseWithTile = 7
 };
 
 volatile LONG g_lastActionCode{};
@@ -76,6 +77,11 @@ std::uint8_t g_pendingMoveTargetSlot{};
 std::uint32_t g_pendingTalkMode{1};
 std::uint32_t g_pendingTalkChannel{};
 char g_pendingTalkMessage[16]{};
+
+std::uintptr_t g_pendingUseWithTargetTile{};
+std::uintptr_t g_pendingUseWithTargetHolder{};
+std::uintptr_t g_pendingUseWithTargetItem{};
+std::uint16_t g_pendingUseWithTargetItemId{};
 
 std::uint32_t g_pendingWalkX{};
 std::uint32_t g_pendingWalkY{};
