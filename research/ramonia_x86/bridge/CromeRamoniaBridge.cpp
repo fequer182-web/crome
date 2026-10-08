@@ -2879,6 +2879,86 @@ bool executeUseWithSelfOnGameThread() {
     return true;
 }
 
+bool executeUseWithTileOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,5);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if (!p.useWithRuntimeConfirmed ||
+        !p.useWithItemSharedRefConfirmed ||
+        !p.useWithThingSharedRefConfirmed ||
+        !p.useWithMethodRva ||
+        !p.containerContractReady ||
+        !p.itemContractReady) {
+        InterlockedExchange(&g_lastActionCode,36);
+        return false;
+    }
+
+    ContainerSnapshot source;
+    if (!readContainerSnapshot(g_pendingUseContainer,source) ||
+        source.id!=g_pendingUseContainerId) {
+        InterlockedExchange(&g_lastActionCode,21);
+        return false;
+    }
+
+    const ContainerItemSlot* sourceSlot=nullptr;
+    for (const auto& slot:source.items) {
+        if (slot.holderAddress==g_pendingUseHolder &&
+            slot.itemAddress==g_pendingUseItem &&
+            slot.id==g_pendingUseItemId) {
+            sourceSlot=&slot;
+            break;
+        }
+    }
+    if (!sourceSlot) {
+        InterlockedExchange(&g_lastActionCode,21);
+        return false;
+    }
+
+    std::uintptr_t targetHolder{},targetItem{};
+    if (!resolveTileItemHolder(
+            g_pendingUseWithTargetTile,
+            g_pendingUseWithTargetItemId,
+            g_pendingUseWithTargetItem,
+            targetHolder,
+            targetItem) ||
+        !targetHolder || !targetItem) {
+        InterlockedExchange(&g_lastActionCode,37);
+        return false;
+    }
+
+    if (targetHolder!=g_pendingUseWithTargetHolder ||
+        targetItem!=g_pendingUseWithTargetItem) {
+        InterlockedExchange(&g_lastActionCode,38);
+        return false;
+    }
+
+    const auto functionAddress=g_base+p.useWithMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,28);
+        return false;
+    }
+
+    const auto game=g_base+p.gameRva;
+    const auto fn=reinterpret_cast<GameUseWithFn>(functionAddress);
+
+    logLine("[ACTION] USE_WITH_TILE toolId=" +
+            std::to_string(static_cast<unsigned>(g_pendingUseItemId)) +
+            " targetId=" +
+            std::to_string(static_cast<unsigned>(g_pendingUseWithTargetItemId)));
+
+    fn(reinterpret_cast<void*>(game),
+       reinterpret_cast<void*>(sourceSlot->holderAddress),
+       reinterpret_cast<void*>(targetHolder));
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 bool executeAutoWalkOnGameThread() {
     InterlockedExchange(&g_lastActionCode,0);
 
@@ -3153,6 +3233,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeUseWithSelfOnGameThread();
                 else if (kind == PendingAutoWalk)
                     executeAutoWalkOnGameThread();
+                else if (kind == PendingUseWithTile)
+                    executeUseWithTileOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -3333,6 +3415,9 @@ std::string actionCodeText(LONG code) {
         case 33: return "autowalk_already_reached";
         case 34: return "autowalk_path_too_long";
         case 35: return "autowalk_function_not_executable";
+        case 36: return "usewith_tile_contract_not_ready";
+        case 37: return "usewith_tile_target_not_visible";
+        case 38: return "usewith_tile_target_changed";
         default: return "unknown_action_result";
     }
 }
