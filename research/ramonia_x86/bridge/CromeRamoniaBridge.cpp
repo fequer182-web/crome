@@ -2802,25 +2802,25 @@ std::string nearbyItemResponse(
     const auto cache=tileCacheInfo();
 
     std::ostringstream o;
-    o << "{"ok":true,"cmd":"GET_NEARBY_ITEM""
-      << ","itemId":" << itemId
-      << ","radius":" << radius
-      << ","center":{"x":" << px
-      << ","y":" << py
-      << ","z":" << static_cast<unsigned>(pz) << "}"
-      << ","scannedTiles":" << nearbyTiles.size()
-      << ","cacheGeneration":" << cache.generation
-      << ","found":" << (match ? "true" : "false");
+    o << "{\"ok\":true,\"cmd\":\"GET_NEARBY_ITEM\""
+      << ",\"itemId\":" << itemId
+      << ",\"radius\":" << radius
+      << ",\"center\":{\"x\":" << px
+      << ",\"y\":" << py
+      << ",\"z\":" << static_cast<unsigned>(pz) << "}"
+      << ",\"scannedTiles\":" << nearbyTiles.size()
+      << ",\"cacheGeneration\":" << cache.generation
+      << ",\"found\":" << (match ? "true" : "false");
 
     if (match) {
-        o << ","item":{"
-          << ""id":" << match->id
-          << ","count":" << match->count
-          << ","x":" << match->x
-          << ","y":" << match->y
-          << ","z":" << static_cast<unsigned>(match->z)
-          << ","stackIndex":" << match->stackIndex
-          << ","tileThingCount":" << match->tileThingCount
+        o << ",\"item\":{"
+          << "\"id\":" << match->id
+          << ",\"count\":" << match->count
+          << ",\"x\":" << match->x
+          << ",\"y\":" << match->y
+          << ",\"z\":" << static_cast<unsigned>(match->z)
+          << ",\"stackIndex\":" << match->stackIndex
+          << ",\"tileThingCount\":" << match->tileThingCount
           << "}";
     }
 
