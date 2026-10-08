@@ -4006,6 +4006,9 @@ std::string handleRequest(const std::string& request) {
           << ",\"lookReady\":"
           << ((g_profile && g_profile->lookRuntimeConfirmed &&
                g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
+          << ",\"walkReady\":"
+          << ((g_profile && g_profile->autoWalkRuntimeConfirmed &&
+               g_profile->autoWalkDirectionsVectorRefConfirmed) ? "true" : "false")
           << ",\"lightReady\":"
           << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
           << ",\"lightEnabled\":" << (g_worldLightEnabled ? "true" : "false")
