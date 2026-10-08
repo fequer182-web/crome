@@ -4,6 +4,7 @@
   "counter": [],
   "depot": [],
   "evidence": {
+    "407": "observado no Look ID durante o teste de escada no Ramonia; uso direto via Cavebot ainda em validacao",
     "430": "validado ao vivo no Ramonia: USE_TILE_ITEM_AT acionou o bueiro",
     "1948": "capturado no teste do usuario via Inspect/Look no Olders",
     "3003": "Crome SDK v21.6 / tile_action_test rope_item_id",
@@ -27,7 +28,8 @@
   ],
   "global": true,
   "ladder": [
-    1948
+    1948,
+    407
   ],
   "machete": [],
   "minePick": [],
