@@ -15,7 +15,9 @@
   "machete": [],
   "pathable": [],
   "nonPathable": [],
-  "openHoles": [],
+  "openHoles": [
+    430
+  ],
   "clearBeforeUse": [],
   "counter": [],
   "depot": [],
@@ -34,6 +36,7 @@
     4602
   ],
   "evidence": {
+    "430": "validado ao vivo no Ramonia: USE_TILE_ITEM_AT acionou o bueiro",
     "1948": "capturado no teste do usuario via Inspect/Look no Olders",
     "3003": "Crome SDK v21.6 / tile_action_test rope_item_id",
     "3457": "Crome SDK v21.6 / tile_action_test shovel_item_id",
