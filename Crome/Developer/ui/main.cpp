@@ -3772,7 +3772,7 @@ static void DrawCavebot(const Theme& t) {
 static void DrawTools(const Theme& t) {
     static bool mana=false,light=false,antiIdle=false,fish=false,food=false;
     static bool para=false,haste=false,advert=false,spear=false,reAmmo=false;
-    static char paraSpell[32]="exura",hasteSpell[32]="utani hur",manaSpell[32]="utamo vita",ad[64]="Set Message...",spears[64]="";
+    static char paraSpell[32]="exura",hasteSpell[32]="utani hur",manaSpell[32]="utamo vita",ad[64]="Set Message...",spears[64]="2389";
     static int ammo=3447, foodInterval=60000, manaInterval=170000, hasteInterval=30000, idleMin=45000, idleMax=90000;
     static int fishMinDelay=850, fishMaxDelay=1450, fishRange=7;
     static std::uint64_t seenProfileLoadGeneration=~0ull;
@@ -3795,7 +3795,20 @@ static void DrawTools(const Theme& t) {
             }
             if(tj.contains("anti_idle")){ antiIdle=tj["anti_idle"].value("enabled",false); idleMin=tj["anti_idle"].value("min_interval_ms",idleMin); idleMax=tj["anti_idle"].value("max_interval_ms",idleMax); }
             if(tj.contains("light")) light=tj["light"].value("enabled",false);
-            if(tj.contains("spear_pickup")) spear=tj["spear_pickup"].value("enabled",false);
+            if(tj.contains("spear_pickup") && tj["spear_pickup"].is_object()){
+                spear=tj["spear_pickup"].value("enabled",false);
+                std::string ids;
+                const auto& sp=tj["spear_pickup"];
+                if(sp.contains("item_ids") && sp["item_ids"].is_array()){
+                    for(const auto& v:sp["item_ids"]){
+                        if(!v.is_number_integer() || v.get<int>()<=0) continue;
+                        if(!ids.empty()) ids += ",";
+                        ids += std::to_string(v.get<int>());
+                    }
+                }
+                if(ids.empty()) ids="2389";
+                std::snprintf(spears,sizeof(spears),"%s",ids.c_str());
+            }
             if(tj.contains("reammo")){ reAmmo=tj["reammo"].value("enabled",false); if(tj["reammo"].contains("item_ids")&&tj["reammo"]["item_ids"].is_array()&&!tj["reammo"]["item_ids"].empty()) ammo=tj["reammo"]["item_ids"][0].get<int>(); }
         }
     }
@@ -3804,6 +3817,9 @@ static void DrawTools(const Theme& t) {
     CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),toolsCardHeight,t);
     const bool foodRuntimeReady = FoodRuntimeReady();
     const bool lightRuntimeReady = LightRuntimeReady();
+    const bool spearRuntimeReady =
+        g_nativeRuntimeLoaded ||
+        (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=35);
     if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("left",0,1.05f); ImGui::TableSetupColumn("right",0,1.05f); ImGui::TableSetupColumn("value",0,1.25f);
         auto row=[&](const char* lid,bool* lv,const char* rid,bool* rv,const char* iid,char* buf,size_t cap){ ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox(lid,lv); ImGui::TableSetColumnIndex(1); ImGui::Checkbox(rid,rv); ImGui::TableSetColumnIndex(2); SmallInput(iid,buf,cap,-1); };
@@ -3827,8 +3843,20 @@ static void DrawTools(const Theme& t) {
 
         if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
         row("Anti-Idle",&antiIdle,"Advertise",&advert,"##advert",ad,sizeof(ad));
-        row("Auto Fishing",&fish,"Pick Up Spear",&spear,"##spear",spears,sizeof(spears));
         if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+        ImGui::Checkbox("Auto Fishing",&fish);
+        if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+
+        ImGui::TableSetColumnIndex(1);
+        if(!spearRuntimeReady) ImGui::BeginDisabled();
+        ImGui::Checkbox("Pick Up Spear",&spear);
+        ImGui::TableSetColumnIndex(2);
+        SmallInput("##spear",spears,sizeof(spears),-1);
+        if(!spearRuntimeReady) ImGui::EndDisabled();
 
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
@@ -3881,12 +3909,48 @@ static void DrawTools(const Theme& t) {
     ramFood.retryMs = 1000;
     SetRamoniaFoodConfig(ramFood);
 
+    RamoniaSpearConfigUi ramSpear;
+    for(const auto& token:SplitCsv(spears)) {
+        try {
+            const auto id=std::stoul(token);
+            if(id>0 && id<=0xFFFFu &&
+               std::find(ramSpear.itemIds.begin(),ramSpear.itemIds.end(),
+                         static_cast<std::uint32_t>(id))==ramSpear.itemIds.end())
+                ramSpear.itemIds.push_back(static_cast<std::uint32_t>(id));
+        } catch (...) {}
+    }
+    // The struct carries 2389 as a safe default. If the user typed a valid
+    // list, keep only that list instead of silently adding 2389.
+    const auto typedSpearIds=SplitCsv(spears);
+    if(!typedSpearIds.empty()) {
+        std::vector<std::uint32_t> exactIds;
+        for(const auto& token:typedSpearIds) {
+            try {
+                const auto id=std::stoul(token);
+                if(id>0 && id<=0xFFFFu &&
+                   std::find(exactIds.begin(),exactIds.end(),
+                             static_cast<std::uint32_t>(id))==exactIds.end())
+                    exactIds.push_back(static_cast<std::uint32_t>(id));
+            } catch (...) {}
+        }
+        if(!exactIds.empty()) ramSpear.itemIds=std::move(exactIds);
+    }
+    ramSpear.enabled =
+        g_ramoniaBridgeReady.load() &&
+        g_ramoniaBridgeVersion.load()>=35 &&
+        spear;
+    ramSpear.retryMs=250;
+    SetRamoniaSpearConfig(ramSpear);
+
     RamoniaLightConfigUi ramLight;
     ramLight.enabled =
         g_ramoniaBridgeReady.load() &&
         g_ramoniaBridgeVersion.load() >= 22 &&
         light;
     SetRamoniaLightConfig(ramLight);
+
+    nlohmann::json spearIds=nlohmann::json::array();
+    for(const auto id:ramSpear.itemIds) if(id>0 && id<=0xFFFFu) spearIds.push_back(id);
 
     nlohmann::json tcfg={
       {"food",{{"enabled",foodRuntimeReady&&food},{"interval_ms",foodInterval},{"item_ids",foodIds}}},
@@ -3895,7 +3959,22 @@ static void DrawTools(const Theme& t) {
       {"anti_paralyze",{{"enabled",g_nativeRuntimeLoaded&&para},{"spell",paraSpell},{"prefer_condition_state",true},{"speed_baseline_mode","unhasted_base"}}},
       {"auto_haste",{{"enabled",g_nativeRuntimeLoaded&&haste},{"spell",hasteSpell},{"fallback_interval_ms",hasteInterval},{"prefer_condition_state",true}}},
       {"light",{{"enabled",lightRuntimeReady&&light},{"profile_gated",true},{"ambient",1.0},{"ramonia_bridge_min_version",22}}},
-      {"spear_pickup",{{"enabled",g_nativeRuntimeLoaded&&spear},{"item_ids",nlohmann::json::array()},{"status","requires_move_equip_backend"}}},
+      {"spear_pickup",{
+          {"enabled",spear},
+          {"item_ids",spearIds},
+          {"scan_radius",1},
+          {"scan_shape","center_plus_8_neighbors"},
+          {"scan_only_when_enabled",true},
+          {"tile_match_policy","exact_item_id_any_stack_index"},
+          {"hand_policy","existing_spear_else_free_hand"},
+          {"right_hand_slot",5},
+          {"left_hand_slot",6},
+          {"reserve_free_capacity_percent",20},
+          {"capacity_guard_enabled",false},
+          {"capacity_guard_status","pending_GET_PLAYER_capacity"},
+          {"ramonia_bridge_min_version",35},
+          {"status","ramonia_ground_to_hand_live_validated"}
+      }},
       {"reammo",{{"enabled",g_nativeRuntimeLoaded&&reAmmo},{"item_ids",nlohmann::json::array({ammo})},{"min_count",1},{"status","requires_move_equip_backend"}}}
     };
     WriteJsonIfChanged("tools.json",tcfg);
