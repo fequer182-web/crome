@@ -39,9 +39,10 @@ HHOOK g_gameThreadHook{};
 HANDLE g_actionEvent{};
 constexpr UINT kActionMessage = WM_APP + 0x620;
 
-// V30 active-call gate. V38 live capture confirmed Directions by reference
-// followed by a 12-byte Position passed by value on this exact build.
-constexpr bool kAutoWalkActiveCallV38Implemented = true;
+// V31 active-call gate. V39 correction keeps only the formal argument that
+// is proven by the function body: Directions at [EBP+8]. The xyz DWORDs seen
+// by V38 are treated as caller-local/trailing stack evidence, not a formal arg.
+constexpr bool kAutoWalkActiveCallV39Implemented = true;
 
 enum PendingActionKind : LONG {
     PendingNone = 0,
@@ -90,6 +91,7 @@ std::uint16_t g_pendingUseWithTargetItemId{};
 std::uint32_t g_pendingWalkX{};
 std::uint32_t g_pendingWalkY{};
 std::uint8_t g_pendingWalkZ{};
+ULONGLONG g_lastAutoWalkDispatchTick{};
 
 struct Profile {
     std::string schema;
@@ -146,8 +148,8 @@ struct Profile {
     std::uintptr_t autoWalkMethodRva{};
     bool autoWalkRuntimeConfirmed{};
     bool autoWalkDirectionsVectorRefConfirmed{};
-    // V29 safety gate: V37 only classified Directions. Do not call the
-    // native function again until V38 confirms the start Position ABI too.
+    // Kept only for backwards profile compatibility. V39 no longer treats
+    // trailing xyz stack DWORDs as a formal autoWalk argument.
     bool autoWalkStartPositionValueConfirmed{};
 
     std::uintptr_t tileVtableRva{};
@@ -786,14 +788,14 @@ typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
 typedef void (__attribute__((thiscall)) *GameUseWithFn)(void*, void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
-typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*, MovePosition);
+typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
 typedef void (__thiscall *GameUseWithFn)(void*, void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
-typedef void (__thiscall *GameAutoWalkFn)(void*, const void*, MovePosition);
+typedef void (__thiscall *GameAutoWalkFn)(void*, const void*);
 #endif
 
 struct MsvcSmallString32 {
@@ -2984,10 +2986,9 @@ bool executeAutoWalkOnGameThread() {
     }
 
     const auto& p=*g_profile;
-    if (!kAutoWalkActiveCallV38Implemented ||
+    if (!kAutoWalkActiveCallV39Implemented ||
         !p.autoWalkRuntimeConfirmed ||
         !p.autoWalkDirectionsVectorRefConfirmed ||
-        !p.autoWalkStartPositionValueConfirmed ||
         !p.autoWalkMethodRva ||
         !p.localPlayerVtableRva) {
         InterlockedExchange(&g_lastActionCode,29);
@@ -3021,14 +3022,6 @@ bool executeAutoWalkOnGameThread() {
         InterlockedExchange(&g_lastActionCode,33);
         return true;
     }
-
-    // V38 live capture confirmed autoWalk(Game*, Directions&, Position-by-value).
-    // Preserve the start position exactly as observed before x/y are advanced
-    // while constructing the direction vector.
-    MovePosition startPos{};
-    startPos.x=x;
-    startPos.y=y;
-    startPos.z=z;
 
     std::uint32_t directions[127]{};
     std::size_t count{};
@@ -3084,13 +3077,23 @@ bool executeAutoWalkOnGameThread() {
 
     const auto fn=reinterpret_cast<GameAutoWalkFn>(functionAddress);
 
+    // Hard bridge-side re-entry guard. Even callers other than Crome cannot
+    // hammer the native method while the previous walk has just been issued.
+    const ULONGLONG nowTick=GetTickCount64();
+    if (g_lastAutoWalkDispatchTick &&
+        nowTick-g_lastAutoWalkDispatchTick<500) {
+        InterlockedExchange(&g_lastActionCode,39);
+        return false;
+    }
+
     logLine("[ACTION] AUTO_WALK_TO target=" +
             std::to_string(g_pendingWalkX) + "," +
             std::to_string(g_pendingWalkY) + "," +
             std::to_string(static_cast<unsigned>(g_pendingWalkZ)) +
             " directions=" + std::to_string(count));
 
-    fn(reinterpret_cast<void*>(game),&dirs,startPos);
+    fn(reinterpret_cast<void*>(game),&dirs);
+    g_lastAutoWalkDispatchTick=GetTickCount64();
 
     InterlockedExchange(&g_lastActionCode,1);
     return true;
@@ -3444,6 +3447,7 @@ std::string actionCodeText(LONG code) {
         case 36: return "usewith_tile_contract_not_ready";
         case 37: return "usewith_tile_target_not_visible";
         case 38: return "usewith_tile_target_changed";
+        case 39: return "autowalk_cooldown";
         default: return "unknown_action_result";
     }
 }
@@ -4161,11 +4165,10 @@ std::string autoWalkToResponse(
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"build_not_validated"})";
     if (!g_profile->autoWalkRuntimeConfirmed ||
         !g_profile->autoWalkDirectionsVectorRefConfirmed ||
-        !g_profile->autoWalkStartPositionValueConfirmed ||
         !g_profile->autoWalkMethodRva)
-        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready_v38_required"})";
-    if (!kAutoWalkActiveCallV38Implemented)
-        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_active_call_locked_pending_v38_live_capture"})";
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready_v39"})";
+    if (!kAutoWalkActiveCallV39Implemented)
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_active_call_locked_pending_v39"})";
     if (!prepareGameThreadDispatcher())
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"dispatcher_not_ready"})";
 
@@ -4324,7 +4327,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":30,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":31,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4333,10 +4336,9 @@ std::string handleRequest(const std::string& request) {
           << ((g_profile && g_profile->lookRuntimeConfirmed &&
                g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
           << ",\"walkReady\":"
-          << ((kAutoWalkActiveCallV38Implemented &&
+          << ((kAutoWalkActiveCallV39Implemented &&
                g_profile && g_profile->autoWalkRuntimeConfirmed &&
-               g_profile->autoWalkDirectionsVectorRefConfirmed &&
-               g_profile->autoWalkStartPositionValueConfirmed) ? "true" : "false")
+               g_profile->autoWalkDirectionsVectorRefConfirmed) ? "true" : "false")
           << ",\"lightReady\":"
           << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
           << ",\"lightEnabled\":" << (g_worldLightEnabled ? "true" : "false")
@@ -4535,7 +4537,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V30 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V31 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -4573,7 +4575,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
             }
 
             if (!g_buildMatched)
-                throw std::runtime_error("runtime build does not match V37 profile");
+                throw std::runtime_error("runtime build does not match canonical Ramonia profile");
 
             if (!prepareGameThreadDispatcher())
                 throw std::runtime_error("game-thread target prepare failed");
