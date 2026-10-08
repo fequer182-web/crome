@@ -720,6 +720,28 @@ int main(int argc, char** argv) {
             try { pid=static_cast<DWORD>(std::stoul(argv[3])); }
             catch (...) {}
         }
+    } else if (mode == "uncoveritem" || mode == "uncoverspear") {
+        if (argc >= 3) {
+            try { pickupItemId=static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "uncovertile") {
+        if (argc >= 6) {
+            try {
+                tileActionX=static_cast<std::uint32_t>(std::stoul(argv[2]));
+                tileActionY=static_cast<std::uint32_t>(std::stoul(argv[3]));
+                tileActionZ=static_cast<std::uint32_t>(std::stoul(argv[4]));
+                tileActionItemId=static_cast<std::uint32_t>(std::stoul(argv[5]));
+            } catch (...) {}
+        }
+        if (argc >= 7) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[6])); }
+            catch (...) {}
+        }
     } else if (mode == "nearbyitem") {
         if (argc >= 3) {
             try { nearbyItemId=static_cast<std::uint32_t>(std::stoul(argv[2])); }
@@ -924,14 +946,49 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        std::cout << "[MOVE_NEARBY_ITEM_TO_HAND - EXPERIMENTAL]\n";
+        std::cout << "[MOVE_NEARBY_ITEM_TO_HAND]\n";
         const std::string cmd=
             "{\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\",\"itemId\":"+
             std::to_string(pickupItemId)+"}";
         ok &= request(pid,cmd);
         std::cout << "\n" << (ok
-            ? "[OK] Game::move foi chamado para a mao escolhida. Confira o item no personagem.\n"
+            ? "[OK] Pickup executado. Se houver bloqueador acima, V36 deve recusar com item_covered.\n"
             : "[FALHOU] O pickup foi bloqueado ou a bridge retornou erro.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "uncoveritem" || mode == "uncoverspear") {
+        if (!pickupItemId || pickupItemId>0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe uncoveritem <itemId=2389> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[UNCOVER_NEARBY_ITEM - MOVE ONE BLOCKER]\n";
+        const std::string cmd=
+            "{\"cmd\":\"UNCOVER_NEARBY_ITEM\",\"itemId\":"+
+            std::to_string(pickupItemId)+"}";
+        ok &= request(pid,cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] Se havia bloqueador, um item foi enviado para um SQM vizinho. Confira no jogo.\n"
+            : "[FALHOU] Nao foi possivel remover o bloqueador.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "uncovertile") {
+        if (!tileActionX || !tileActionY || tileActionZ>0xFFu ||
+            !tileActionItemId || tileActionItemId>0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe uncovertile <x> <y> <z> <targetItemId> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[UNCOVER_TILE_TARGET_AT - MOVE ONE BLOCKER]\n";
+        const std::string cmd=
+            "{\"cmd\":\"UNCOVER_TILE_TARGET_AT\",\"x\":"+
+            std::to_string(tileActionX)+
+            ",\"y\":"+std::to_string(tileActionY)+
+            ",\"z\":"+std::to_string(tileActionZ)+
+            ",\"itemId\":"+std::to_string(tileActionItemId)+"}";
+        ok &= request(pid,cmd);
         return ok ? 0 : 2;
     }
 
