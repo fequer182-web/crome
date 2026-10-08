@@ -1154,11 +1154,12 @@ static void RunRamoniaCaveCycle(
     const bool isWalkNode =
         node.type=="walk" || node.type=="stand";
     const bool isDirectUseNode =
-        node.type=="use" || node.type=="ladder";
+        node.type=="use" ||
+        node.type=="ladder" ||
+        node.type=="use_with_ground";
     const bool isToolUseNode =
         node.type=="rope" ||
-        node.type=="shovel" ||
-        node.type=="use_with_ground";
+        node.type=="shovel";
 
     if (!isWalkNode && !isDirectUseNode && !isToolUseNode) {
         SetRamoniaCaveStatus(
@@ -3483,6 +3484,8 @@ static void DrawCavebot(const Theme& t) {
         } else if(std::sscanf(
                       line.c_str(),"Hole %d @ %d, %d, %d",
                       &item,&x,&y,&z)==4){
+            // Hole/bueiro is a direct tile use. Rope/Shovel are the tool
+            // actions that use Game::useWith.
             rcfg["waypoints"].push_back({
                 {"type","use_with_ground"},{"item_id",item},
                 {"x",x},{"y",y},{"z",z}});
