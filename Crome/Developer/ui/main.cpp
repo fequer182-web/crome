@@ -1028,6 +1028,8 @@ static bool RamoniaLootOpenAndMove(
     return true;
 }
 
+static std::vector<int> CatalogIds(const char* key);
+
 struct RamoniaCaveWorkerState {
     std::size_t index{};
     std::uint64_t waitUntilMs{};
