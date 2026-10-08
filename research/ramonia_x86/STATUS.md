@@ -1059,12 +1059,12 @@ Confirmed live with Bridge V33:
 Next validation: Cavebot node `Hole 430 @ 1268, 1284, 7` or generic `Use 430 @ ...` in a short route.
 
 
-### Ladder follow-up - observed ID 407
+### Ladder follow-up - ID still unresolved
 
 After extended stable Cavebot runtime with no crashes:
 - direct Hole/bueiro use is confirmed working;
 - ladder did not issue a visible use during the route;
-- the Crome screenshot from the ladder test shows Look ID 407 while the global ladder catalog previously only contained Olders ID 1948;
-- ID 407 was added as an observed Ramonia ladder candidate (direct Cavebot use still pending validation);
-- Cavebot direct-use nodes now try the waypoint item ID first, then all known IDs in that semantic category. Therefore an existing `Ladder 1948 @ ...` waypoint can fall back to 407 on Ramonia if 1948 is absent on the tile;
-- screenshot also showed `Cavebot: pausado por Target/Loot`, so isolated ladder validation should be run with Target/Loot disabled.
+- Look ID 407 seen in a screenshot was initially treated as a ladder candidate, but direct `USE_TILE_ITEM_AT 1282,1258,8 itemId=407` returned `tile_item_not_found`;
+- therefore 407 is not promoted as a ladder ID and was removed from the ladder catalog;
+- Cavebot direct-use nodes still support category fallback, but only validated/confirmed IDs should be stored there;
+- next diagnostic is `GET_TILE_ITEMS_AT` on the exact ladder square, followed by direct `usetile` using the returned item ID.
