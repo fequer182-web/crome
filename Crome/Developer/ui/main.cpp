@@ -184,6 +184,7 @@ struct RamoniaPositionUi {
 
 static std::atomic<bool> g_ramoniaWorkerRun{true};
 static std::atomic<bool> g_ramoniaBridgeReady{false};
+static std::atomic<bool> g_ramoniaWalkReady{false};
 static std::atomic<int> g_ramoniaBridgeVersion{0};
 static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
@@ -1375,6 +1376,7 @@ static void RamoniaTargetWorker() {
         g_ramoniaPid.store(pid);
         if (!pid) {
             g_ramoniaBridgeReady.store(false);
+            g_ramoniaWalkReady.store(false);
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
             nextLightRefreshMs = 0;
@@ -1407,6 +1409,7 @@ static void RamoniaTargetWorker() {
             !hello.value("dispatcherReady",false) ||
             hello.value("bridgeVersion",0) < 6) {
             g_ramoniaBridgeReady.store(false);
+            g_ramoniaWalkReady.store(false);
             g_ramoniaBridgeVersion.store(
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
@@ -1435,6 +1438,8 @@ static void RamoniaTargetWorker() {
         const int bridgeVersion = hello.value("bridgeVersion",0);
         g_ramoniaBridgeReady.store(true);
         g_ramoniaBridgeVersion.store(bridgeVersion);
+        g_ramoniaWalkReady.store(
+            bridgeVersion>=29 && hello.value("walkReady",false));
 
         const auto nowMs = static_cast<std::uint64_t>(GetTickCount64());
 
@@ -1777,14 +1782,18 @@ static void RamoniaTargetWorker() {
             HasRamoniaTargetPolicy(targetCfg);
         const bool lootActive =
             lootCfg.enabled && bridgeVersion >= 21;
+        const bool caveWalkReady =
+            bridgeVersion>=29 && g_ramoniaWalkReady.load();
         const bool caveActive =
-            caveCfg.enabled && bridgeVersion >= 27;
+            caveCfg.enabled && caveWalkReady;
 
         if (!caveActive) {
             if (!caveCfg.enabled)
                 SetRamoniaCaveStatus("Cavebot: desligado");
+            else if (bridgeVersion<29)
+                SetRamoniaCaveStatus("Cavebot: requer Bridge V29+");
             else
-                SetRamoniaCaveStatus("Cavebot: requer Bridge V27+");
+                SetRamoniaCaveStatus("Cavebot: AutoWalk V38 aguardando validacao");
         }
 
         if (!lootActive) {
@@ -2101,7 +2110,9 @@ static bool LootRuntimeReady() {
 
 static bool CaveRuntimeReady() {
     return g_nativeRuntimeLoaded ||
-           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 27);
+           (g_ramoniaBridgeReady.load() &&
+            g_ramoniaBridgeVersion.load() >= 29 &&
+            g_ramoniaWalkReady.load());
 }
 
 static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
