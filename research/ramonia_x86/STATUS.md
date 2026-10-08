@@ -753,3 +753,12 @@ Prepared future semantics:
 - Party Mode: green shield / green skull ally semantics pending runtime validation.
 
 No Friend/Party native action is enabled yet.
+
+
+## Crome v0.9.10 Compact UI
+
+UI-only cleanup before Cavebot work:
+- Tools card height is reduced on Ramonia; native backend keeps extra height when needed.
+- Loot / Looter card height is reduced substantially on Ramonia, removing the large blank area below Ground Drop.
+- Rune Maker / Trainer card height is reduced on Ramonia while preserving the larger legacy/native layout.
+- No Target, Loot, Healing, Light, Food, Trainer, Bridge, or Cavebot behavior changed.
