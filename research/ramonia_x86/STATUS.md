@@ -1177,3 +1177,26 @@ Live-confirmed on Ramonia through GET_HANDS:
 - left slot 6 empty.
 
 This confirms the hand-slot mapping used by the guarded Pick Up Spear test. The next one-shot pickup should preserve item 2512 and choose empty slot 6 for spear ID 2389.
+
+
+### Bridge V35 live validation - ground spear to free hand
+
+Live-confirmed on Ramonia:
+- GET_HANDS confirmed slot 5 right hand and slot 6 left hand;
+- test state: right hand contained item ID 2512 count 1 and left hand was empty;
+- MOVE_NEARBY_ITEM_TO_HAND correctly rejected spear ID 2389 while it was outside the local 3x3 window with item_not_found_in_3x3;
+- after the player moved into range, the same command succeeded;
+- source spear: ID 2389 at 1220,1280,7, stackIndex 2;
+- Game::move moved exactly count 1 to destination slot 6;
+- item 2512 in slot 5 was preserved;
+- destination encoding x=0xFFFF, y=inventory slot, z=0 is therefore live-confirmed for ground -> hand on this Ramonia build.
+
+Crome automatic Pick Up Spear is now wired to:
+- run only while the Pick Up Spear toggle is enabled;
+- search exact configured spear IDs only in the 3x3 player window;
+- move one item per cycle;
+- prefer a hand already holding the same spear ID, otherwise an empty hand;
+- never replace a different item in either hand;
+- pause tile polling during detected floor/map transitions.
+
+The requested 20% free-capacity reserve remains configured but is not enforced yet because GET_PLAYER does not currently expose a canonical capacity value. The capacity guard stays explicitly disabled until that field is wired and live-validated.
