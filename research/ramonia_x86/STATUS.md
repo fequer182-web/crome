@@ -1068,3 +1068,18 @@ After extended stable Cavebot runtime with no crashes:
 - therefore 407 is not promoted as a ladder ID and was removed from the ladder catalog;
 - Cavebot direct-use nodes still support category fallback, but only validated/confirmed IDs should be stored there;
 - next diagnostic is `GET_TILE_ITEMS_AT` on the exact ladder square, followed by direct `usetile` using the returned item ID.
+
+
+### Structural tile use policy - itemId 0
+
+Live validation on Ramonia showed:
+- `USE_TILE_ITEM_AT 1282,1258,8 itemId=1386` activated the ladder;
+- `USE_TILE_ITEM_AT 1282,1258,8 itemId=0` also activated the same ladder;
+- GET_TILE_ITEMS_AT showed 1386 as the top item on that tile.
+
+Decision:
+- Cavebot Ladder and Hole now prefer `itemId=0`, meaning "use the current top Item on this tile" from a fresh Tile::things snapshot;
+- this avoids hard-coding build-specific structure IDs such as Olders 1948 vs Ramonia 1386;
+- explicit waypoint/catalog IDs remain fallback diagnostics if top-item use does not work on a special tile;
+- Rope/Shovel remain explicit tool actions through USE_WITH_TILE_AT;
+- after Ladder/Hole use succeeds, Cavebot waits for GET_PLAYER Z to change before advancing the waypoint.
