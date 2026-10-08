@@ -645,6 +645,7 @@ int main(int argc, char** argv) {
     std::uint32_t tileToolItemId{};
     std::uint32_t nearbyItemId=2389;
     std::uint32_t nearbyRadius=1;
+    std::uint32_t pickupItemId=2389;
     std::uint32_t lootItemId = 2813;
     std::uint32_t sourceContainerId = 0;
     std::uint32_t targetContainerId = 0;
@@ -708,6 +709,15 @@ int main(int argc, char** argv) {
         }
         if (argc >= 6) {
             try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
+            catch (...) {}
+        }
+    } else if (mode == "pickupitem" || mode == "pickupspear") {
+        if (argc >= 3) {
+            try { pickupItemId=static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[3])); }
             catch (...) {}
         }
     } else if (mode == "nearbyitem") {
@@ -899,6 +909,29 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok
             ? "[OK] Rota enviada ao Game::autoWalk. Confira o movimento.\n"
             : "[FALHOU] AUTO_WALK_TO nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "hands") {
+        std::cout << "[GET_HANDS - INVENTORY SLOTS 5/6]\n";
+        ok &= request(pid,R"({"cmd":"GET_HANDS"})");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "pickupitem" || mode == "pickupspear") {
+        if (!pickupItemId || pickupItemId>0xFFFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe pickupitem <itemId=2389> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[MOVE_NEARBY_ITEM_TO_HAND - EXPERIMENTAL]\n";
+        const std::string cmd=
+            "{\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\",\"itemId\":"+
+            std::to_string(pickupItemId)+"}";
+        ok &= request(pid,cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] Game::move foi chamado para a mao escolhida. Confira o item no personagem.\n"
+            : "[FALHOU] O pickup foi bloqueado ou a bridge retornou erro.\n");
         return ok ? 0 : 2;
     }
 
