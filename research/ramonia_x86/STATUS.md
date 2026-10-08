@@ -985,3 +985,32 @@ Confirmed live after the V39 formal ABI correction:
 - no Ramonia crash observed during repeated alternating walks;
 - Bridge V31 / one-argument Game::autoWalk(Directions&) is therefore promoted to repeated live-action validated for this exact build;
 - next validation stage is the external Cavebot state machine using Walk-only waypoints in loop.
+
+
+## V40 AutoWalk deep ABI investigation
+
+Follow-up live testing clarified that Bridge V31 direct walkto is crash-stable but not reliably accepted by the game:
+- many AUTO_WALK_TO requests returned `ok:true/result:success`;
+- only a small subset produced actual player movement;
+- therefore Bridge `success` currently means the native void method returned without immediate failure, not that Ramonia accepted/executed the route.
+
+This reopens the formal ABI question.
+
+Important evidence reconciliation:
+- V32 static ABI scan inspected only the first 192 bytes of Game::autoWalk;
+- that scan reported RET not seen and only EBP+8, but the function contains branches beyond +0x300, so the original scan window was insufficient to prove a one-argument ABI;
+- V38 natural runtime capture observed Directions followed immediately by three DWORDs matching a plausible start Position x/y/z;
+- V30 passed those values but used the generic compiler thiscall typedef and later crashed;
+- V31 removed the Position and became crash-stable but frequently produces a no-movement `success`.
+
+V40 is diagnostic-only and does not change the active Bridge V31 call:
+- bounded deep static scan of autoWalk up to 0x1000 bytes / next semantic method;
+- counts positive EBP/ESP frame references including +8/+C/+10/+14 candidates;
+- reports plausible RET / RET imm16 epilogues and cleanup sizes;
+- forces one natural autoWalk recapture even when the profile is already runtime-confirmed;
+- prints 64 bytes before the natural callsite return address and 24 bytes after;
+- resolves the direct CALL target when possible;
+- identifies immediate caller cleanup patterns such as `add esp, imm`;
+- prints trailing stack DWORDs through ESP+0x14.
+
+Goal: determine whether the real contract is Directions-only, Directions+Position with callee cleanup, or Directions+Position with caller cleanup before changing Bridge V31.
