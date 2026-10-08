@@ -764,12 +764,14 @@ typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
 typedef void (__attribute__((thiscall)) *GameUseWithFn)(void*, void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
+typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
 typedef void (__thiscall *GameUseWithFn)(void*, void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
+typedef void (__thiscall *GameAutoWalkFn)(void*, const void*);
 #endif
 
 struct MsvcSmallString32 {
@@ -778,6 +780,13 @@ struct MsvcSmallString32 {
     std::uint32_t capacity{15};
 };
 static_assert(sizeof(MsvcSmallString32)==24,"MSVC x86 string SSO ABI must be 24 bytes");
+
+struct MsvcVectorU32Ref32 {
+    std::uint32_t* first{};
+    std::uint32_t* last{};
+    std::uint32_t* end{};
+};
+static_assert(sizeof(MsvcVectorU32Ref32)==12,"MSVC x86 vector ABI must be 12 bytes");
 
 bool targetSnapshot(std::uintptr_t target, std::uint32_t& id) {
     id = 0;
@@ -2825,6 +2834,117 @@ bool executeUseWithSelfOnGameThread() {
     fn(reinterpret_cast<void*>(game),
        reinterpret_cast<void*>(sourceSlot->holderAddress),
        reinterpret_cast<void*>(&selfThingHolder));
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
+bool executeAutoWalkOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,5);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if (!p.autoWalkRuntimeConfirmed ||
+        !p.autoWalkDirectionsVectorRefConfirmed ||
+        !p.autoWalkMethodRva ||
+        !p.localPlayerVtableRva) {
+        InterlockedExchange(&g_lastActionCode,29);
+        return false;
+    }
+
+    const auto game=g_base+p.gameRva;
+    std::uintptr_t localPlayer{};
+    if (!safeRead(game+p.localPlayerOffset,localPlayer) ||
+        !localPlayer ||
+        !exactObjectVtable(localPlayer,p.localPlayerVtableRva)) {
+        InterlockedExchange(&g_lastActionCode,30);
+        return false;
+    }
+
+    std::uint32_t x{},y{};
+    std::uint8_t z{};
+    if (!safeRead(localPlayer+p.posX,x) ||
+        !safeRead(localPlayer+p.posY,y) ||
+        !safeRead(localPlayer+p.posZ,z)) {
+        InterlockedExchange(&g_lastActionCode,31);
+        return false;
+    }
+
+    if (z!=g_pendingWalkZ) {
+        InterlockedExchange(&g_lastActionCode,32);
+        return false;
+    }
+
+    if (x==g_pendingWalkX && y==g_pendingWalkY) {
+        InterlockedExchange(&g_lastActionCode,33);
+        return true;
+    }
+
+    std::uint32_t directions[127]{};
+    std::size_t count{};
+
+    auto pushDirection=[&](std::uint32_t dir)->bool{
+        if (count>=127) return false;
+        directions[count++]=dir;
+        return true;
+    };
+
+    while (x!=g_pendingWalkX || y!=g_pendingWalkY) {
+        std::uint32_t dir{};
+
+        if (x<g_pendingWalkX && y<g_pendingWalkY) {
+            dir=5; ++x; ++y; // SouthEast
+        } else if (x<g_pendingWalkX && y>g_pendingWalkY) {
+            dir=4; ++x; --y; // NorthEast
+        } else if (x>g_pendingWalkX && y<g_pendingWalkY) {
+            dir=6; --x; ++y; // SouthWest
+        } else if (x>g_pendingWalkX && y>g_pendingWalkY) {
+            dir=7; --x; --y; // NorthWest
+        } else if (x<g_pendingWalkX) {
+            dir=1; ++x; // East
+        } else if (x>g_pendingWalkX) {
+            dir=3; --x; // West
+        } else if (y<g_pendingWalkY) {
+            dir=2; ++y; // South
+        } else {
+            dir=0; --y; // North
+        }
+
+        if (!pushDirection(dir)) {
+            InterlockedExchange(&g_lastActionCode,34);
+            return false;
+        }
+    }
+
+    if (!count) {
+        InterlockedExchange(&g_lastActionCode,33);
+        return true;
+    }
+
+    MsvcVectorU32Ref32 dirs;
+    dirs.first=directions;
+    dirs.last=directions+count;
+    dirs.end=directions+count;
+
+    const auto functionAddress=g_base+p.autoWalkMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,35);
+        return false;
+    }
+
+    const auto fn=reinterpret_cast<GameAutoWalkFn>(functionAddress);
+
+    logLine("[ACTION] AUTO_WALK_TO target=" +
+            std::to_string(g_pendingWalkX) + "," +
+            std::to_string(g_pendingWalkY) + "," +
+            std::to_string(static_cast<unsigned>(g_pendingWalkZ)) +
+            " directions=" + std::to_string(count));
+
+    fn(reinterpret_cast<void*>(game),&dirs);
 
     InterlockedExchange(&g_lastActionCode,1);
     return true;
