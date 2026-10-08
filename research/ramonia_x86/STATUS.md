@@ -762,3 +762,16 @@ UI-only cleanup before Cavebot work:
 - Loot / Looter card height is reduced substantially on Ramonia, removing the large blank area below Ground Drop.
 - Rune Maker / Trainer card height is reduced on Ramonia while preserving the larger legacy/native layout.
 - No Target, Loot, Healing, Light, Food, Trainer, Bridge, or Cavebot behavior changed.
+
+
+## Crome v0.9.11 Cavebot UI Fix
+
+The Cavebot card was being clipped by the fixed-height left column. After Healing + Friends + Rune, only about 208 px remained, while Cavebot still requested 245 px.
+
+UI fix:
+- Cavebot now consumes exactly the remaining height of the left column;
+- the waypoint list viewport is reduced but remains independently scrollable;
+- the Profile caption is shortened to avoid wrapping;
+- bottom Cavebot controls (Keep Follow, Attack Any, Range, Should Attack Me, Mode) remain visible;
+- Runtime / Build footer remains visible;
+- no Cavebot/Target/Loot/Healing backend behavior changed.
