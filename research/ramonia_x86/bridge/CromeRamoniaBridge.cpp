@@ -3766,6 +3766,105 @@ bool executeMoveTileToInventoryOnGameThread() {
     return true;
 }
 
+bool executeMoveTileToGroundOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+
+    if(!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,5);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if(!p.moveRuntimeConfirmed ||
+       !p.moveItemSharedRefConfirmed ||
+       !p.movePositionRefConfirmed ||
+       !p.moveCountConfirmed ||
+       !p.moveMethodRva ||
+       !p.itemContractReady ||
+       !p.tileThingsRuntimeConfirmed) {
+        InterlockedExchange(&g_lastActionCode,46);
+        return false;
+    }
+
+    std::uintptr_t holder{},item{};
+    if(!resolveTileItemHolder(
+            g_pendingMoveSourceTile,
+            g_pendingMoveTileItemId,
+            g_pendingMoveTileExpectedItem,
+            holder,
+            item) ||
+       !holder || !item) {
+        InterlockedExchange(&g_lastActionCode,43);
+        return false;
+    }
+
+    std::uint32_t px{},py{},ix{},iy{};
+    std::uint8_t pz{},iz{};
+    if(!localPlayerPosition(px,py,pz) ||
+       !safeRead(item+p.posX,ix) ||
+       !safeRead(item+p.posY,iy) ||
+       !safeRead(item+p.posZ,iz)) {
+        InterlockedExchange(&g_lastActionCode,44);
+        return false;
+    }
+
+    const auto dx=ix>px ? ix-px : px-ix;
+    const auto dy=iy>py ? iy-py : py-iy;
+    if(iz!=pz || std::max(dx,dy)>1u) {
+        InterlockedExchange(&g_lastActionCode,45);
+        return false;
+    }
+
+    if(!g_pendingMoveGroundX || !g_pendingMoveGroundY ||
+       g_pendingMoveGroundZ!=iz) {
+        InterlockedExchange(&g_lastActionCode,47);
+        return false;
+    }
+
+    const auto ddx=g_pendingMoveGroundX>ix
+        ? g_pendingMoveGroundX-ix : ix-g_pendingMoveGroundX;
+    const auto ddy=g_pendingMoveGroundY>iy
+        ? g_pendingMoveGroundY-iy : iy-g_pendingMoveGroundY;
+    if(std::max(ddx,ddy)!=1u) {
+        InterlockedExchange(&g_lastActionCode,47);
+        return false;
+    }
+
+    const auto functionAddress=g_base+p.moveMethodRva;
+    if(!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,17);
+        return false;
+    }
+
+    MovePosition dest{};
+    dest.x=g_pendingMoveGroundX;
+    dest.y=g_pendingMoveGroundY;
+    dest.z=g_pendingMoveGroundZ;
+
+    std::uint32_t count=g_pendingMoveGroundCount;
+    if(!count) count=1u;
+
+    const auto game=g_base+p.gameRva;
+    const auto fn=reinterpret_cast<GameMoveFn>(functionAddress);
+
+    logLine("[ACTION] MOVE_TILE_TO_GROUND itemId=" +
+            std::to_string(static_cast<unsigned>(g_pendingMoveTileItemId)) +
+            " count=" + std::to_string(count) +
+            " dest=" + std::to_string(dest.x) + "," +
+            std::to_string(dest.y) + "," +
+            std::to_string(static_cast<unsigned>(dest.z)));
+
+    // Ground destination uses the normal world Position directly.
+    // This exact ground->ground use is V36 experimental until live-confirmed.
+    fn(reinterpret_cast<void*>(game),
+       reinterpret_cast<void*>(holder),
+       &dest,
+       count);
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 bool executeTalkOnGameThread() {
     InterlockedExchange(&g_lastActionCode,0);
 
@@ -3847,6 +3946,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeUseWithTileOnGameThread();
                 else if (kind == PendingMoveTileToInventory)
                     executeMoveTileToInventoryOnGameThread();
+                else if (kind == PendingMoveTileToGround)
+                    executeMoveTileToGroundOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -4037,6 +4138,8 @@ std::string actionCodeText(LONG code) {
         case 43: return "tile_pickup_item_changed";
         case 44: return "tile_pickup_position_read_failed";
         case 45: return "tile_pickup_item_out_of_range";
+        case 46: return "tile_ground_move_contract_not_ready";
+        case 47: return "tile_ground_destination_invalid";
         default: return "unknown_action_result";
     }
 }
