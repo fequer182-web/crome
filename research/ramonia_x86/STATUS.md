@@ -775,3 +775,15 @@ UI fix:
 - bottom Cavebot controls (Keep Follow, Attack Any, Range, Should Attack Me, Mode) remain visible;
 - Runtime / Build footer remains visible;
 - no Cavebot/Target/Loot/Healing backend behavior changed.
+
+
+## Crome v0.9.12 Cavebot Compact
+
+Second Cavebot UI pass after live screenshot:
+- Cavebot child now uses exactly the remaining parent height and never requests more than the fixed left column can display;
+- waypoint viewport is reduced;
+- Add/Edit/Remove/Record controls are arranged as a compact 2x2 block instead of four vertical rows;
+- the extra empty-target hint row was removed;
+- bottom Target controls remain visible without covering Runtime / Build.
+
+No Cavebot/Target backend behavior changed.
