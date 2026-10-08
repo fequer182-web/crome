@@ -3111,6 +3111,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeTalkOnGameThread();
                 else if (kind == PendingUseWithSelf)
                     executeUseWithSelfOnGameThread();
+                else if (kind == PendingAutoWalk)
+                    executeAutoWalkOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -3284,6 +3286,13 @@ std::string actionCodeText(LONG code) {
         case 26: return "usewith_self_contract_not_ready";
         case 27: return "local_player_holder_invalid";
         case 28: return "usewith_function_not_executable";
+        case 29: return "autowalk_contract_not_ready";
+        case 30: return "autowalk_local_player_invalid";
+        case 31: return "autowalk_position_read_failed";
+        case 32: return "autowalk_wrong_floor";
+        case 33: return "autowalk_already_reached";
+        case 34: return "autowalk_path_too_long";
+        case 35: return "autowalk_function_not_executable";
         default: return "unknown_action_result";
     }
 }
@@ -3820,6 +3829,53 @@ std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
     return o.str();
 }
 
+std::string autoWalkToResponse(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z) {
+
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"build_not_validated"})";
+    if (!g_profile->autoWalkRuntimeConfirmed ||
+        !g_profile->autoWalkDirectionsVectorRefConfirmed ||
+        !g_profile->autoWalkMethodRva)
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready"})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"dispatcher_not_ready"})";
+
+    g_pendingWalkX=x;
+    g_pendingWalkY=y;
+    g_pendingWalkZ=z;
+    InterlockedExchange(&g_pendingActionKind,PendingAutoWalk);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    g_pendingWalkX=0;
+    g_pendingWalkY=0;
+    g_pendingWalkZ=0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"AUTO_WALK_TO\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    const bool ok=code==1 || code==33;
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (ok?"true":"false")
+      << ",\"cmd\":\"AUTO_WALK_TO\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"x\":" << x
+      << ",\"y\":" << y
+      << ",\"z\":" << static_cast<unsigned>(z)
+      << "}";
+    return o.str();
+}
+
 std::string attackIdResponse(std::uint32_t creatureId) {
     logLine("[TARGET TRACE] ATTACK_ID request id=" + std::to_string(creatureId));
     if (!g_profile || !g_buildMatched)
@@ -3942,7 +3998,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":26,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":27,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -3983,6 +4039,14 @@ std::string handleRequest(const std::string& request) {
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
+    if (cmd == "AUTO_WALK_TO") {
+        const auto x=uint32FieldFromRequest(request,"x");
+        const auto y=uint32FieldFromRequest(request,"y");
+        const auto z=uint32FieldAllowZeroFromRequest(request,"z");
+        if (!x || !y || !z || *z>0xFFu)
+            return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"invalid_position"})";
+        return autoWalkToResponse(*x,*y,static_cast<std::uint8_t>(*z));
+    }
     if (cmd == "ARM_LOOK_ID") return armLookCaptureResponse();
     if (cmd == "GET_LOOK_ID") return getLookCaptureResponse();
     if (cmd == "SAY") {
@@ -4109,7 +4173,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V26 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V27 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
