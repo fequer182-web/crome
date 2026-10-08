@@ -8,7 +8,7 @@ set "PKG_DIR=%BUILD_DIR%\Ramonia_x86_Test"
 set "PROFILE_SRC=%~dp0profiles\ramonia_x86\6AB03F94_E281E9CA5BA0AF2.json"
 set "PROFILE_DIR=%PKG_DIR%\profiles\ramonia_x86"
 set "INJECTOR_CPP=%~dp0..\..\tools\injector\PID_Injector.cpp"
-set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V38.dll"
+set "OUT_DLL=%PKG_DIR%\RamoniaResearchProbe_V39.dll"
 set "OUT_INJECTOR=%PKG_DIR%\PID_Injector_x86.exe"
 set "BRIDGE_SRC=%~dp0bridge\CromeRamoniaBridge.cpp"
 set "PIPE_TEST_SRC=%~dp0bridge\CromePipeTest.cpp"
@@ -17,7 +17,7 @@ set "OUT_BRIDGE=%PKG_DIR%\CromeRamoniaBridge_x86.dll"
 set "OUT_PIPE_TEST=%PKG_DIR%\CromePipeTest_x64.exe"
 
 echo ============================================================
-echo          Crome - Ramonia x86 Research Probe V38
+echo          Crome - Ramonia x86 Research Probe V39
 echo                     BUILD X86
 echo ============================================================
 echo.
@@ -81,7 +81,7 @@ if errorlevel 1 (
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%PROFILE_DIR%" >nul 2>&1
 
-echo [BUILD] Compilando RamoniaResearchProbe_V38.dll...
+echo [BUILD] Compilando RamoniaResearchProbe_V39.dll...
 "%CXX%" ^
     -std=c++20 ^
     -O2 ^
@@ -328,7 +328,7 @@ echo [ARCH] Pipe client PE32+ x86-64: OK
     echo.
     echo IMPORTANTE - Cavebot:
     echo   AUTO_WALK_TO usa o contrato formal V39: Directions ref; xyz V38 tratado como caller-local.
-    echo   Para pesquisa, injete RamoniaResearchProbe_V38.dll separadamente e capture autoWalk natural.
+    echo   Research Probe V39 permanece apenas para pesquisa; nao e necessario neste teste.
     echo   Primeiro teste walkto repetido pelo CromePipeTest; depois Cavebot Enabled se walkReady=true.
 ) > "%PKG_DIR%\TESTE.txt"
 
