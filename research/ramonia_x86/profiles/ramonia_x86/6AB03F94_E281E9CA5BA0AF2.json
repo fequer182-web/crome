@@ -1,10 +1,10 @@
 {
-  "schema": "otclab-ramonia-x86-research-v38",
+  "schema": "otclab-ramonia-x86-research-v39",
   "mode": "read_only_no_hooks_no_internal_calls",
   "policy": "discovery_rules_only_no_cross_build_rva_oracle",
   "persistence": {
-    "profileVersion": 38,
-    "checkpoint": "action_abi_autoWalk",
+    "profileVersion": 39,
+    "checkpoint": "autowalk_formal_abi_correction",
     "resumeEnabled": true
   },
   "build": {
@@ -538,15 +538,11 @@
           "index": 0,
           "semantic": "Directions",
           "abiType": "vector_direction_u32_ref",
-          "status": "runtime_confirmed"
-        },
-        {
-          "index": 1,
-          "semantic": "Position",
-          "abiType": "position_u32_u32_u8_value",
-          "status": "runtime_confirmed"
+          "status": "runtime_confirmed",
+          "correction": "V39 formal ABI: function-body evidence confirms [EBP+8]; V38 trailing xyz stack values reclassified as caller-local evidence"
         }
-      ]
+      ],
+      "correction": "V39: only Directions is treated as a formal argument. V38 trailing xyz values matched LocalPlayer but were not proven as callee parameters."
     },
     "attack": {
       "methodRva": "0x79190",
