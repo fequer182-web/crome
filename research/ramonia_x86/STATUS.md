@@ -1026,3 +1026,23 @@ Live test after V40 ABI promotion:
 - Cavebot controller still retains the later safety fixes: one native autoWalk per waypoint, retry only after stuck timeout, max retry limit, and bridge-side cooldown.
 
 Next validation stage: Walk-only Cavebot loop with 2-3 nearby waypoints.
+
+
+### Bridge V33 - fresh tile actions
+
+Live Cavebot Walk loop remained stable for an extended test period after Bridge V32 / V40.
+
+The next failing area is Cavebot special tile actions (Use/Ladder/Rope/Shovel).
+
+V33 changes:
+- direct tile actions force a fresh Tile::things discovery immediately before resolving the target;
+- USE_TILE_ITEM_AT and USE_WITH_TILE_AT no longer rely only on a potentially stale Tile cache after approach movement;
+- new read-only GET_TILE_ITEMS_AT command lists the actual client item IDs and stack indexes at one x/y/z;
+- CromePipeTest adds: tileitems <x> <y> <z> [PID];
+- Cavebot Ramonia now requires Bridge V33+ so an older V32 DLL cannot be mistaken for the refreshed-action build.
+
+Validation order:
+1. stand adjacent to a ladder/use target;
+2. tileitems x y z;
+3. usetile x y z exactItemId (or 0 for top item diagnostic);
+4. once direct use is confirmed, retest Cavebot Ladder/Use.
