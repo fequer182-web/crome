@@ -39,10 +39,10 @@ HHOOK g_gameThreadHook{};
 HANDLE g_actionEvent{};
 constexpr UINT kActionMessage = WM_APP + 0x620;
 
-// V31 active-call gate. V39 correction keeps only the formal argument that
-// is proven by the function body: Directions at [EBP+8]. The xyz DWORDs seen
-// by V38 are treated as caller-local/trailing stack evidence, not a formal arg.
-constexpr bool kAutoWalkActiveCallV39Implemented = true;
+// V32 active-call gate. V40 deep static + natural callsite capture proved
+// ECX=Game plus 16 callee-cleaned stack bytes:
+//   arg1 Directions& (4 bytes) + arg2 Position value (12 bytes), RET 16.
+constexpr bool kAutoWalkActiveCallV40Implemented = true;
 
 enum PendingActionKind : LONG {
     PendingNone = 0,
@@ -148,9 +148,8 @@ struct Profile {
     std::uintptr_t autoWalkMethodRva{};
     bool autoWalkRuntimeConfirmed{};
     bool autoWalkDirectionsVectorRefConfirmed{};
-    // Kept only for backwards profile compatibility. V39 no longer treats
-    // trailing xyz stack DWORDs as a formal autoWalk argument.
     bool autoWalkStartPositionValueConfirmed{};
+    std::uint32_t autoWalkStackCleanupBytes{};
 
     std::uintptr_t tileVtableRva{};
     std::size_t tileThingsOffset{};
@@ -511,6 +510,8 @@ Profile loadProfile(const std::string& path) {
             p.autoWalkMethodRva = static_cast<std::uintptr_t>(*n);
         p.autoWalkRuntimeConfirmed =
             stringValue(autoWalk->get("status")) == "runtime_confirmed";
+        if (const auto n = integerValue(autoWalk->get("stackCleanupBytes")))
+            p.autoWalkStackCleanupBytes = static_cast<std::uint32_t>(*n);
 
         const auto* args = autoWalk->get("args");
         if (args && args->isArray() && !args->array().empty()) {
@@ -788,14 +789,14 @@ typedef void (__attribute__((thiscall)) *GameUseFn)(void*, void*);
 typedef void (__attribute__((thiscall)) *GameUseWithFn)(void*, void*, void*);
 typedef void (__attribute__((thiscall)) *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__attribute__((thiscall)) *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
-typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*);
+typedef void (__attribute__((thiscall)) *GameAutoWalkFn)(void*, const void*, MovePosition);
 #else
 typedef void (__thiscall *GameAttackFn)(void*, void*, bool);
 typedef void (__thiscall *GameUseFn)(void*, void*);
 typedef void (__thiscall *GameUseWithFn)(void*, void*, void*);
 typedef void (__thiscall *GameMoveFn)(void*, void*, const MovePosition*, std::uint32_t);
 typedef void (__thiscall *GameTalkChannelFn)(void*, std::uint32_t, std::uint32_t, const void*);
-typedef void (__thiscall *GameAutoWalkFn)(void*, const void*);
+typedef void (__thiscall *GameAutoWalkFn)(void*, const void*, MovePosition);
 #endif
 
 struct MsvcSmallString32 {
@@ -2986,9 +2987,11 @@ bool executeAutoWalkOnGameThread() {
     }
 
     const auto& p=*g_profile;
-    if (!kAutoWalkActiveCallV39Implemented ||
+    if (!kAutoWalkActiveCallV40Implemented ||
         !p.autoWalkRuntimeConfirmed ||
         !p.autoWalkDirectionsVectorRefConfirmed ||
+        !p.autoWalkStartPositionValueConfirmed ||
+        p.autoWalkStackCleanupBytes!=16 ||
         !p.autoWalkMethodRva ||
         !p.localPlayerVtableRva) {
         InterlockedExchange(&g_lastActionCode,29);
@@ -3022,6 +3025,14 @@ bool executeAutoWalkOnGameThread() {
         InterlockedExchange(&g_lastActionCode,33);
         return true;
     }
+
+    // V40 natural callsite proves the 12-byte Position value is copied from
+    // the walk task before Directions& is pushed. Preserve the real starting
+    // position before x/y are advanced while building the route.
+    MovePosition startPos{};
+    startPos.x=x;
+    startPos.y=y;
+    startPos.z=z;
 
     std::uint32_t directions[127]{};
     std::size_t count{};
@@ -3092,7 +3103,7 @@ bool executeAutoWalkOnGameThread() {
             std::to_string(static_cast<unsigned>(g_pendingWalkZ)) +
             " directions=" + std::to_string(count));
 
-    fn(reinterpret_cast<void*>(game),&dirs);
+    fn(reinterpret_cast<void*>(game),&dirs,startPos);
     g_lastAutoWalkDispatchTick=GetTickCount64();
 
     InterlockedExchange(&g_lastActionCode,1);
@@ -4165,10 +4176,12 @@ std::string autoWalkToResponse(
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"build_not_validated"})";
     if (!g_profile->autoWalkRuntimeConfirmed ||
         !g_profile->autoWalkDirectionsVectorRefConfirmed ||
+        !g_profile->autoWalkStartPositionValueConfirmed ||
+        g_profile->autoWalkStackCleanupBytes!=16 ||
         !g_profile->autoWalkMethodRva)
-        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready_v39"})";
-    if (!kAutoWalkActiveCallV39Implemented)
-        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_active_call_locked_pending_v39"})";
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready_v40"})";
+    if (!kAutoWalkActiveCallV40Implemented)
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_active_call_locked_pending_v40"})";
     if (!prepareGameThreadDispatcher())
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"dispatcher_not_ready"})";
 
@@ -4327,7 +4340,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":31,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":32,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4336,9 +4349,11 @@ std::string handleRequest(const std::string& request) {
           << ((g_profile && g_profile->lookRuntimeConfirmed &&
                g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
           << ",\"walkReady\":"
-          << ((kAutoWalkActiveCallV39Implemented &&
+          << ((kAutoWalkActiveCallV40Implemented &&
                g_profile && g_profile->autoWalkRuntimeConfirmed &&
-               g_profile->autoWalkDirectionsVectorRefConfirmed) ? "true" : "false")
+               g_profile->autoWalkDirectionsVectorRefConfirmed &&
+               g_profile->autoWalkStartPositionValueConfirmed &&
+               g_profile->autoWalkStackCleanupBytes==16) ? "true" : "false")
           << ",\"lightReady\":"
           << ((g_profile && g_profile->worldLightContractReady) ? "true" : "false")
           << ",\"lightEnabled\":" << (g_worldLightEnabled ? "true" : "false")
@@ -4537,7 +4552,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V31 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V32 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
