@@ -1295,3 +1295,24 @@ Safety gate:
 
 Pipe diagnostic:
   CromePipeTest_x64.exe topmoveabi
+
+
+### V39 getTopMoveThing static ABI evidence
+
+V38 read-only output for semantic bind Tile::getTopMoveThing RVA 0x197AD0 showed:
+- method prologue is MSVC x86 frame based;
+- ECX is copied at entry, supporting ECX=Tile*;
+- [EBP+8] is read immediately and later written through, strongly indicating hidden return-storage for returned ThingPtr;
+- method reads Tile+0x24 and Tile+0x28, exactly matching the already validated Tile::things begin/end layout;
+- first 160 bytes contained no RET, while an early branch targets method offset +0x1DD, so the prior probe was too short to capture the common epilogue;
+- direct rel32 caller scan found no callers, which is compatible with virtual/indirect or registry-driven invocation and is not by itself an ABI failure.
+
+V39 expands the read-only probe to 0x300 bytes and reports:
+- thisFromEcx;
+- hiddenReturnStorageAtEbp8;
+- Tile::things +0x24/+0x28 evidence;
+- every C3/C2 return candidate with stack cleanup and surrounding bytes;
+- bounded entry and common-return-area windows.
+
+Safety remains fail-closed:
+- pickup and uncover stay disabled until return cleanup / returned ThingPtr convention is confirmed.
