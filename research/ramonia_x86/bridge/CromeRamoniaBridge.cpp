@@ -1317,6 +1317,9 @@ struct TileItemDiagnostic {
     std::uintptr_t tileAddress{};
     std::uint16_t id{};
     std::uint16_t count{};
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint8_t z{};
     std::uint32_t tileSlot{};
     std::uint32_t stackIndex{};
     std::uint32_t tileThingCount{};
@@ -2147,8 +2150,14 @@ std::vector<TileItemDiagnostic> scanTileItemsFromSnapshot(
                 continue;
 
             std::uint16_t id{}, count{};
+            std::uint32_t x{},y{};
+            std::uint8_t z{};
             if (!safeRead(thing + g_profile->itemIdOffset, id) || !id ||
-                !safeRead(thing + g_profile->itemCountOffset, count))
+                !safeRead(thing + g_profile->itemCountOffset, count) ||
+                !safeRead(thing + g_profile->posX, x) ||
+                !safeRead(thing + g_profile->posY, y) ||
+                !safeRead(thing + g_profile->posZ, z) ||
+                !x || !y || z > 15u)
                 continue;
 
             TileItemDiagnostic d;
@@ -2156,6 +2165,9 @@ std::vector<TileItemDiagnostic> scanTileItemsFromSnapshot(
             d.tileAddress = tile;
             d.id = id;
             d.count = count;
+            d.x = x;
+            d.y = y;
+            d.z = z;
             d.tileSlot = static_cast<std::uint32_t>(tileIndex);
             d.stackIndex = static_cast<std::uint32_t>(stackIndex);
             d.tileThingCount = static_cast<std::uint32_t>(things.size());
@@ -2228,6 +2240,28 @@ std::vector<TileItemDiagnostic> scanCachedTileItems() {
 
     return scanTileItemsFromSnapshot(copyTileCache());
 }
+std::optional<TileItemDiagnostic> findTileItemAt(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z,
+    std::uint16_t preferredId = 0) {
+
+    const auto items=scanCachedTileItems();
+    std::optional<TileItemDiagnostic> best;
+
+    for (const auto& item:items) {
+        if (item.x!=x || item.y!=y || item.z!=z)
+            continue;
+        if (preferredId && item.id!=preferredId)
+            continue;
+
+        if (!best || item.stackIndex>best->stackIndex)
+            best=item;
+    }
+
+    return best;
+}
+
 bool sameItemIdentity(const TileItemDiagnostic& a, const TileItemDiagnostic& b) {
     return a.address == b.address && a.id == b.id;
 }
