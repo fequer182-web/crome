@@ -4766,77 +4766,118 @@ std::string topMoveAbiResponse() {
     if(!isExecutableAddress(target))
         return R"({"ok":false,"cmd":"GET_TOP_MOVE_ABI","error":"method_not_executable"})";
 
-    std::uint8_t entry[160]{};
-    if(!safeCopyBytes(target,entry,sizeof(entry)))
+    constexpr std::size_t kProbeBytes=0x300;
+    std::vector<std::uint8_t> code(kProbeBytes);
+    if(!safeCopyBytes(target,code.data(),code.size()))
         return R"({"ok":false,"cmd":"GET_TOP_MOVE_ABI","error":"method_bytes_unreadable"})";
 
-    std::vector<unsigned> retCleanups;
-    for(std::size_t i=0;i<sizeof(entry);++i) {
-        if(entry[i]==0xC3) {
-            retCleanups.push_back(0u);
-        } else if(entry[i]==0xC2 && i+2<sizeof(entry)) {
-            const unsigned n=
-                static_cast<unsigned>(entry[i+1]) |
-                (static_cast<unsigned>(entry[i+2])<<8);
-            retCleanups.push_back(n);
+    struct RetSite {
+        std::size_t offset{};
+        unsigned cleanup{};
+        std::string window;
+    };
+    std::vector<RetSite> returns;
+
+    for(std::size_t i=0;i<code.size();++i) {
+        unsigned cleanup{};
+        std::size_t insnSize{};
+        if(code[i]==0xC3) {
+            cleanup=0;
+            insnSize=1;
+        } else if(code[i]==0xC2 && i+2<code.size()) {
+            cleanup=
+                static_cast<unsigned>(code[i+1]) |
+                (static_cast<unsigned>(code[i+2])<<8);
+            insnSize=3;
+        } else {
+            continue;
         }
+
+        const std::size_t before=std::min<std::size_t>(32,i);
+        const std::size_t after=std::min<std::size_t>(
+            12,code.size()-(i+insnSize));
+        const auto wstart=i-before;
+        const auto wsize=before+insnSize+after;
+        returns.push_back({
+            i,
+            cleanup,
+            hexBytes(code.data()+wstart,wsize)
+        });
     }
-    std::sort(retCleanups.begin(),retCleanups.end());
-    retCleanups.erase(
-        std::unique(retCleanups.begin(),retCleanups.end()),
-        retCleanups.end());
 
-    std::uintptr_t textStart{};
-    std::size_t textSize{};
-    std::vector<std::pair<std::uintptr_t,std::string>> callers;
-
-    if(moduleTextRange(textStart,textSize) && textSize<=0x2000000u) {
-        std::vector<std::uint8_t> textBytes(textSize);
-        if(safeCopyBytes(textStart,textBytes.data(),textBytes.size())) {
-            for(std::size_t i=0;i+5<=textBytes.size() && callers.size()<8;++i) {
-                if(textBytes[i]!=0xE8) continue;
-                std::int32_t rel{};
-                std::memcpy(&rel,textBytes.data()+i+1,sizeof(rel));
-                const auto callAddress=textStart+i;
-                const auto destination=
-                    static_cast<std::uintptr_t>(
-                        static_cast<std::int64_t>(callAddress+5)+rel);
-                if(destination!=target) continue;
-
-                const std::size_t before=std::min<std::size_t>(20,i);
-                const std::size_t after=
-                    std::min<std::size_t>(28,textBytes.size()-(i+5));
-                const auto windowStart=i-before;
-                const auto windowSize=before+5+after;
-                callers.push_back({
-                    callAddress-g_base,
-                    hexBytes(textBytes.data()+windowStart,windowSize)
-                });
+    auto containsPattern=[&](std::initializer_list<std::uint8_t> bytes) {
+        if(bytes.size()==0 || bytes.size()>code.size()) return false;
+        for(std::size_t i=0;i+bytes.size()<=code.size();++i) {
+            std::size_t j=0;
+            bool same=true;
+            for(const auto b:bytes) {
+                if(code[i+j]!=b) { same=false; break; }
+                ++j;
             }
+            if(same) return true;
         }
-    }
+        return false;
+    };
+
+    const bool copiesThisFromEcx=
+        containsPattern({0x8B,0xD1}) ||
+        containsPattern({0x8B,0xF1}) ||
+        containsPattern({0x8B,0xF9});
+    const bool readsHiddenOutAtEbp8=
+        containsPattern({0x8B,0x45,0x08}) ||
+        containsPattern({0x8B,0x4D,0x08}) ||
+        containsPattern({0x8B,0x55,0x08});
+    const bool readsThingsBegin=
+        containsPattern({0x8B,0x5A,0x24}) ||
+        containsPattern({0x8B,0x72,0x24}) ||
+        containsPattern({0x8B,0x7A,0x24});
+    const bool readsThingsEnd=
+        containsPattern({0x8B,0x4A,0x28}) ||
+        containsPattern({0x8B,0x72,0x28}) ||
+        containsPattern({0x8B,0x7A,0x28});
 
     std::ostringstream o;
     o << "{\"ok\":true,\"cmd\":\"GET_TOP_MOVE_ABI\""
       << ",\"readOnly\":true"
       << ",\"methodRva\":\"0x" << std::hex << std::uppercase
       << g_profile->getTopMoveThingMethodRva << std::dec << "\""
-      << ",\"entryBytes\":\"" << hexBytes(entry,sizeof(entry)) << "\""
-      << ",\"retCleanupCandidates\":[";
+      << ",\"probeBytes\":" << kProbeBytes
+      << ",\"evidence\":{"
+      << "\"thisFromEcx\":" << (copiesThisFromEcx?"true":"false")
+      << ",\"hiddenReturnStorageAtEbp8\":" << (readsHiddenOutAtEbp8?"true":"false")
+      << ",\"readsTileThingsBegin24\":" << (readsThingsBegin?"true":"false")
+      << ",\"readsTileThingsEnd28\":" << (readsThingsEnd?"true":"false")
+      << "}"
+      << ",\"returns\":[";
 
-    for(std::size_t i=0;i<retCleanups.size();++i) {
+    for(std::size_t i=0;i<returns.size();++i) {
         if(i) o << ",";
-        o << retCleanups[i];
+        o << "{\"offset\":\"0x" << std::hex << std::uppercase
+          << returns[i].offset << std::dec
+          << "\",\"cleanup\":" << returns[i].cleanup
+          << ",\"window\":\"" << returns[i].window << "\"}";
+    }
+    o << "]";
+
+    // Include two bounded code windows: entry and the common return area
+    // observed from the V38 forward jump to +0x1DD. No code is executed.
+    const std::size_t entrySize=std::min<std::size_t>(0xB0,code.size());
+    o << ",\"entryWindow\":\"" << hexBytes(code.data(),entrySize) << "\"";
+
+    constexpr std::size_t commonReturn=0x1DD;
+    if(commonReturn<code.size()) {
+        const std::size_t before=std::min<std::size_t>(48,commonReturn);
+        const std::size_t after=std::min<std::size_t>(
+            128,code.size()-commonReturn);
+        o << ",\"returnAreaOffset\":\"0x1DD\""
+          << ",\"returnAreaWindow\":\""
+          << hexBytes(
+                 code.data()+commonReturn-before,
+                 before+after)
+          << "\"";
     }
 
-    o << "],\"callers\":[";
-    for(std::size_t i=0;i<callers.size();++i) {
-        if(i) o << ",";
-        o << "{\"callRva\":\"0x" << std::hex << std::uppercase
-          << callers[i].first << std::dec
-          << "\",\"window\":\"" << callers[i].second << "\"}";
-    }
-    o << "]}";
+    o << "}";
     return o.str();
 }
 
@@ -4866,10 +4907,10 @@ std::string moveNearbyItemToHandResponse(std::uint16_t itemId) {
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"build_not_validated"})";
 
-    // V38 safety gate: multiple live stack tests proved that raw Tile::things
+    // V39 safety gate: multiple live stack tests proved that raw Tile::things
     // indices are not sufficient to determine the visible/movable top item.
     // Keep pickup disabled until getTopMoveThing ABI is read-only validated.
-    return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"top_move_access_pending_v38"})";
+    return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"top_move_access_pending_v39"})";
 
     /* V35 live-confirmed ground->hand backend retained below and will be
        re-enabled once Tile::getTopMoveThing selection is confirmed.
@@ -4976,10 +5017,10 @@ std::string uncoverTileTargetResponse(
         return std::string("{\"ok\":false,\"cmd\":\"") + command +
                "\",\"error\":\"build_not_validated\"}";
 
-    // V38 safety gate. Do not move any candidate until the real
+    // V39 safety gate. Do not move any candidate until the real
     // Tile::getTopMoveThing ABI/return convention is established.
     return std::string("{\"ok\":false,\"cmd\":\"") + command +
-           "\",\"error\":\"top_move_abi_validation_required_v38\"}";
+           "\",\"error\":\"top_move_abi_validation_required_v39\"}";
 
     /*
     if(!g_profile->moveRuntimeConfirmed ||
@@ -5462,7 +5503,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":38,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":39,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -5720,7 +5761,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V38 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V39 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
