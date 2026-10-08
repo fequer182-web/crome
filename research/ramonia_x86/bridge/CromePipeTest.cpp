@@ -643,6 +643,8 @@ int main(int argc, char** argv) {
     std::uint32_t tileActionX{},tileActionY{},tileActionZ{};
     std::uint32_t tileActionItemId{};
     std::uint32_t tileToolItemId{};
+    std::uint32_t nearbyItemId=2389;
+    std::uint32_t nearbyRadius=1;
     std::uint32_t lootItemId = 2813;
     std::uint32_t sourceContainerId = 0;
     std::uint32_t targetContainerId = 0;
@@ -706,6 +708,19 @@ int main(int argc, char** argv) {
         }
         if (argc >= 6) {
             try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
+            catch (...) {}
+        }
+    } else if (mode == "nearbyitem") {
+        if (argc >= 3) {
+            try { nearbyItemId=static_cast<std::uint32_t>(std::stoul(argv[2])); }
+            catch (...) {}
+        }
+        if (argc >= 4) {
+            try { nearbyRadius=static_cast<std::uint32_t>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+        if (argc >= 5) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[4])); }
             catch (...) {}
         }
     } else if (mode == "tileitems") {
@@ -884,6 +899,21 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok
             ? "[OK] Rota enviada ao Game::autoWalk. Confira o movimento.\n"
             : "[FALHOU] AUTO_WALK_TO nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "nearbyitem") {
+        if (!nearbyItemId || nearbyItemId>0xFFFFu || nearbyRadius>7u) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe nearbyitem <itemId> [radius=1] [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[GET_NEARBY_ITEM - LOCAL TILE WINDOW]\n";
+        const std::string cmd=
+            "{\"cmd\":\"GET_NEARBY_ITEM\",\"itemId\":"+
+            std::to_string(nearbyItemId)+
+            ",\"radius\":"+std::to_string(nearbyRadius)+"}";
+        ok &= request(pid,cmd);
         return ok ? 0 : 2;
     }
 
