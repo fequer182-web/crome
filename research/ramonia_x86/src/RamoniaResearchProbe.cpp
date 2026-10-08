@@ -4675,7 +4675,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V39\n"
+        << "        OTCLab Ramonia x86 Research Probe V40\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4693,7 +4693,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V39 - FORMAL ABI CORRECTION");
+    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V40 - AUTOWALK DEEP ABI");
 }
 
 
@@ -8503,6 +8503,116 @@ void RunGameActionAbiProbeV32(Report& r) {
 
 
 // ============================================================================
+// V40 - AUTOWALK DEEP ABI DIAGNOSTIC
+// READ-ONLY. The old V32 pass inspected only 192 bytes, while this build's
+// autoWalk has branches beyond +0x300. V40 scans a bounded deeper window and
+// reports stack-frame references and plausible RET epilogues without promoting
+// any ABI from byte adjacency alone.
+// ============================================================================
+void RunAutoWalkDeepAbiProbeV40(const Report& r) {
+    auto it=r.binds.find("autoWalk");
+    if(it==r.binds.end() || !it->second.selectedOk) {
+        std::cout << "\n[V40 AUTOWALK DEEP] <bind unavailable>\n";
+        return;
+    }
+
+    const uint32_t methodRva=it->second.selected.methodRva;
+    uint32_t nextRva=r.module.sizeOfImage;
+    for(const auto& kv:r.binds) {
+        if(!kv.second.selectedOk) continue;
+        const uint32_t candidate=kv.second.selected.methodRva;
+        if(candidate>methodRva && candidate<nextRva) nextRva=candidate;
+    }
+
+    const size_t maxAvailable =
+        nextRva>methodRva ? static_cast<size_t>(nextRva-methodRva) : 0x1000u;
+    const size_t scanSize=std::min<size_t>(0x1000u,std::max<size_t>(0x400u,maxAvailable));
+    std::vector<uint8_t> b(scanSize);
+    if(!SafeCopy(r.module.base+methodRva,b.data(),b.size())) {
+        std::cout << "\n[V40 AUTOWALK DEEP] read failed\n";
+        return;
+    }
+
+    std::map<int,int> ebpCounts;
+    std::map<int,int> espCounts;
+    struct RetCandidate { size_t off{}; int cleanup{}; };
+    std::vector<RetCandidate> rets;
+
+    for(size_t i=0;i<b.size();++i) {
+        const uint8_t op=b[i];
+
+        if(op==0xC2 && i+2<b.size()) {
+            uint16_t imm=0;
+            std::memcpy(&imm,b.data()+i+1,2);
+            bool epilogue=false;
+            const size_t begin=i>16?i-16:0;
+            for(size_t j=begin;j<i;++j)
+                if(b[j]==0x5D || b[j]==0xC9) { epilogue=true; break; }
+            if(epilogue && imm<=0x40) rets.push_back({i,static_cast<int>(imm)});
+        } else if(op==0xC3) {
+            bool epilogue=false;
+            const size_t begin=i>16?i-16:0;
+            for(size_t j=begin;j<i;++j)
+                if(b[j]==0x5D || b[j]==0xC9) { epilogue=true; break; }
+            if(epilogue) rets.push_back({i,0});
+        }
+
+        size_t modrmPos=0;
+        if(op==0x8B || op==0x8D || op==0x89 || op==0x8A || op==0x88 ||
+           op==0x39 || op==0x3B || op==0x83 || op==0x81 || op==0xFF) {
+            modrmPos=i+1;
+        } else if(op==0x0F && i+2<b.size() &&
+                  (b[i+1]==0xB6 || b[i+1]==0xB7 || b[i+1]==0xBE || b[i+1]==0xBF)) {
+            modrmPos=i+2;
+        }
+        if(!modrmPos || modrmPos>=b.size()) continue;
+
+        std::set<int> ebp,esp;
+        V32CollectBaseDisp(b.data(),b.size(),modrmPos,ebp,esp);
+        for(int d:ebp) if(d>=0x8 && d<=0x40) ++ebpCounts[d];
+        for(int d:esp) if(d>=0 && d<=0x40) ++espCounts[d];
+    }
+
+    std::cout << "\n============================================================\n"
+              << "          AUTOWALK DEEP ABI STATIC PROBE V40\n"
+              << "============================================================\n"
+              << "[MODE] READ-ONLY / scan=" << scanSize << " bytes\n"
+              << "methodRva=" << HexU32(methodRva)
+              << " nextSemanticRva=" << (nextRva<r.module.sizeOfImage?HexU32(nextRva):std::string("<none>"))
+              << "\n";
+
+    std::cout << "[V40 EBP REFS]";
+    if(ebpCounts.empty()) std::cout << " <none>";
+    for(const auto& kv:ebpCounts)
+        std::cout << " +" << HexU32(static_cast<uint32_t>(kv.first))
+                  << "(x" << kv.second << ")";
+    std::cout << "\n[V40 ESP REFS]";
+    if(espCounts.empty()) std::cout << " <none>";
+    for(const auto& kv:espCounts)
+        std::cout << " +" << HexU32(static_cast<uint32_t>(kv.first))
+                  << "(x" << kv.second << ")";
+
+    std::cout << "\n[V40 RET CANDIDATES]";
+    if(rets.empty()) std::cout << " <none>";
+    for(const auto& rc:rets)
+        std::cout << " +" << HexU32(static_cast<uint32_t>(rc.off))
+                  << (rc.cleanup?(" RET "+std::to_string(rc.cleanup)):std::string(" RET"));
+    std::cout << "\n";
+
+    for(const auto& rc:rets) {
+        const size_t begin=rc.off>20?rc.off-20:0;
+        const size_t end=std::min(b.size(),rc.off+4);
+        std::cout << "  [RET CONTEXT +" << HexU32(static_cast<uint32_t>(rc.off)) << "]";
+        for(size_t i=begin;i<end;++i)
+            std::cout << " " << std::uppercase << std::hex << std::setw(2)
+                      << std::setfill('0') << static_cast<unsigned>(b[i])
+                      << std::dec << std::setfill(' ');
+        std::cout << "\n";
+    }
+}
+
+
+// ============================================================================
 // V33 - ONE-SHOT RUNTIME ACTION ABI CAPTURE (x86)
 //
 // Evidence model:
@@ -9207,6 +9317,63 @@ const char* V33Instruction(const std::string& token) {
     return "Execute a acao normalmente pelo cliente.";
 }
 
+void V40PrintAutoWalkCallerEvidence(const Report& r,const V33Capture& c) {
+    if(!c.stack[0] || !r.module.inModule(c.stack[0])) {
+        std::cout << "    [V40 CALLSITE] return address outside module\n";
+        return;
+    }
+
+    const uintptr_t ret=static_cast<uintptr_t>(c.stack[0]);
+    const uint32_t retRva=r.module.rva(ret);
+    uint8_t before[64]{};
+    uint8_t after[24]{};
+    const uintptr_t beforeAt=ret>=sizeof(before)?ret-sizeof(before):ret;
+    const bool beforeOk=SafeCopy(beforeAt,before,sizeof(before));
+    const bool afterOk=SafeCopy(ret,after,sizeof(after));
+
+    std::cout << "    [V40 CALLSITE] returnRva=" << HexU32(retRva);
+    if(ret>=r.module.base+5) {
+        uint8_t call[5]{};
+        if(SafeCopy(ret-5,call,sizeof(call)) && call[0]==0xE8) {
+            int32_t rel=0; std::memcpy(&rel,call+1,4);
+            const uintptr_t dst=ret+static_cast<int64_t>(rel);
+            if(r.module.inModule(dst))
+                std::cout << " directCallTargetRva=" << HexU32(r.module.rva(dst));
+        }
+    }
+    std::cout << "\n";
+
+    if(beforeOk) {
+        std::cout << "    [V40 PRECALL 64B]";
+        for(size_t i=0;i<sizeof(before);++i) {
+            if(i && i%16==0) std::cout << "\n                       ";
+            std::cout << " " << std::uppercase << std::hex << std::setw(2)
+                      << std::setfill('0') << static_cast<unsigned>(before[i])
+                      << std::dec << std::setfill(' ');
+        }
+        std::cout << "\n";
+    }
+
+    if(afterOk) {
+        std::cout << "    [V40 POSTCALL 24B]";
+        for(size_t i=0;i<sizeof(after);++i)
+            std::cout << " " << std::uppercase << std::hex << std::setw(2)
+                      << std::setfill('0') << static_cast<unsigned>(after[i])
+                      << std::dec << std::setfill(' ');
+        std::cout << "\n";
+
+        if(after[0]==0x83 && after[1]==0xC4) {
+            std::cout << "    [V40 CALLER CLEANUP] add esp,"
+                      << static_cast<unsigned>(after[2]) << " bytes\n";
+        } else if(after[0]==0x81 && after[1]==0xC4) {
+            uint32_t imm=0; std::memcpy(&imm,after+2,4);
+            std::cout << "    [V40 CALLER CLEANUP] add esp," << imm << " bytes\n";
+        } else {
+            std::cout << "    [V40 CALLER CLEANUP] no immediate add esp after CALL\n";
+        }
+    }
+}
+
 void V33PrintCapture(const Report& r,const std::string& token) {
     const V33Capture& c=g_v33Capture;
     std::cout << "\n[V33.1 CAPTURE] " << token << " HIT"
@@ -9229,8 +9396,13 @@ void V33PrintCapture(const Report& r,const std::string& token) {
         V33DescribeArg(r,token,i,c.argSnap[i],c.argNested0[i],c.argNested1[i]);
 
     std::cout << "    raw stack:";
-    for(int i=0;i<=std::min(argc+1,7);++i) std::cout << " [ESP+" << HexU32(i*4) << "]=" << HexU32(c.stack[i]);
+    const int rawLast=(token=="autoWalk")?5:std::min(argc+1,7);
+    for(int i=0;i<=rawLast;++i)
+        std::cout << " [ESP+" << HexU32(i*4) << "]=" << HexU32(c.stack[i]);
     std::cout << "\n";
+
+    if(token=="autoWalk")
+        V40PrintAutoWalkCallerEvidence(r,c);
 }
 
 void V33CaptureAction(Report& r,const std::string& token) {
@@ -9273,13 +9445,16 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] V39 promove autoWalk apenas pelo argumento formal Directions; xyz trailing nao e argumento sem prova do callee.\n";
+              << "[RULE] V40 recaptura autoWalk e imprime caller/callee cleanup antes de qualquer nova mudanca de ABI.\n";
 
     for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
         const bool alreadyConfirmed=V35ActionAlreadyConfirmed(r,tok);
-        if(alreadyConfirmed) {
-            std::cout << "[V39 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
+        if(alreadyConfirmed && std::string(tok)!="autoWalk") {
+            std::cout << "[V40 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
             continue;
+        }
+        if(alreadyConfirmed && std::string(tok)=="autoWalk") {
+            std::cout << "[V40 RECAPTURE] autoWalk sera capturado apenas para fechar stack cleanup/callsite.\n";
         }
         // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
         if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
@@ -9291,7 +9466,7 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V39 COMPLETE] contrato principal persistido; autoWalk formal ABI = Directions ref.\n";
+    std::cout << "\n[V40 COMPLETE] diagnostico autoWalk capturado; aguarde revisao antes de alterar ABI ativa.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
@@ -9717,6 +9892,7 @@ DWORD WINAPI Worker(LPVOID) {
         RunInventoryItemDiscoveryV24(r);
         RunTileGroundDiscoveryV30(r);
         RunGameActionAbiProbeV32(r);
+        RunAutoWalkDeepAbiProbeV40(r);
         RunGameActionRuntimeCaptureV33(r);
         RunOpenContainerDiscoveryV24Multi(r);
         RunWorldAmbientLightDiscovery(r);
