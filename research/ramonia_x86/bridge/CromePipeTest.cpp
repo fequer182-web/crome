@@ -934,6 +934,15 @@ int main(int argc, char** argv) {
         return ok ? 0 : 2;
     }
 
+    if (mode == "topmoveabi" || mode == "topmove") {
+        std::cout << "[GET_TOP_MOVE_ABI - READ ONLY]\n";
+        ok &= request(pid,R"({"cmd":"GET_TOP_MOVE_ABI"})");
+        std::cout << "\n" << (ok
+            ? "[OK] Diagnostico read-only coletado; nenhum metodo interno foi chamado.\n"
+            : "[FALHOU] Nao foi possivel ler o ABI do getTopMoveThing.\n");
+        return ok ? 0 : 2;
+    }
+
     if (mode == "hands") {
         std::cout << "[GET_HANDS - INVENTORY SLOTS 5/6]\n";
         ok &= request(pid,R"({"cmd":"GET_HANDS"})");
