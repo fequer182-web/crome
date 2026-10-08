@@ -1228,3 +1228,25 @@ Additional live confirmation on Ramonia:
 - automatic Pick Up Spear did not remove or interact with the covering object;
 - it still found the spear by exact item ID inside Tile::things and moved only the spear to the hand;
 - therefore pickup does not depend on the spear being the top tile item and exact-ID any-stack matching is live-confirmed.
+
+
+### Bridge V36 - shared uncover tile target
+
+Prepared for the common "remove objects above the real target" behavior used by Pick Up Spear and later Cavebot structure/tool actions.
+
+Behavior prepared:
+- exact target Item is located in Tile::things;
+- if another Item/corpse is above the target, direct ground -> hand pickup now fails closed with item_covered instead of bypassing the visible stack;
+- inspectTileTargetAccess identifies the highest Item blocker above the target;
+- UNCOVER_NEARBY_ITEM removes one blocker above an exact nearby item target;
+- UNCOVER_TILE_TARGET_AT does the same for an exact item target at a Cavebot coordinate;
+- blocker destination is one cached adjacent SQM on the same floor, preferring a tile different from the player's own SQM;
+- each call moves only one blocking layer, allowing re-read/revalidation between moves.
+
+Diagnostics:
+- CromePipeTest_x64.exe nearbyitem 2389 1
+- CromePipeTest_x64.exe uncoveritem 2389
+- CromePipeTest_x64.exe pickupitem 2389
+- CromePipeTest_x64.exe uncovertile <x> <y> <z> <targetItemId>
+
+Ground -> ground Game::move destination encoding uses normal world Position x/y/z and is EXPERIMENTAL until live-confirmed. Automatic repeated uncover is intentionally not enabled yet.
