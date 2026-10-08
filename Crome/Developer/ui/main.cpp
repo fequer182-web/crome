@@ -2893,7 +2893,7 @@ static void DrawCavebot(const Theme& t) {
     static bool recording=false,recordInitialized=false;
     static int hpMin=0,hpMax=100,range=7,mode=0; static int selected=-1;
     static std::vector<std::string> wps;
-    static crome::Position recordLast{};
+    static RamoniaPositionUi recordLast{};
     static char monsters[160]="";
     static int editType=0,editItemId=0,editDelay=1000,editX=0,editY=0,editZ=0;
     static char editText[96]="";
@@ -2944,14 +2944,29 @@ static void DrawCavebot(const Theme& t) {
 
     RefreshInspectResult();
 
-    if(recording && g_livePlayer.valid) {
-        const auto p=g_livePlayer.position;
-        if(!recordInitialized) { recordLast=p; recordInitialized=true; }
-        else if(!(p==recordLast)) {
+    RamoniaPositionUi currentRecordPos{};
+    if(g_livePlayer.valid) {
+        currentRecordPos.valid=true;
+        currentRecordPos.x=static_cast<std::uint32_t>(g_livePlayer.position.x);
+        currentRecordPos.y=static_cast<std::uint32_t>(g_livePlayer.position.y);
+        currentRecordPos.z=static_cast<std::uint32_t>(g_livePlayer.position.z);
+    } else {
+        currentRecordPos=GetRamoniaPlayerPosition();
+    }
+
+    if(recording && currentRecordPos.valid) {
+        const auto p=currentRecordPos;
+        if(!recordInitialized) {
+            recordLast=p;
+            recordInitialized=true;
+        } else if(p.x!=recordLast.x || p.y!=recordLast.y || p.z!=recordLast.z) {
             char b[160];
             if(p.z!=recordLast.z) {
-                int knownId=0; const char* knownType=nullptr;
-                if(g_inspect.valid && !g_inspect.ids.empty() && std::abs(g_inspect.x-recordLast.x)<=1 && std::abs(g_inspect.y-recordLast.y)<=1) {
+                int knownId=0;
+                const char* knownType=nullptr;
+                if(g_inspect.valid && !g_inspect.ids.empty() &&
+                   std::abs(g_inspect.x-static_cast<int>(recordLast.x))<=1 &&
+                   std::abs(g_inspect.y-static_cast<int>(recordLast.y))<=1) {
                     for(int id:g_inspect.ids){
                         if(CatalogHas("ladder",id)){knownId=id;knownType="Ladder";break;}
                         if(CatalogHas("rope",id)){knownId=id;knownType="Rope";break;}
@@ -2959,13 +2974,26 @@ static void DrawCavebot(const Theme& t) {
                         if(CatalogHas("openHoles",id)){knownId=id;knownType="Hole";break;}
                     }
                 }
-                if(knownType) std::snprintf(b,sizeof(b),"%s %d @ %d, %d, %d",knownType,knownId,recordLast.x,recordLast.y,(int)recordLast.z);
-                else std::snprintf(b,sizeof(b),"FloorChange %d, %d, %d  [from z=%d]",p.x,p.y,(int)p.z,(int)recordLast.z);
-            } else std::snprintf(b,sizeof(b),"Walk %d, %d, %d",p.x,p.y,(int)p.z);
-            if(wps.empty()||wps.back()!=b) wps.push_back(b);
+                if(knownType)
+                    std::snprintf(
+                        b,sizeof(b),"%s %d @ %u, %u, %u",
+                        knownType,knownId,recordLast.x,recordLast.y,recordLast.z);
+                else
+                    std::snprintf(
+                        b,sizeof(b),"FloorChange %u, %u, %u  [from z=%u]",
+                        p.x,p.y,p.z,recordLast.z);
+            } else {
+                std::snprintf(
+                    b,sizeof(b),"Walk %u, %u, %u",
+                    p.x,p.y,p.z);
+            }
+            if(wps.empty()||wps.back()!=b)
+                wps.push_back(b);
             recordLast=p;
         }
-    } else if(!recording) recordInitialized=false;
+    } else if(!recording) {
+        recordInitialized=false;
+    }
 
     const bool targetRuntimeReady = TargetRuntimeReady();
     const bool caveRuntimeReady = CaveRuntimeReady();
@@ -3004,6 +3032,13 @@ static void DrawCavebot(const Theme& t) {
             addX=g_livePlayer.position.x;
             addY=g_livePlayer.position.y;
             addZ=(int)g_livePlayer.position.z;
+        } else {
+            const auto p=GetRamoniaPlayerPosition();
+            if(p.valid){
+                addX=static_cast<int>(p.x);
+                addY=static_cast<int>(p.y);
+                addZ=static_cast<int>(p.z);
+            }
         }
         ImGui::OpenPopup("Add waypoint");
     }
