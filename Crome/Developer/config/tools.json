@@ -39,8 +39,15 @@
   },
   "spear_pickup": {
     "enabled": false,
-    "item_ids": [],
-    "status": "requires_move_equip_backend"
+    "item_ids": [
+      2389
+    ],
+    "status": "pending_live_move_to_equipment_validation",
+    "reserve_free_capacity_percent": 20,
+    "capacity_baseline": "free_capacity_at_enable",
+    "hand_policy": "existing_spear_else_free_hand",
+    "right_hand_slot": 5,
+    "left_hand_slot": 6
   },
   "reammo": {
     "enabled": false,
