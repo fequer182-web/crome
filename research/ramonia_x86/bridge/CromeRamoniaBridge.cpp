@@ -2437,6 +2437,58 @@ std::optional<TileItemDiagnostic> findNearbyTileItemById(
     return best;
 }
 
+struct InventorySlotSnapshot {
+    std::uint8_t slot{};
+    std::uintptr_t item{};
+    std::uint16_t id{};
+    std::uint16_t count{};
+    bool occupied{};
+};
+
+bool readInventorySlot(std::uint8_t slot, InventorySlotSnapshot& out) {
+    out={};
+    out.slot=slot;
+    if (!g_profile || !g_profile->inventoryContractReady ||
+        !g_profile->itemContractReady ||
+        slot<1u || slot>10u)
+        return false;
+
+    const auto& p=*g_profile;
+    const auto game=g_base+p.gameRva;
+    std::uintptr_t localPlayer{};
+    if (!safeRead(game+p.localPlayerOffset,localPlayer) ||
+        !localPlayer ||
+        !exactObjectVtable(localPlayer,p.localPlayerVtableRva))
+        return false;
+
+    std::uintptr_t item{};
+    const auto holderAddress=
+        localPlayer+p.inventoryArrayOffset+
+        static_cast<std::size_t>(slot-1u)*p.inventoryStride;
+
+    if (!safeRead(holderAddress,item))
+        return false;
+
+    if (!item) {
+        out.occupied=false;
+        return true;
+    }
+
+    if (!exactObjectVtable(item,p.itemVtableRva))
+        return false;
+
+    std::uint16_t id{},count{};
+    if (!safeRead(item+p.itemIdOffset,id) || !id ||
+        !safeRead(item+p.itemCountOffset,count))
+        return false;
+
+    out.item=item;
+    out.id=id;
+    out.count=count;
+    out.occupied=true;
+    return true;
+}
+
 std::optional<TileItemDiagnostic> findTileItemAt(
     std::uint32_t x,
     std::uint32_t y,
@@ -3463,6 +3515,107 @@ bool executeMoveOnGameThread() {
     return true;
 }
 
+bool executeMoveTileToInventoryOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+
+    if (!g_profile || !g_buildMatched) {
+        InterlockedExchange(&g_lastActionCode,5);
+        return false;
+    }
+
+    const auto& p=*g_profile;
+    if (!p.moveRuntimeConfirmed ||
+        !p.moveItemSharedRefConfirmed ||
+        !p.movePositionRefConfirmed ||
+        !p.moveCountConfirmed ||
+        !p.moveMethodRva ||
+        !p.itemContractReady ||
+        !p.tileThingsRuntimeConfirmed ||
+        !p.inventoryContractReady) {
+        InterlockedExchange(&g_lastActionCode,40);
+        return false;
+    }
+
+    if (g_pendingMoveInventorySlot!=5u &&
+        g_pendingMoveInventorySlot!=6u) {
+        InterlockedExchange(&g_lastActionCode,41);
+        return false;
+    }
+
+    InventorySlotSnapshot hand;
+    if (!readInventorySlot(g_pendingMoveInventorySlot,hand)) {
+        InterlockedExchange(&g_lastActionCode,41);
+        return false;
+    }
+
+    // Never replace a shield/weapon/other hand item. Stacking onto the same
+    // item ID or filling an empty hand is allowed.
+    if (hand.occupied && hand.id!=g_pendingMoveTileItemId) {
+        InterlockedExchange(&g_lastActionCode,42);
+        return false;
+    }
+
+    std::uintptr_t holder{},item{};
+    if (!resolveTileItemHolder(
+            g_pendingMoveSourceTile,
+            g_pendingMoveTileItemId,
+            g_pendingMoveTileExpectedItem,
+            holder,
+            item) ||
+        !holder || !item) {
+        InterlockedExchange(&g_lastActionCode,43);
+        return false;
+    }
+
+    // Revalidate pickup distance on the game thread immediately before move.
+    std::uint32_t px{},py{},ix{},iy{};
+    std::uint8_t pz{},iz{};
+    if (!localPlayerPosition(px,py,pz) ||
+        !safeRead(item+p.posX,ix) ||
+        !safeRead(item+p.posY,iy) ||
+        !safeRead(item+p.posZ,iz)) {
+        InterlockedExchange(&g_lastActionCode,44);
+        return false;
+    }
+
+    const auto dx=ix>px ? ix-px : px-ix;
+    const auto dy=iy>py ? iy-py : py-iy;
+    if (iz!=pz || std::max(dx,dy)>1u) {
+        InterlockedExchange(&g_lastActionCode,45);
+        return false;
+    }
+
+    const auto functionAddress=g_base+p.moveMethodRva;
+    if (!isExecutableAddress(functionAddress)) {
+        InterlockedExchange(&g_lastActionCode,17);
+        return false;
+    }
+
+    // OTC inventory-position convention under live validation:
+    // x=0xFFFF, y=inventory slot (1..10), z=0.
+    MovePosition dest{};
+    dest.x=0xFFFFu;
+    dest.y=g_pendingMoveInventorySlot;
+    dest.z=0u;
+
+    const auto game=g_base+p.gameRva;
+    const auto fn=reinterpret_cast<GameMoveFn>(functionAddress);
+
+    logLine("[ACTION] MOVE_TILE_TO_INVENTORY itemId=" +
+            std::to_string(static_cast<unsigned>(g_pendingMoveTileItemId)) +
+            " slot=" +
+            std::to_string(static_cast<unsigned>(g_pendingMoveInventorySlot)) +
+            " count=1");
+
+    fn(reinterpret_cast<void*>(game),
+       reinterpret_cast<void*>(holder),
+       &dest,
+       1u);
+
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 bool executeTalkOnGameThread() {
     InterlockedExchange(&g_lastActionCode,0);
 
@@ -3542,6 +3695,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeAutoWalkOnGameThread();
                 else if (kind == PendingUseWithTile)
                     executeUseWithTileOnGameThread();
+                else if (kind == PendingMoveTileToInventory)
+                    executeMoveTileToInventoryOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -3726,6 +3881,12 @@ std::string actionCodeText(LONG code) {
         case 37: return "usewith_tile_target_not_visible";
         case 38: return "usewith_tile_target_changed";
         case 39: return "autowalk_cooldown";
+        case 40: return "tile_inventory_move_contract_not_ready";
+        case 41: return "inventory_hand_slot_invalid";
+        case 42: return "inventory_hand_occupied_by_other_item";
+        case 43: return "tile_pickup_item_changed";
+        case 44: return "tile_pickup_position_read_failed";
+        case 45: return "tile_pickup_item_out_of_range";
         default: return "unknown_action_result";
     }
 }
