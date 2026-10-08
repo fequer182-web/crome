@@ -219,6 +219,15 @@ constexpr ULONGLONG kMonsterCacheTtlMs = 1000;
 
 SRWLOCK g_tileCacheLock = SRWLOCK_INIT;
 std::vector<std::uintptr_t> g_tileCache;
+
+struct TileCoordCacheEntry {
+    std::uintptr_t tile{};
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint8_t z{};
+};
+std::vector<TileCoordCacheEntry> g_tileCoordCache;
+
 ULONGLONG g_tileCacheTick{};
 std::uint32_t g_tileCacheOriginX{};
 std::uint32_t g_tileCacheOriginY{};
@@ -1160,12 +1169,73 @@ TileCacheInfo tileCacheInfo() {
     return info;
 }
 
+std::vector<TileCoordCacheEntry> buildTileCoordCache(
+    const std::vector<std::uintptr_t>& tiles) {
+
+    std::vector<TileCoordCacheEntry> out;
+    if (!g_profile || !g_profile->itemContractReady ||
+        !g_profile->itemVtableRva)
+        return out;
+
+    const auto wantedItemVtable = g_base + g_profile->itemVtableRva;
+    out.reserve(tiles.size());
+
+    // Build the spatial index only when the broad Tile cache itself refreshes.
+    // Normal pickup polling can then address only the player's 3x3 area.
+    for (const auto tile : tiles) {
+        std::vector<std::uintptr_t> things;
+        bool containsLocalPlayer=false;
+        if (!readStableTileThings(tile,things,containsLocalPlayer))
+            continue;
+
+        for (const auto thing:things) {
+            std::uintptr_t vt{};
+            if (!safeRead(thing,vt) || vt!=wantedItemVtable)
+                continue;
+
+            std::uint32_t x{},y{};
+            std::uint8_t z{};
+            if (!safeRead(thing+g_profile->posX,x) ||
+                !safeRead(thing+g_profile->posY,y) ||
+                !safeRead(thing+g_profile->posZ,z) ||
+                !x || !y || z>15u)
+                continue;
+
+            out.push_back({tile,x,y,z});
+            break;
+        }
+    }
+
+    return out;
+}
+
+std::vector<std::uintptr_t> copyNearbyTileCache(
+    std::uint32_t px,
+    std::uint32_t py,
+    std::uint8_t pz,
+    std::uint32_t radius) {
+
+    std::vector<std::uintptr_t> out;
+    AcquireSRWLockShared(&g_tileCacheLock);
+    for (const auto& entry:g_tileCoordCache) {
+        if (entry.z!=pz) continue;
+        const auto dx=entry.x>px ? entry.x-px : px-entry.x;
+        const auto dy=entry.y>py ? entry.y-py : py-entry.y;
+        if (dx<=radius && dy<=radius)
+            out.push_back(entry.tile);
+    }
+    ReleaseSRWLockShared(&g_tileCacheLock);
+    return out;
+}
+
 bool refreshTileCache(std::uint32_t px, std::uint32_t py, std::uint8_t pz) {
     const auto discovered = discoverTileAddresses();
     if (discovered.empty()) return false;
+    const auto coordinates = buildTileCoordCache(discovered);
 
     AcquireSRWLockExclusive(&g_tileCacheLock);
     g_tileCache = discovered;
+    g_tileCoordCache = coordinates;
     g_tileCacheTick = GetTickCount64();
     g_tileCacheOriginX = px;
     g_tileCacheOriginY = py;
@@ -1186,6 +1256,7 @@ void invalidateTileCacheForFloorChange(
 
     AcquireSRWLockExclusive(&g_tileCacheLock);
     g_tileCache.clear();
+    g_tileCoordCache.clear();
     g_tileCacheTick = 0;
     g_tileCacheOriginX = px;
     g_tileCacheOriginY = py;
@@ -2266,6 +2337,85 @@ std::vector<TileItemDiagnostic> scanCachedTileItems(
 
     return scanTileItemsFromSnapshot(copyTileCache());
 }
+
+std::optional<TileItemDiagnostic> findNearbyTileItemById(
+    std::uint16_t itemId,
+    std::uint32_t radius = 1) {
+
+    if (!itemId || !g_profile || !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed)
+        return std::nullopt;
+
+    std::uint32_t px{},py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px,py,pz))
+        return std::nullopt;
+    if (!ensureTileCache(px,py,pz,false))
+        return std::nullopt;
+
+    const auto tiles=copyNearbyTileCache(px,py,pz,radius);
+    const auto wantedItemVtable=g_base+g_profile->itemVtableRva;
+    std::optional<TileItemDiagnostic> best;
+    std::uint32_t bestDistance=0xFFFFFFFFu;
+
+    // Important: only the selected nearby tiles are opened here. We do not
+    // enumerate every cached Tile::things on each pickup poll.
+    for (std::size_t tileIndex=0;tileIndex<tiles.size();++tileIndex) {
+        const auto tile=tiles[tileIndex];
+        std::vector<std::uintptr_t> things;
+        bool containsLocalPlayer=false;
+        if (!readStableTileThings(tile,things,containsLocalPlayer))
+            continue;
+
+        for (std::size_t stackIndex=0;stackIndex<things.size();++stackIndex) {
+            const auto thing=things[stackIndex];
+            std::uintptr_t vt{};
+            if (!safeRead(thing,vt) || vt!=wantedItemVtable)
+                continue;
+
+            std::uint16_t id{};
+            if (!safeRead(thing+g_profile->itemIdOffset,id) || id!=itemId)
+                continue;
+
+            std::uint16_t count{};
+            std::uint32_t x{},y{};
+            std::uint8_t z{};
+            if (!safeRead(thing+g_profile->itemCountOffset,count) ||
+                !safeRead(thing+g_profile->posX,x) ||
+                !safeRead(thing+g_profile->posY,y) ||
+                !safeRead(thing+g_profile->posZ,z) ||
+                z!=pz)
+                continue;
+
+            const auto dx=x>px ? x-px : px-x;
+            const auto dy=y>py ? y-py : py-y;
+            const auto distance=std::max(dx,dy);
+            if (distance>radius)
+                continue;
+
+            TileItemDiagnostic d;
+            d.address=thing;
+            d.tileAddress=tile;
+            d.id=id;
+            d.count=count;
+            d.x=x;
+            d.y=y;
+            d.z=z;
+            d.tileSlot=static_cast<std::uint32_t>(tileIndex);
+            d.stackIndex=static_cast<std::uint32_t>(stackIndex);
+            d.tileThingCount=static_cast<std::uint32_t>(things.size());
+
+            if (!best || distance<bestDistance ||
+                (distance==bestDistance && d.stackIndex>best->stackIndex)) {
+                best=d;
+                bestDistance=distance;
+            }
+        }
+    }
+
+    return best;
+}
+
 std::optional<TileItemDiagnostic> findTileItemAt(
     std::uint32_t x,
     std::uint32_t y,
@@ -2630,6 +2780,53 @@ std::string tileMonstersResponse() {
     return o.str();
 }
 
+
+std::string nearbyItemResponse(
+    std::uint16_t itemId,
+    std::uint32_t radius) {
+
+    if (!g_profile || !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed)
+        return R"({"ok":false,"cmd":"GET_NEARBY_ITEM","error":"tile_item_contract_not_ready"})";
+
+    std::uint32_t px{},py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px,py,pz))
+        return R"({"ok":false,"cmd":"GET_NEARBY_ITEM","error":"player_unavailable"})";
+
+    if (!ensureTileCache(px,py,pz,false))
+        return R"({"ok":false,"cmd":"GET_NEARBY_ITEM","error":"tile_cache_unavailable"})";
+
+    const auto nearbyTiles=copyNearbyTileCache(px,py,pz,radius);
+    const auto match=findNearbyTileItemById(itemId,radius);
+    const auto cache=tileCacheInfo();
+
+    std::ostringstream o;
+    o << "{"ok":true,"cmd":"GET_NEARBY_ITEM""
+      << ","itemId":" << itemId
+      << ","radius":" << radius
+      << ","center":{"x":" << px
+      << ","y":" << py
+      << ","z":" << static_cast<unsigned>(pz) << "}"
+      << ","scannedTiles":" << nearbyTiles.size()
+      << ","cacheGeneration":" << cache.generation
+      << ","found":" << (match ? "true" : "false");
+
+    if (match) {
+        o << ","item":{"
+          << ""id":" << match->id
+          << ","count":" << match->count
+          << ","x":" << match->x
+          << ","y":" << match->y
+          << ","z":" << static_cast<unsigned>(match->z)
+          << ","stackIndex":" << match->stackIndex
+          << ","tileThingCount":" << match->tileThingCount
+          << "}";
+    }
+
+    o << "}";
+    return o.str();
+}
 
 std::string tileItemsAtResponse(
     std::uint32_t x,
@@ -4408,7 +4605,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":33,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":34,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4511,6 +4708,17 @@ std::string handleRequest(const std::string& request) {
     }
     if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
+    if (cmd == "GET_NEARBY_ITEM") {
+        const auto itemId=uint32FieldFromRequest(request,"itemId");
+        const auto requestedRadius=
+            uint32FieldAllowZeroFromRequest(request,"radius");
+        if (!itemId || *itemId>0xFFFFu)
+            return R"({"ok":false,"cmd":"GET_NEARBY_ITEM","error":"invalid_item_id"})";
+        const auto radius=std::min<std::uint32_t>(
+            requestedRadius ? *requestedRadius : 1u, 7u);
+        return nearbyItemResponse(
+            static_cast<std::uint16_t>(*itemId),radius);
+    }
     if (cmd == "GET_TILE_ITEMS_AT") {
         const auto x=uint32FieldFromRequest(request,"x");
         const auto y=uint32FieldFromRequest(request,"y");
@@ -4628,7 +4836,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V33 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V34 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
