@@ -711,6 +711,18 @@ int main(int argc, char** argv) {
             try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
             catch (...) {}
         }
+    } else if (mode == "topmoveat" || mode == "topmovetest") {
+        if (argc >= 5) {
+            try {
+                tileActionX=static_cast<std::uint32_t>(std::stoul(argv[2]));
+                tileActionY=static_cast<std::uint32_t>(std::stoul(argv[3]));
+                tileActionZ=static_cast<std::uint32_t>(std::stoul(argv[4]));
+            } catch (...) {}
+        }
+        if (argc >= 6) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
+            catch (...) {}
+        }
     } else if (mode == "pickupitem" || mode == "pickupspear") {
         if (argc >= 3) {
             try { pickupItemId=static_cast<std::uint32_t>(std::stoul(argv[2])); }
@@ -940,6 +952,25 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok
             ? "[OK] Diagnostico read-only coletado; nenhum metodo interno foi chamado.\n"
             : "[FALHOU] Nao foi possivel ler o ABI do getTopMoveThing.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "topmoveat" || mode == "topmovetest") {
+        if (!tileActionX || !tileActionY || tileActionZ>0xFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe topmoveat <x> <y> <z> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[GET_TOP_MOVE_AT - RUNTIME DIAGNOSTIC / NO MOVE]\n";
+        const std::string cmd=
+            "{\"cmd\":\"GET_TOP_MOVE_AT\",\"x\":"+
+            std::to_string(tileActionX)+
+            ",\"y\":"+std::to_string(tileActionY)+
+            ",\"z\":"+std::to_string(tileActionZ)+"}";
+        ok &= request(pid,cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] getTopMoveThing executado no game thread; nenhum item foi movido.\n"
+            : "[FALHOU] Nao foi possivel validar o retorno de getTopMoveThing.\n");
         return ok ? 0 : 2;
     }
 
