@@ -838,3 +838,46 @@ Pipe diagnostics:
 - CromePipeTest_x64.exe usewithtile <toolItemId> <x> <y> <z> [PID]
 
 Bridge HELLO is now version 28 and continues to report walkReady. These Cavebot changes are not yet compile/live-confirmed; validate AUTO_WALK_TO first before running a full route.
+
+
+## Bridge V29 / Research Probe V38 - Cavebot AutoWalk crash guard
+
+First live Cavebot Enable test on Ramonia exposed a crash on the first AUTO_WALK_TO dispatch. The V28 status already marked AUTO_WALK_TO as pending live validation; therefore the crash is treated as an ABI-validation failure, not as a confirmed Cavebot route-state-machine defect.
+
+### Root-cause finding
+The V37 runtime ABI capture had an incomplete autoWalk model:
+- `V33ExpectedArgs()` defaulted autoWalk to one argument;
+- V37 therefore inspected and classified only `Directions`;
+- `Directions = vector_direction_u32_ref` was genuinely observed;
+- however, additional stack slots after Directions were never analyzed;
+- consequently `actions.autoWalk.status=runtime_confirmed` could be promoted from an incomplete contract.
+
+The strongest current hypothesis is an OTC-family autoWalk variant with a second logical start Position argument. This remains a hypothesis until V38 captures a natural game auto-walk and validates the stack evidence.
+
+### Bridge V29 safety behavior
+Bridge V29 now fail-closes AUTO_WALK_TO:
+- the old V37 one-argument profile is no longer sufficient;
+- the profile must contain a second logical `Position` argument with ABI `position_u32_u32_u8_value` and `runtime_confirmed`;
+- even after profile confirmation, an explicit active-call implementation latch remains OFF until the V38 live result is reviewed and the call typedef/site is updated;
+- HELLO reports `walkReady=false` while the latch is closed;
+- AUTO_WALK_TO returns a safe contract/lock error instead of calling Game::autoWalk.
+
+Crome also requires Bridge V29+ AND HELLO `walkReady=true` before enabling the Ramonia Cavebot backend. A saved `enabled=true` route therefore cannot accidentally re-enter the unsafe call.
+
+### Research Probe V38
+V38 deliberately recaptures autoWalk even when the imported V37 profile says it is runtime-confirmed.
+It inspects:
+- arg0 as the existing Directions vector reference;
+- the next three x86 stack DWORDs as a candidate by-value Position layout: u32 x, u32 y, u8 z + padding;
+- candidate xyz is checked against the live LocalPlayer position before the second logical argument can become runtime-confirmed.
+
+V38 does not call autoWalk itself. The user must trigger a normal client auto-walk while the one-shot capture is armed.
+
+### Next validation
+1. Build `research/ramonia_x86/build_x86.bat`.
+2. Confirm `RamoniaResearchProbe_V38.dll` and the V29 bridge are generated.
+3. Use the Research Probe only for the natural autoWalk capture.
+4. Review the V38 `[V38 AUTOWALK STARTPOS]`, raw stack, and resulting `actions.autoWalk.args`.
+5. Only after that evidence is confirmed, implement the matching active Game::autoWalk call and reopen `walkReady`.
+
+Do not test Cavebot Enabled as a movement test while `walkReady=false`.
