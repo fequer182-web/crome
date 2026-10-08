@@ -307,7 +307,7 @@ if exist "%CXX64_DIR%objdump.exe" (
 echo [ARCH] Pipe client PE32+ x86-64: OK
 
 (
-    echo Crome Ramonia x86 - Pipe Bridge V31 - V39 AutoWalk ABI Correction
+    echo Crome Ramonia x86 - Pipe Bridge V32 - V40 AutoWalk ABI
     echo.
     echo Bridge x86:
     echo   CromeRamoniaBridge_x86.dll
@@ -327,9 +327,9 @@ echo [ARCH] Pipe client PE32+ x86-64: OK
     echo.
     echo.
     echo IMPORTANTE - Cavebot:
-    echo   AUTO_WALK_TO usa o contrato formal V39: Directions ref; xyz V38 tratado como caller-local.
+    echo   AUTO_WALK_TO usa o contrato V40 confirmado: Directions ref + Position por valor + RET 16.
     echo   Research Probe V40: diagnostico profundo do autoWalk (RET + callsite); nao use junto do Cavebot.
-    echo   Primeiro teste walkto repetido pelo CromePipeTest; depois Cavebot Enabled se walkReady=true.
+    echo   Walkto repetido validado; Cavebot Walk-only pode ser testado se walkReady=true.
 ) > "%PKG_DIR%\TESTE.txt"
 
 echo.
