@@ -1,10 +1,10 @@
 {
-  "schema": "otclab-ramonia-x86-research-v37",
+  "schema": "otclab-ramonia-x86-research-v38",
   "mode": "read_only_no_hooks_no_internal_calls",
   "policy": "discovery_rules_only_no_cross_build_rva_oracle",
   "persistence": {
-    "profileVersion": 37,
-    "checkpoint": "complete",
+    "profileVersion": 38,
+    "checkpoint": "action_abi_autoWalk",
     "resumeEnabled": true
   },
   "build": {
@@ -538,6 +538,12 @@
           "index": 0,
           "semantic": "Directions",
           "abiType": "vector_direction_u32_ref",
+          "status": "runtime_confirmed"
+        },
+        {
+          "index": 1,
+          "semantic": "Position",
+          "abiType": "position_u32_u32_u8_value",
           "status": "runtime_confirmed"
         }
       ]
