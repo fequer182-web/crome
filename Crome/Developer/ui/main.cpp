@@ -201,6 +201,7 @@ static std::string g_ramoniaHealingStatus = "Healing aguardando";
 static std::string g_ramoniaRuneStatus = "Trainer aguardando";
 static std::string g_ramoniaCaveStatus = "Cavebot aguardando";
 static std::string g_ramoniaLootStatus = "Loot aguardando";
+static RamoniaPositionUi g_ramoniaPlayerPosition;
 static std::string g_ramoniaCurrentTarget;
 static std::uint32_t g_ramoniaCurrentTargetId{};
 static std::uint32_t g_ramoniaCurrentTargetHp{};
@@ -409,6 +410,16 @@ static void SetRamoniaLootStatus(const std::string& status) {
 static std::string RamoniaLootStatusText() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaLootStatus;
+}
+
+static void SetRamoniaPlayerPosition(const RamoniaPositionUi& pos) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaPlayerPosition=pos;
+}
+
+static RamoniaPositionUi GetRamoniaPlayerPosition() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaPlayerPosition;
 }
 
 static bool RamoniaPipeRequest(DWORD pid, const nlohmann::json& request, nlohmann::json& response) {
