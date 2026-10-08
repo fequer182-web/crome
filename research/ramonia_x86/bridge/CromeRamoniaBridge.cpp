@@ -45,7 +45,8 @@ enum PendingActionKind : LONG {
     PendingUse = 2,
     PendingMove = 3,
     PendingTalk = 4,
-    PendingUseWithSelf = 5
+    PendingUseWithSelf = 5,
+    PendingAutoWalk = 6
 };
 
 volatile LONG g_lastActionCode{};
@@ -75,6 +76,10 @@ std::uint8_t g_pendingMoveTargetSlot{};
 std::uint32_t g_pendingTalkMode{1};
 std::uint32_t g_pendingTalkChannel{};
 char g_pendingTalkMessage[16]{};
+
+std::uint32_t g_pendingWalkX{};
+std::uint32_t g_pendingWalkY{};
+std::uint8_t g_pendingWalkZ{};
 
 struct Profile {
     std::string schema;
@@ -127,6 +132,10 @@ struct Profile {
     bool moveItemSharedRefConfirmed{};
     bool movePositionRefConfirmed{};
     bool moveCountConfirmed{};
+
+    std::uintptr_t autoWalkMethodRva{};
+    bool autoWalkRuntimeConfirmed{};
+    bool autoWalkDirectionsVectorRefConfirmed{};
 
     std::uintptr_t tileVtableRva{};
     std::size_t tileThingsOffset{};
@@ -478,6 +487,24 @@ Profile loadProfile(const std::string& path) {
                 stringValue(a2.get("semantic")) == "Count" &&
                 stringValue(a2.get("abiType")) == "u32" &&
                 stringValue(a2.get("status")) == "runtime_confirmed";
+        }
+    }
+
+    const auto* autoWalk = child(actions, "autoWalk");
+    if (autoWalk && autoWalk->isObject()) {
+        if (const auto n = integerValue(autoWalk->get("methodRva")))
+            p.autoWalkMethodRva = static_cast<std::uintptr_t>(*n);
+        p.autoWalkRuntimeConfirmed =
+            stringValue(autoWalk->get("status")) == "runtime_confirmed";
+
+        const auto* args = autoWalk->get("args");
+        if (args && args->isArray() && !args->array().empty()) {
+            const auto& a0 = args->array()[0];
+            p.autoWalkDirectionsVectorRefConfirmed =
+                a0.isObject() &&
+                stringValue(a0.get("semantic")) == "Directions" &&
+                stringValue(a0.get("abiType")) == "vector_direction_u32_ref" &&
+                stringValue(a0.get("status")) == "runtime_confirmed";
         }
     }
 
