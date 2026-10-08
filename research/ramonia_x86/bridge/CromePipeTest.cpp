@@ -708,6 +708,18 @@ int main(int argc, char** argv) {
             try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
             catch (...) {}
         }
+    } else if (mode == "tileitems") {
+        if (argc >= 5) {
+            try {
+                tileActionX=static_cast<std::uint32_t>(std::stoul(argv[2]));
+                tileActionY=static_cast<std::uint32_t>(std::stoul(argv[3]));
+                tileActionZ=static_cast<std::uint32_t>(std::stoul(argv[4]));
+            } catch (...) {}
+        }
+        if (argc >= 6) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
+            catch (...) {}
+        }
     } else if (mode == "usetile") {
         if (argc >= 6) {
             try {
@@ -872,6 +884,22 @@ int main(int argc, char** argv) {
         std::cout << "\n" << (ok
             ? "[OK] Rota enviada ao Game::autoWalk. Confira o movimento.\n"
             : "[FALHOU] AUTO_WALK_TO nao foi confirmado.\n");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "tileitems") {
+        if (!tileActionX || !tileActionY || tileActionZ>0xFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe tileitems <x> <y> <z> [PID]\n";
+            return 1;
+        }
+
+        std::cout << "[GET_TILE_ITEMS_AT - FRESH]\n";
+        const std::string cmd=
+            "{\"cmd\":\"GET_TILE_ITEMS_AT\",\"x\":"+
+            std::to_string(tileActionX)+
+            ",\"y\":"+std::to_string(tileActionY)+
+            ",\"z\":"+std::to_string(tileActionZ)+"}";
+        ok &= request(pid,cmd);
         return ok ? 0 : 2;
     }
 
