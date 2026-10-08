@@ -2253,7 +2253,8 @@ std::vector<TileMonsterDiagnostic> scanTileMonstersFromSnapshot(
     return out;
 }
 
-std::vector<TileItemDiagnostic> scanCachedTileItems() {
+std::vector<TileItemDiagnostic> scanCachedTileItems(
+    bool forceTileRefresh = false) {
     if (!g_profile || !g_profile->itemContractReady ||
         !g_profile->tileThingsRuntimeConfirmed)
         return {};
@@ -2261,7 +2262,7 @@ std::vector<TileItemDiagnostic> scanCachedTileItems() {
     std::uint32_t px{}, py{};
     std::uint8_t pz{};
     if (!localPlayerPosition(px, py, pz)) return {};
-    if (!ensureTileCache(px, py, pz)) return {};
+    if (!ensureTileCache(px, py, pz, forceTileRefresh)) return {};
 
     return scanTileItemsFromSnapshot(copyTileCache());
 }
@@ -2269,9 +2270,10 @@ std::optional<TileItemDiagnostic> findTileItemAt(
     std::uint32_t x,
     std::uint32_t y,
     std::uint8_t z,
-    std::uint16_t preferredId = 0) {
+    std::uint16_t preferredId = 0,
+    bool forceTileRefresh = false) {
 
-    const auto items=scanCachedTileItems();
+    const auto items=scanCachedTileItems(forceTileRefresh);
     std::optional<TileItemDiagnostic> best;
 
     for (const auto& item:items) {
@@ -4009,9 +4011,19 @@ std::string useTileItemAtResponse(
         !g_profile->tileThingsRuntimeConfirmed)
         return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"use_tile_contract_not_ready"})";
 
-    const auto target=findTileItemAt(x,y,z,itemId);
-    if (!target)
-        return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"tile_item_not_found"})";
+    // Cavebot may have just walked into range. Force a fresh Tile::things
+    // discovery here instead of trusting a cache that can legitimately be
+    // several seconds old and miss the newly loaded target tile.
+    const auto target=findTileItemAt(x,y,z,itemId,true);
+    if (!target) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_TILE_ITEM_AT\","
+          << "\"error\":\"tile_item_not_found\","
+          << "\"requestedItemId\":" << itemId
+          << ",\"x\":" << x << ",\"y\":" << y
+          << ",\"z\":" << static_cast<unsigned>(z) << "}";
+        return o.str();
+    }
 
     std::uintptr_t holder{},item{};
     if (!resolveTileItemHolder(
@@ -4080,9 +4092,18 @@ std::string useContainerItemWithTileResponse(
         !g_profile->tileThingsRuntimeConfirmed)
         return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"usewith_tile_contract_not_ready"})";
 
-    const auto target=findTileItemAt(x,y,z,targetItemId);
-    if (!target)
-        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"tile_target_not_found"})";
+    // Tool actions have the same just-arrived problem as direct Use.
+    // Always refresh once before resolving the ground/tile target.
+    const auto target=findTileItemAt(x,y,z,targetItemId,true);
+    if (!target) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_WITH_TILE_AT\","
+          << "\"error\":\"tile_target_not_found\","
+          << "\"requestedTargetItemId\":" << targetItemId
+          << ",\"x\":" << x << ",\"y\":" << y
+          << ",\"z\":" << static_cast<unsigned>(z) << "}";
+        return o.str();
+    }
 
     const auto containers=scanOpenContainers();
     const ContainerSnapshot* source=nullptr;
