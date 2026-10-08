@@ -1014,3 +1014,15 @@ V40 is diagnostic-only and does not change the active Bridge V31 call:
 - prints trailing stack DWORDs through ESP+0x14.
 
 Goal: determine whether the real contract is Directions-only, Directions+Position with callee cleanup, or Directions+Position with caller cleanup before changing Bridge V31.
+
+
+### Live validation - Bridge V32 accepted repeated walkto commands
+
+Live test after V40 ABI promotion:
+- Bridge V32 loaded with profile V40;
+- repeated direct AUTO_WALK_TO commands were all accepted by the Ramonia client;
+- the previous V31 behavior where only a small subset produced movement is no longer observed;
+- this validates the V40 contract in practice: ECX=Game, Directions& plus 12-byte Position value, callee cleanup RET 16;
+- Cavebot controller still retains the later safety fixes: one native autoWalk per waypoint, retry only after stuck timeout, max retry limit, and bridge-side cooldown.
+
+Next validation stage: Walk-only Cavebot loop with 2-3 nearby waypoints.
