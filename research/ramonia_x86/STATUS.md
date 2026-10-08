@@ -1142,3 +1142,27 @@ Live-confirmed on Ramonia:
 - the feature can remain dormant while Pick Up Spear is disabled and poll only the 3x3 window while enabled.
 
 Next step: validate one Game::move from the exact ground Item holder to one equipment hand slot before enabling automatic pickup.
+
+
+### Bridge V35 - guarded ground-to-hand pickup test
+
+Prepared after V34 live-confirmed 3x3 exact-ID spear detection.
+
+New diagnostics:
+- `CromePipeTest_x64.exe hands` -> reads inventory slots 5 (right) and 6 (left);
+- `CromePipeTest_x64.exe pickupitem 2389` -> locates spear ID 2389 only inside the 3x3 window and attempts one Game::move to the selected hand.
+
+Hand policy:
+- prefer a hand that already contains the same item ID;
+- otherwise choose an empty hand;
+- never replace a different equipped item;
+- if both hands contain other items, fail closed.
+
+Safety:
+- moves exactly count=1 per experimental call;
+- source Tile::things holder is revalidated on the game thread;
+- source item must still be within Chebyshev distance 1 on the same floor;
+- destination is restricted to inventory slot 5 or 6;
+- destination encoding under test is OTC inventory Position x=0xFFFF, y=slot, z=0.
+
+This destination encoding is not yet live-confirmed on Ramonia. Automatic Pick Up Spear remains disabled until this one-shot move test succeeds.
