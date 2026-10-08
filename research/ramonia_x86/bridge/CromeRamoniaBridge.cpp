@@ -4423,6 +4423,108 @@ std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
     return o.str();
 }
 
+std::string handsResponse() {
+    if (!g_profile || !g_profile->inventoryContractReady ||
+        !g_profile->itemContractReady)
+        return R"({"ok":false,"cmd":"GET_HANDS","error":"inventory_contract_not_ready"})";
+
+    InventorySlotSnapshot right,left;
+    if (!readInventorySlot(5u,right) || !readInventorySlot(6u,left))
+        return R"({"ok":false,"cmd":"GET_HANDS","error":"inventory_read_failed"})";
+
+    std::ostringstream o;
+    o << "{\"ok\":true,\"cmd\":\"GET_HANDS\""
+      << ",\"right\":{\"slot\":5,\"occupied\":" << (right.occupied?"true":"false");
+    if (right.occupied)
+        o << ",\"id\":" << right.id << ",\"count\":" << right.count;
+    o << "}"
+      << ",\"left\":{\"slot\":6,\"occupied\":" << (left.occupied?"true":"false");
+    if (left.occupied)
+        o << ",\"id\":" << left.id << ",\"count\":" << left.count;
+    o << "}}";
+    return o.str();
+}
+
+std::string moveNearbyItemToHandResponse(std::uint16_t itemId) {
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"build_not_validated"})";
+    if (!g_profile->moveRuntimeConfirmed ||
+        !g_profile->moveItemSharedRefConfirmed ||
+        !g_profile->movePositionRefConfirmed ||
+        !g_profile->moveCountConfirmed ||
+        !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed ||
+        !g_profile->inventoryContractReady)
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"move_inventory_contract_not_ready"})";
+
+    const auto target=findNearbyTileItemById(itemId,1u);
+    if (!target)
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"item_not_found_in_3x3"})";
+
+    InventorySlotSnapshot right,left;
+    if (!readInventorySlot(5u,right) || !readInventorySlot(6u,left))
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"inventory_read_failed"})";
+
+    std::uint8_t destinationSlot{};
+    if (right.occupied && right.id==itemId)
+        destinationSlot=5u;
+    else if (left.occupied && left.id==itemId)
+        destinationSlot=6u;
+    else if (!right.occupied)
+        destinationSlot=5u;
+    else if (!left.occupied)
+        destinationSlot=6u;
+    else
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"both_hands_occupied_by_other_items"})";
+
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"dispatcher_not_ready"})";
+
+    g_pendingMoveSourceTile=target->tileAddress;
+    g_pendingMoveTileExpectedItem=target->address;
+    g_pendingMoveTileItemId=target->id;
+    g_pendingMoveInventorySlot=destinationSlot;
+    InterlockedExchange(&g_pendingActionKind,PendingMoveTileToInventory);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    const auto sourceX=target->x;
+    const auto sourceY=target->y;
+    const auto sourceZ=target->z;
+    const auto sourceStack=target->stackIndex;
+
+    g_pendingMoveSourceTile=0;
+    g_pendingMoveTileExpectedItem=0;
+    g_pendingMoveTileItemId=0;
+    g_pendingMoveInventorySlot=0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code==1?"true":"false")
+      << ",\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"itemId\":" << itemId
+      << ",\"count\":1"
+      << ",\"source\":{\"x\":" << sourceX
+      << ",\"y\":" << sourceY
+      << ",\"z\":" << static_cast<unsigned>(sourceZ)
+      << ",\"stackIndex\":" << sourceStack << "}"
+      << ",\"destinationSlot\":" << static_cast<unsigned>(destinationSlot)
+      << ",\"destinationEncoding\":\"otclient_inventory_position_experimental\""
+      << ",\"rightBefore\":" << (right.occupied?std::to_string(right.id):std::string("0"))
+      << ",\"leftBefore\":" << (left.occupied?std::to_string(left.id):std::string("0"))
+      << "}";
+    return o.str();
+}
+
 std::string useTileItemAtResponse(
     std::uint32_t x,
     std::uint32_t y,
@@ -4787,7 +4889,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":34,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":35,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4890,6 +4992,14 @@ std::string handleRequest(const std::string& request) {
     }
     if (cmd == "GET_COMBAT_TARGETS") return combatTargetsResponse(p);
     if (cmd == "GET_VISIBLE_MONSTERS") return visibleMonstersResponse();
+    if (cmd == "GET_HANDS") return handsResponse();
+    if (cmd == "MOVE_NEARBY_ITEM_TO_HAND") {
+        const auto itemId=uint32FieldFromRequest(request,"itemId");
+        if (!itemId || !*itemId || *itemId>0xFFFFu)
+            return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"invalid_item_id"})";
+        return moveNearbyItemToHandResponse(
+            static_cast<std::uint16_t>(*itemId));
+    }
     if (cmd == "GET_NEARBY_ITEM") {
         const auto itemId=uint32FieldFromRequest(request,"itemId");
         const auto requestedRadius=
@@ -5018,7 +5128,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V34 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V35 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
