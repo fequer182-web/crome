@@ -1900,7 +1900,6 @@ static void RamoniaTargetWorker() {
         } else if (!nextFoodAttemptMs || nowMs >= nextFoodAttemptMs) {
             bool usedFood=false;
             bool transportFailed=false;
-            std::uint32_t usedItemId=0;
             nlohmann::json lastFoodResponse;
 
             for(const auto itemId:foodCfg.itemIds) {
@@ -1921,7 +1920,6 @@ static void RamoniaTargetWorker() {
                 lastFoodResponse=foodResponse;
                 if(foodResponse.value("ok",false)) {
                     usedFood=true;
-                    usedItemId=itemId;
                     const auto containerId=foodResponse.value("sourceContainerId",0u);
                     const auto slot=foodResponse.value("slot",0u);
                     SetRamoniaFoodStatus(
