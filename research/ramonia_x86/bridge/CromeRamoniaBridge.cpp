@@ -3954,6 +3954,178 @@ std::string moveContainerItemResponse(std::uint32_t sourceContainerId,
     return o.str();
 }
 
+std::string useTileItemAtResponse(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z,
+    std::uint16_t itemId) {
+
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"build_not_validated"})";
+    if (!g_profile->useRuntimeConfirmed ||
+        !g_profile->useItemSharedRefConfirmed ||
+        !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed)
+        return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"use_tile_contract_not_ready"})";
+
+    const auto target=findTileItemAt(x,y,z,itemId);
+    if (!target)
+        return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"tile_item_not_found"})";
+
+    std::uintptr_t holder{},item{};
+    if (!resolveTileItemHolder(
+            target->tileAddress,
+            target->id,
+            target->address,
+            holder,
+            item) ||
+        !holder || !item)
+        return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"tile_item_holder_not_found"})";
+
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"dispatcher_not_ready"})";
+
+    g_pendingUseTile=target->tileAddress;
+    g_pendingUseContainer=0;
+    g_pendingUseContainerId=0;
+    g_pendingUseHolder=holder;
+    g_pendingUseItem=item;
+    g_pendingUseItemId=target->id;
+    InterlockedExchange(&g_pendingActionKind,PendingUse);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    const auto usedId=target->id;
+    g_pendingUseTile=0;
+    g_pendingUseHolder=0;
+    g_pendingUseItem=0;
+    g_pendingUseItemId=0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_TILE_ITEM_AT\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code==1?"true":"false")
+      << ",\"cmd\":\"USE_TILE_ITEM_AT\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"itemId\":" << usedId
+      << ",\"x\":" << x
+      << ",\"y\":" << y
+      << ",\"z\":" << static_cast<unsigned>(z)
+      << "}";
+    return o.str();
+}
+
+std::string useContainerItemWithTileResponse(
+    std::uint16_t toolItemId,
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint8_t z,
+    std::uint16_t targetItemId) {
+
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"build_not_validated"})";
+    if (!g_profile->useWithRuntimeConfirmed ||
+        !g_profile->useWithItemSharedRefConfirmed ||
+        !g_profile->useWithThingSharedRefConfirmed ||
+        !g_profile->containerContractReady ||
+        !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed)
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"usewith_tile_contract_not_ready"})";
+
+    const auto target=findTileItemAt(x,y,z,targetItemId);
+    if (!target)
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"tile_target_not_found"})";
+
+    const auto containers=scanOpenContainers();
+    const ContainerSnapshot* source=nullptr;
+    const ContainerItemSlot* sourceSlot=nullptr;
+
+    for (const auto& container:containers) {
+        for (const auto& slot:container.items) {
+            if (slot.id==toolItemId) {
+                source=&container;
+                sourceSlot=&slot;
+                break;
+            }
+        }
+        if (sourceSlot) break;
+    }
+
+    if (!source || !sourceSlot)
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"tool_not_found_in_open_containers"})";
+
+    std::uintptr_t targetHolder{},targetItem{};
+    if (!resolveTileItemHolder(
+            target->tileAddress,
+            target->id,
+            target->address,
+            targetHolder,
+            targetItem) ||
+        !targetHolder || !targetItem)
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"tile_target_holder_not_found"})";
+
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"dispatcher_not_ready"})";
+
+    g_pendingUseTile=0;
+    g_pendingUseContainer=source->address;
+    g_pendingUseContainerId=source->id;
+    g_pendingUseHolder=sourceSlot->holderAddress;
+    g_pendingUseItem=sourceSlot->itemAddress;
+    g_pendingUseItemId=sourceSlot->id;
+
+    g_pendingUseWithTargetTile=target->tileAddress;
+    g_pendingUseWithTargetHolder=targetHolder;
+    g_pendingUseWithTargetItem=targetItem;
+    g_pendingUseWithTargetItemId=target->id;
+
+    InterlockedExchange(&g_pendingActionKind,PendingUseWithTile);
+
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+
+    const auto sourceContainerId=source->id;
+    const auto actualTargetId=target->id;
+
+    g_pendingUseContainer=0;
+    g_pendingUseContainerId=0;
+    g_pendingUseHolder=0;
+    g_pendingUseItem=0;
+    g_pendingUseItemId=0;
+    g_pendingUseWithTargetTile=0;
+    g_pendingUseWithTargetHolder=0;
+    g_pendingUseWithTargetItem=0;
+    g_pendingUseWithTargetItemId=0;
+
+    if (!dispatched) {
+        std::ostringstream o;
+        o << "{\"ok\":false,\"cmd\":\"USE_WITH_TILE_AT\","
+          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
+        return o.str();
+    }
+
+    std::ostringstream o;
+    o << "{\"ok\":" << (code==1?"true":"false")
+      << ",\"cmd\":\"USE_WITH_TILE_AT\""
+      << ",\"result\":\"" << actionCodeText(code) << "\""
+      << ",\"toolItemId\":" << toolItemId
+      << ",\"sourceContainerId\":" << sourceContainerId
+      << ",\"targetItemId\":" << actualTargetId
+      << ",\"x\":" << x
+      << ",\"y\":" << y
+      << ",\"z\":" << static_cast<unsigned>(z)
+      << "}";
+    return o.str();
+}
+
 std::string autoWalkToResponse(
     std::uint32_t x,
     std::uint32_t y,
@@ -4123,7 +4295,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":27,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":28,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -4167,6 +4339,37 @@ std::string handleRequest(const std::string& request) {
         return o.str();
     }
     if (cmd == "GET_PLAYER") return playerResponse(p, g_base);
+    if (cmd == "USE_TILE_ITEM_AT") {
+        const auto x=uint32FieldFromRequest(request,"x");
+        const auto y=uint32FieldFromRequest(request,"y");
+        const auto z=uint32FieldAllowZeroFromRequest(request,"z");
+        const auto itemId=uint32FieldAllowZeroFromRequest(request,"itemId");
+        if (!x || !y || !z || !itemId || *z>0xFFu || *itemId>0xFFFFu)
+            return R"({"ok":false,"cmd":"USE_TILE_ITEM_AT","error":"invalid_arguments"})";
+        return useTileItemAtResponse(
+            *x,*y,static_cast<std::uint8_t>(*z),
+            static_cast<std::uint16_t>(*itemId));
+    }
+
+    if (cmd == "USE_WITH_TILE_AT") {
+        const auto toolItemId=uint32FieldFromRequest(request,"toolItemId");
+        const auto x=uint32FieldFromRequest(request,"x");
+        const auto y=uint32FieldFromRequest(request,"y");
+        const auto z=uint32FieldAllowZeroFromRequest(request,"z");
+        const auto targetItemId=
+            uint32FieldAllowZeroFromRequest(request,"targetItemId");
+
+        if (!toolItemId || *toolItemId>0xFFFFu ||
+            !x || !y || !z || *z>0xFFu ||
+            (targetItemId && *targetItemId>0xFFFFu))
+            return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"invalid_arguments"})";
+
+        return useContainerItemWithTileResponse(
+            static_cast<std::uint16_t>(*toolItemId),
+            *x,*y,static_cast<std::uint8_t>(*z),
+            static_cast<std::uint16_t>(targetItemId ? *targetItemId : 0u));
+    }
+
     if (cmd == "AUTO_WALK_TO") {
         const auto x=uint32FieldFromRequest(request,"x");
         const auto y=uint32FieldFromRequest(request,"y");
@@ -4301,7 +4504,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V27 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V28 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
