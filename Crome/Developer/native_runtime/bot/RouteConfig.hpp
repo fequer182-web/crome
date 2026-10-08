@@ -24,6 +24,10 @@ struct RouteWaypoint {
     // -1 = use RouteConfig::reachDistance.
     int reachDistance{-1};
     std::uint32_t itemId{};
+    // Some actions (notably "use") may target a concrete map tile. This keeps
+    // legacy inventory-use nodes compatible while preserving coordinates written
+    // by the Cavebot editor.
+    bool hasPosition{false};
     // 0 = use RouteConfig::actionWaitMs.
     std::uint32_t actionWaitMs{};
     // Ground/tool nodes may resolve Z from the player at execution time.
@@ -136,6 +140,27 @@ inline RouteConfig loadRouteConfig(const std::string& path) {
             w.type = type == "use" ? RouteWaypointType::Use : RouteWaypointType::UseWithSelf;
             w.itemId = itemId;
             w.actionWaitMs = jsonU32(item.get("after_ms"), 0);
+
+            // The Cavebot UI writes x/y/z for "use" waypoints. Older runtime
+            // versions discarded those coordinates and consequently used the
+            // inventory item instead of the object on the selected tile.
+            if (w.type == RouteWaypointType::Use) {
+                const auto* x = item.get("x");
+                const auto* y = item.get("y");
+                const auto* z = item.get("z");
+                if (x && y && z && x->isNumber() && y->isNumber()) {
+                    w.useCurrentZ = z->isString() && z->string() == "current";
+                    if (w.useCurrentZ || z->isNumber()) {
+                        w.position = Position{
+                            static_cast<std::int32_t>(x->number()),
+                            static_cast<std::int32_t>(y->number()),
+                            w.useCurrentZ ? 0 : static_cast<std::int32_t>(z->number())
+                        };
+                        w.hasPosition = true;
+                    }
+                }
+            }
+
             out.waypoints.push_back(w);
             continue;
         }
@@ -237,6 +262,12 @@ inline bool saveRouteConfig(const std::string& path, const RouteConfig& route) {
             f << "{ \"type\": \""
               << (w.type == RouteWaypointType::Use ? "use" : "use_with_self")
               << "\", \"item_id\": " << w.itemId;
+            if (w.type == RouteWaypointType::Use && w.hasPosition) {
+                f << ", \"x\": " << w.position.x
+                  << ", \"y\": " << w.position.y;
+                if (w.useCurrentZ) f << ", \"z\": \"current\"";
+                else f << ", \"z\": " << w.position.z;
+            }
             if (w.actionWaitMs > 0) f << ", \"after_ms\": " << w.actionWaitMs;
             f << " }";
         } else if (w.type == RouteWaypointType::UseWithGround ||
