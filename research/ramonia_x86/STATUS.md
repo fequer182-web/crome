@@ -919,3 +919,24 @@ Confirmed live on Ramonia after Bridge V30 / V38 profile update:
 - no client crash observed on the corrected two-argument ABI;
 - V38-confirmed call contract is therefore promoted from capture-confirmed to live-action-confirmed for this exact build;
 - next validation stage is the Cavebot route state machine itself, beginning with Walk-only waypoints before tile actions.
+
+
+## Cavebot Ramonia - repeated AutoWalk re-entry fix
+
+A later live Cavebot test showed that direct AUTO_WALK_TO was stable, but repeated Cavebot use could still crash the client.
+
+Root cause found in the external Cavebot state machine:
+- after one AUTO_WALK_TO returned success, Cavebot scheduled another call about 750 ms later even if the character was still progressing toward the same waypoint;
+- this could re-enter the native Game::autoWalk several times for one logical waypoint;
+- the Ramonia worker also counted retries but did not enforce the configured max_retries value.
+
+Fix:
+- one native AUTO_WALK_TO is now issued per waypoint/approach;
+- while the player position keeps changing, Cavebot only polls GET_PLAYER and does not call Game::autoWalk again;
+- a new auto-walk is allowed only after no positional progress for stuck_ms (3500 ms);
+- retry delay uses retry_delay_ms (650 ms);
+- max_retries=2 is now enforced; after the initial attempt plus two retries the Cavebot halts that waypoint safely instead of repeatedly re-entering the native action;
+- the same in-flight guard is used for Walk/Stand and for approach movement before Use/Rope/Shovel/Ladder/Hole;
+- Ramonia Cavebot enable state now follows the central CaveRuntimeReady/walkReady gate instead of the older Bridge >=27 check.
+
+This change is in the Crome Developer executable; Bridge V30 / V38 ABI remains unchanged.
