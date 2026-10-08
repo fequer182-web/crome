@@ -992,7 +992,7 @@ int main(int argc, char** argv) {
             std::to_string(pickupItemId)+"}";
         ok &= request(pid,cmd);
         std::cout << "\n" << (ok
-            ? "[OK] Pickup executado. Se houver bloqueador acima, V36 deve recusar com item_covered.\n"
+            ? "[OK] Movimento para a mao solicitado. Confira o item com hands; item coberto retorna item_covered.\n"
             : "[FALHOU] O pickup foi bloqueado ou a bridge retornou erro.\n");
         return ok ? 0 : 2;
     }

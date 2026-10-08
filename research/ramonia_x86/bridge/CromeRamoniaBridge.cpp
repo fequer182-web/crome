@@ -58,7 +58,8 @@ enum PendingActionKind : LONG {
     PendingMoveTileToInventory = 8,
     PendingMoveTileToGround = 9,
     PendingTopMoveRead = 10,
-    PendingUncoverTile = 11
+    PendingUncoverTile = 11,
+    PendingPickupTopMove = 12
 };
 
 volatile LONG g_lastActionCode{};
@@ -4275,6 +4276,116 @@ bool executeUncoverTileOnGameThread() {
     return true;
 }
 
+
+UncoverTileRequest g_pickupTileRequest;
+std::string g_pickupTileResult;
+std::string actionCodeText(LONG code);
+
+bool executePickupTopMoveOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+    const auto request=g_pickupTileRequest;
+    std::uint16_t topMoveId{};
+    bool exposed=false;
+    auto fail=[&](const char* error) {
+        std::ostringstream response;
+        response << R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"exposed":)"
+                 << (exposed ? "true" : "false")
+                 << R"(,"itemId":)" << request.targetId
+                 << R"(,"topMoveItemId":)" << topMoveId
+                 << R"(,"error":")" << error << R"("})";
+        g_pickupTileResult=response.str();
+        return false;
+    };
+    g_pickupTileResult.clear();
+    if (!g_profile || !g_buildMatched)
+        return fail("build_not_validated");
+    const auto& p=*g_profile;
+    if (!p.itemContractReady || !p.tileThingsRuntimeConfirmed ||
+        !p.inventoryContractReady || p.getTopMoveThingMethodRva!=0x197AD0u ||
+        !exactObjectVtable(request.tile,p.tileVtableRva))
+        return fail("pickup_top_move_contract_not_ready");
+    auto matchesPosition=[&](std::uintptr_t thing) {
+        std::uint32_t x{},y{};
+        std::uint8_t z{};
+        return safeRead(thing+p.posX,x) && safeRead(thing+p.posY,y) &&
+               safeRead(thing+p.posZ,z) &&
+               x==request.x && y==request.y && z==request.z;
+    };
+    auto hasTarget=[&](const std::vector<std::uintptr_t>& entries) {
+        for (const auto thing:entries) {
+            std::uint16_t id{};
+            if (exactObjectVtable(thing,p.itemVtableRva) &&
+                safeRead(thing+p.itemIdOffset,id) &&
+                id==request.targetId && matchesPosition(thing))
+                return true;
+        }
+        return false;
+    };
+    std::vector<std::uintptr_t> things;
+    bool containsLocalPlayer=false;
+    if (!readStableTileThings(request.tile,things,containsLocalPlayer) ||
+        !hasTarget(things))
+        return fail("target_item_not_found");
+    const auto address=g_base+p.getTopMoveThingMethodRva;
+    if (!isExecutableAddress(address))
+        return fail("top_move_function_not_executable");
+    UncoverThingRef returned;
+    const auto topMove=reinterpret_cast<TileGetTopMoveThingFn>(address);
+    topMove(reinterpret_cast<void*>(request.tile),&returned.thing);
+    if (!returned.thing || !returned.releasable())
+        return fail("top_move_return_invalid");
+    if (!readStableTileThings(request.tile,things,containsLocalPlayer) ||
+        !hasTarget(things) ||
+        std::find(things.begin(),things.end(),returned.thing)==things.end())
+        return fail("top_move_not_in_target_tile");
+    if (!exactObjectVtable(returned.thing,p.itemVtableRva) ||
+        !safeRead(returned.thing+p.itemIdOffset,topMoveId) ||
+        !topMoveId || !matchesPosition(returned.thing))
+        return fail("top_move_is_not_valid_item");
+    if (topMoveId!=request.targetId)
+        return fail("item_covered");
+    exposed=true;
+
+    InventorySlotSnapshot right,left;
+    if (!readInventorySlot(5u,right) || !readInventorySlot(6u,left))
+        return fail("inventory_read_failed");
+    std::uint8_t slot{};
+    if (right.occupied && right.id==request.targetId) slot=5u;
+    else if (left.occupied && left.id==request.targetId) slot=6u;
+    else if (!right.occupied) slot=5u;
+    else if (!left.occupied) slot=6u;
+    else return fail("both_hands_occupied_by_other_items");
+
+    // Reuse the V35 ground->hand backend unchanged. It revalidates the hand,
+    // exact source holder, distance and confirmed Game::move contract here,
+    // in this same game-thread action while the TopMove ThingPtr is retained.
+    g_pendingMoveSourceTile=request.tile;
+    g_pendingMoveTileExpectedItem=returned.thing;
+    g_pendingMoveTileItemId=request.targetId;
+    g_pendingMoveInventorySlot=slot;
+    const bool moved=executeMoveTileToInventoryOnGameThread();
+    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
+    g_pendingMoveSourceTile=0;
+    g_pendingMoveTileExpectedItem=0;
+    g_pendingMoveTileItemId=0;
+    g_pendingMoveInventorySlot=0;
+    if (!moved || code!=1)
+        return fail(actionCodeText(code).c_str());
+
+    std::ostringstream response;
+    response << R"({"ok":true,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":true,"exposed":true,"itemId":)"
+             << request.targetId << R"(,"topMoveItemId":)" << topMoveId
+             << R"(,"count":1,"source":{"x":)" << request.x
+             << R"(,"y":)" << request.y << R"(,"z":)"
+             << static_cast<unsigned>(request.z)
+             << R"(},"destinationSlot":)" << static_cast<unsigned>(slot)
+             << R"(,"destinationEncoding":"otclient_inventory_position","rightBefore":)"
+             << (right.occupied ? right.id : 0u)
+             << R"(,"leftBefore":)" << (left.occupied ? left.id : 0u) << "}";
+    g_pickupTileResult=response.str();
+    return true;
+}
+
 LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         auto* msg = reinterpret_cast<MSG*>(lParam);
@@ -4309,6 +4420,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeTopMoveReadOnGameThread();
                 else if (kind == PendingUncoverTile)
                     executeUncoverTileOnGameThread();
+                else if (kind == PendingPickupTopMove)
+                    executePickupTopMoveOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -5272,108 +5385,50 @@ std::string handsResponse() {
 
 std::string moveNearbyItemToHandResponse(std::uint16_t itemId) {
     if (!g_profile || !g_buildMatched)
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"build_not_validated"})";
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"build_not_validated"})";
+    if (!itemId)
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"invalid_item_id"})";
 
-    // V39 safety gate: multiple live stack tests proved that raw Tile::things
-    // indices are not sufficient to determine the visible/movable top item.
-    // Keep pickup disabled until getTopMoveThing ABI is read-only validated.
-    return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"top_move_access_pending_v39"})";
+    std::uint32_t px{},py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px,py,pz))
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"player_unavailable"})";
 
-    /* V35 live-confirmed ground->hand backend retained below and will be
-       re-enabled once Tile::getTopMoveThing selection is confirmed.
-    if (!g_profile->moveRuntimeConfirmed ||
-        !g_profile->moveItemSharedRefConfirmed ||
-        !g_profile->movePositionRefConfirmed ||
-        !g_profile->moveCountConfirmed ||
-        !g_profile->itemContractReady ||
-        !g_profile->tileThingsRuntimeConfirmed ||
-        !g_profile->inventoryContractReady)
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"move_inventory_contract_not_ready"})";
-
-    const auto target=findNearbyTileItemById(itemId,1u);
-    if (!target)
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"item_not_found_in_3x3"})";
-
-    const auto access=inspectTileTargetAccess(*target);
-    if(!access.valid)
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"item_stack_changed"})";
-    if(access.blocker) {
-        std::ostringstream o;
-        o << "{\"ok\":false,\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\","
-          << "\"error\":\"item_covered\","
-          << "\"itemId\":" << itemId
-          << ",\"targetStackIndex\":" << access.target.stackIndex
-          << ",\"blocker\":{"
-          << "\"id\":" << access.blocker->id
-          << ",\"count\":" << access.blocker->count
-          << ",\"stackIndex\":" << access.blocker->stackIndex
-          << "}}";
-        return o.str();
+    // Refresh discovery for every call. Distance selects the target tile;
+    // only the runtime TopMove result can authorize picking up an Item.
+    const auto items=scanCachedTileItems(true);
+    std::optional<TileItemDiagnostic> target;
+    std::uint32_t bestDistance=2u;
+    for (const auto& item:items) {
+        if (item.id!=itemId || item.z!=pz) continue;
+        const auto distance=std::max(
+            item.x>px ? item.x-px : px-item.x,
+            item.y>py ? item.y-py : py-item.y);
+        if (distance<=1u && (!target || distance<bestDistance)) {
+            target=item;
+            bestDistance=distance;
+        }
     }
-
-    InventorySlotSnapshot right,left;
-    if (!readInventorySlot(5u,right) || !readInventorySlot(6u,left))
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"inventory_read_failed"})";
-
-    std::uint8_t destinationSlot{};
-    if (right.occupied && right.id==itemId)
-        destinationSlot=5u;
-    else if (left.occupied && left.id==itemId)
-        destinationSlot=6u;
-    else if (!right.occupied)
-        destinationSlot=5u;
-    else if (!left.occupied)
-        destinationSlot=6u;
-    else
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"both_hands_occupied_by_other_items"})";
-
+    if (!target)
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"item_not_found_in_3x3"})";
     if (!prepareGameThreadDispatcher())
-        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","error":"dispatcher_not_ready"})";
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"dispatcher_not_ready"})";
 
-    g_pendingMoveSourceTile=target->tileAddress;
-    g_pendingMoveTileExpectedItem=target->address;
-    g_pendingMoveTileItemId=target->id;
-    g_pendingMoveInventorySlot=destinationSlot;
-    InterlockedExchange(&g_pendingActionKind,PendingMoveTileToInventory);
-
+    g_pickupTileRequest={target->tileAddress,target->x,target->y,target->z,itemId};
+    g_pickupTileResult.clear();
+    InterlockedExchange(&g_pendingActionKind,PendingPickupTopMove);
     DWORD win32{};
     const bool dispatched=dispatchPendingActionToGameThread(win32);
-    const LONG code=InterlockedCompareExchange(&g_lastActionCode,0,0);
-
-    const auto sourceX=target->x;
-    const auto sourceY=target->y;
-    const auto sourceZ=target->z;
-    const auto sourceStack=target->stackIndex;
-
-    g_pendingMoveSourceTile=0;
-    g_pendingMoveTileExpectedItem=0;
-    g_pendingMoveTileItemId=0;
-    g_pendingMoveInventorySlot=0;
-
+    g_pickupTileRequest={};
     if (!dispatched) {
-        std::ostringstream o;
-        o << "{\"ok\":false,\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\","
-          << "\"error\":\"dispatcher_timeout\",\"win32\":" << win32 << "}";
-        return o.str();
+        std::ostringstream response;
+        response << R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"dispatcher_timeout","win32":)"
+                 << win32 << "}";
+        return response.str();
     }
-
-    std::ostringstream o;
-    o << "{\"ok\":" << (code==1?"true":"false")
-      << ",\"cmd\":\"MOVE_NEARBY_ITEM_TO_HAND\""
-      << ",\"result\":\"" << actionCodeText(code) << "\""
-      << ",\"itemId\":" << itemId
-      << ",\"count\":1"
-      << ",\"source\":{\"x\":" << sourceX
-      << ",\"y\":" << sourceY
-      << ",\"z\":" << static_cast<unsigned>(sourceZ)
-      << ",\"stackIndex\":" << sourceStack << "}"
-      << ",\"destinationSlot\":" << static_cast<unsigned>(destinationSlot)
-      << ",\"destinationEncoding\":\"otclient_inventory_position_experimental\""
-      << ",\"rightBefore\":" << (right.occupied?std::to_string(right.id):std::string("0"))
-      << ",\"leftBefore\":" << (left.occupied?std::to_string(left.id):std::string("0"))
-      << "}";
-    return o.str();
-    */
+    if (g_pickupTileResult.empty())
+        return R"({"ok":false,"cmd":"MOVE_NEARBY_ITEM_TO_HAND","moved":false,"error":"game_thread_result_missing"})";
+    return g_pickupTileResult;
 }
 
 std::string uncoverTileTargetResponse(
