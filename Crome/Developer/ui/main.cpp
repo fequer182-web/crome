@@ -82,6 +82,12 @@ struct RamoniaFoodConfigUi {
     std::uint32_t retryMs{1000};
 };
 
+struct RamoniaSpearConfigUi {
+    bool enabled{};
+    std::vector<std::uint32_t> itemIds{2389};
+    std::uint32_t retryMs{250};
+};
+
 struct RamoniaLightConfigUi {
     bool enabled{};
 };
@@ -193,6 +199,7 @@ static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
 static RamoniaTargetConfigUi g_ramoniaTargetConfig;
 static RamoniaFoodConfigUi g_ramoniaFoodConfig;
+static RamoniaSpearConfigUi g_ramoniaSpearConfig;
 static RamoniaLightConfigUi g_ramoniaLightConfig;
 static RamoniaHealingConfigUi g_ramoniaHealingConfig;
 static RamoniaRuneConfigUi g_ramoniaRuneConfig;
@@ -200,6 +207,7 @@ static RamoniaCaveConfigUi g_ramoniaCaveConfig;
 static RamoniaLootConfigUi g_ramoniaLootConfig;
 static std::string g_ramoniaTargetStatus = "Ramonia bridge aguardando";
 static std::string g_ramoniaFoodStatus = "Auto Food aguardando";
+static std::string g_ramoniaSpearStatus = "Pick Up Spear aguardando";
 static std::string g_ramoniaLightStatus = "Light aguardando";
 static std::string g_ramoniaHealingStatus = "Healing aguardando";
 static std::string g_ramoniaRuneStatus = "Trainer aguardando";
@@ -282,6 +290,26 @@ static void SetRamoniaFoodStatus(const std::string& status) {
 static std::string RamoniaFoodStatusText() {
     std::lock_guard<std::mutex> lock(g_ramoniaMutex);
     return g_ramoniaFoodStatus;
+}
+
+static void SetRamoniaSpearConfig(const RamoniaSpearConfigUi& cfg) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaSpearConfig=cfg;
+}
+
+static RamoniaSpearConfigUi GetRamoniaSpearConfig() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaSpearConfig;
+}
+
+static void SetRamoniaSpearStatus(const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    g_ramoniaSpearStatus=status;
+}
+
+static std::string RamoniaSpearStatusText() {
+    std::lock_guard<std::mutex> lock(g_ramoniaMutex);
+    return g_ramoniaSpearStatus;
 }
 
 static void SetRamoniaLightConfig(const RamoniaLightConfigUi& cfg) {
@@ -1523,6 +1551,7 @@ static void RunRamoniaCaveCycle(
 
 static void RamoniaTargetWorker() {
     std::uint64_t nextFoodAttemptMs = 0;
+    std::uint64_t nextSpearAttemptMs = 0;
     std::uint64_t nextLightRefreshMs = 0;
     std::uint64_t nextHealAttemptMs = 0;
     std::uint64_t nextRuneAttemptMs = 0;
