@@ -57,7 +57,8 @@ enum PendingActionKind : LONG {
     PendingUseWithTile = 7,
     PendingMoveTileToInventory = 8,
     PendingMoveTileToGround = 9,
-    PendingTopMoveRead = 10
+    PendingTopMoveRead = 10,
+    PendingUncoverTile = 11
 };
 
 volatile LONG g_lastActionCode{};
@@ -4117,6 +4118,163 @@ bool executeTopMoveReadOnGameThread() {
     return true;
 }
 
+struct UncoverTileRequest {
+    std::uintptr_t tile{};
+    std::uint32_t x{},y{};
+    std::uint8_t z{};
+    std::uint16_t targetId{};
+};
+UncoverTileRequest g_uncoverTileRequest;
+std::string g_uncoverTileResult;
+
+// Same +0x4 intrusive refcount contract used by topmoveat. Keep the returned
+// ThingPtr alive through validation and Game::move; balance sane counts on exit.
+struct UncoverThingRef {
+    std::uintptr_t thing{};
+    bool releasable() const {
+        std::uint32_t refs{};
+        return thing && safeRead(thing+0x4u,refs) &&
+               refs>=2u && refs<=1000000u && isWritableAddress(thing+0x4u);
+    }
+    ~UncoverThingRef() {
+        if (releasable())
+            InterlockedDecrement(reinterpret_cast<volatile LONG*>(thing+0x4u));
+    }
+};
+
+bool executeUncoverTileOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+    const auto request=g_uncoverTileRequest;
+    auto fail=[](const char* error) {
+        g_uncoverTileResult=std::string(
+            R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","moved":false,"exposed":false,"error":")")+
+            error+R"("})";
+        return false;
+    };
+    g_uncoverTileResult.clear();
+    if (!g_profile || !g_buildMatched)
+        return fail("build_not_validated");
+    const auto& p=*g_profile;
+    if (!p.itemContractReady || !p.tileThingsRuntimeConfirmed ||
+        p.getTopMoveThingMethodRva!=0x197AD0u ||
+        !exactObjectVtable(request.tile,p.tileVtableRva))
+        return fail("top_move_contract_not_ready");
+
+    // Re-read the source on the game thread. No cached target/blocker pointer
+    // or stack order is used to decide what can move.
+    std::vector<std::uintptr_t> things;
+    bool containsLocalPlayer=false;
+    if (!readStableTileThings(request.tile,things,containsLocalPlayer))
+        return fail("tile_things_unavailable");
+    auto matchesPosition=[&](std::uintptr_t thing) {
+        std::uint32_t x{},y{};
+        std::uint8_t z{};
+        return safeRead(thing+p.posX,x) && safeRead(thing+p.posY,y) &&
+               safeRead(thing+p.posZ,z) &&
+               x==request.x && y==request.y && z==request.z;
+    };
+    auto hasTarget=[&](const std::vector<std::uintptr_t>& entries) {
+        for (const auto thing:entries) {
+            std::uint16_t id{};
+            if (exactObjectVtable(thing,p.itemVtableRva) &&
+                safeRead(thing+p.itemIdOffset,id) &&
+                id==request.targetId && matchesPosition(thing))
+                return true;
+        }
+        return false;
+    };
+    if (!hasTarget(things))
+        return fail("target_item_not_found");
+
+    const auto topMoveAddress=g_base+p.getTopMoveThingMethodRva;
+    if (!isExecutableAddress(topMoveAddress))
+        return fail("top_move_function_not_executable");
+    UncoverThingRef returned;
+    const auto topMove=reinterpret_cast<TileGetTopMoveThingFn>(topMoveAddress);
+    // Runtime-confirmed: ECX=Tile*, hidden return storage at [EBP+8], RET 4.
+    topMove(reinterpret_cast<void*>(request.tile),&returned.thing);
+    if (!returned.thing)
+        return fail("top_move_empty");
+    if (!returned.releasable())
+        return fail("top_move_refcount_invalid");
+
+    if (!readStableTileThings(request.tile,things,containsLocalPlayer) ||
+        !hasTarget(things) ||
+        std::find(things.begin(),things.end(),returned.thing)==things.end())
+        return fail("top_move_not_in_target_tile");
+    if (!exactObjectVtable(returned.thing,p.itemVtableRva))
+        return fail("top_move_is_not_item");
+    std::uint16_t id{},count{};
+    if (!safeRead(returned.thing+p.itemIdOffset,id) || !id ||
+        !safeRead(returned.thing+p.itemCountOffset,count) ||
+        !matchesPosition(returned.thing))
+        return fail("top_move_item_invalid");
+
+    std::ostringstream response;
+    response << R"({"ok":true,"cmd":"UNCOVER_TILE_TARGET_AT","target":{"id":)"
+             << request.targetId << R"(,"x":)" << request.x
+             << R"(,"y":)" << request.y << R"(,"z":)"
+             << static_cast<unsigned>(request.z)
+             << R"(},"topMoveItemId":)" << id;
+    if (id==request.targetId) {
+        response << R"(,"exposed":true,"moved":false})";
+        g_uncoverTileResult=response.str();
+        InterlockedExchange(&g_lastActionCode,1);
+        return true;
+    }
+
+    if (!p.moveRuntimeConfirmed || !p.moveItemSharedRefConfirmed ||
+        !p.movePositionRefConfirmed || !p.moveCountConfirmed ||
+        !p.moveMethodRva)
+        return fail("tile_ground_move_contract_not_ready");
+    const auto moveAddress=g_base+p.moveMethodRva;
+    if (!isExecutableAddress(moveAddress))
+        return fail("move_function_not_executable");
+    std::uint32_t px{},py{};
+    std::uint8_t pz{};
+    if (!localPlayerPosition(px,py,pz) || pz!=request.z ||
+        std::max(px>request.x ? px-request.x : request.x-px,
+                 py>request.y ? py-request.y : request.y-py)>1u)
+        return fail("tile_item_out_of_range");
+
+    const auto destination=chooseAdjacentGroundDestination(
+        request.x,request.y,request.z);
+    if (!destination)
+        return fail("no_adjacent_ground_destination");
+    const auto destinationTile=cachedTileAtPosition(
+        destination->x,destination->y,destination->z,false);
+    std::vector<std::uintptr_t> destinationThings;
+    bool destinationContainsPlayer=false;
+    if (!destinationTile || *destinationTile==request.tile ||
+        !exactObjectVtable(*destinationTile,p.tileVtableRva) ||
+        !readStableTileThings(*destinationTile,destinationThings,destinationContainsPlayer) ||
+        destinationThings.empty())
+        return fail("tile_ground_destination_invalid");
+
+    // Validate the source once more immediately before the single move call.
+    if (!readStableTileThings(request.tile,things,containsLocalPlayer) ||
+        !hasTarget(things) ||
+        std::find(things.begin(),things.end(),returned.thing)==things.end() ||
+        !matchesPosition(returned.thing) || !returned.releasable())
+        return fail("source_tile_changed");
+
+    MovePosition dest=*destination;
+    const std::uint32_t moveCount=count ? count : 1u;
+    const auto move=reinterpret_cast<GameMoveFn>(moveAddress);
+    // Pass the retained shared_object_ptr<Item> by reference, as confirmed for
+    // Game::move. Exactly one blocker; a subsequent request starts from zero.
+    move(reinterpret_cast<void*>(g_base+p.gameRva),&returned.thing,&dest,moveCount);
+    response << R"(,"exposed":false,"moved":true,"blocker":{"id":)"
+             << id << R"(,"count":)" << moveCount
+             << R"(},"destination":{"x":)" << dest.x
+             << R"(,"y":)" << dest.y << R"(,"z":)"
+             << static_cast<unsigned>(dest.z)
+             << R"(},"destinationEncoding":"world_position"})";
+    g_uncoverTileResult=response.str();
+    InterlockedExchange(&g_lastActionCode,1);
+    return true;
+}
+
 LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         auto* msg = reinterpret_cast<MSG*>(lParam);
@@ -4149,6 +4307,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeMoveTileToGroundOnGameThread();
                 else if (kind == PendingTopMoveRead)
                     executeTopMoveReadOnGameThread();
+                else if (kind == PendingUncoverTile)
+                    executeUncoverTileOnGameThread();
                 else
                     InterlockedExchange(&g_lastActionCode, 7);
 
@@ -5336,14 +5496,32 @@ std::string uncoverTileTargetAtResponse(
     std::uint8_t z,
     std::uint16_t itemId) {
 
-    if(!itemId)
-        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"target_item_id_required"})";
+    if (!g_profile || !g_buildMatched)
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"build_not_validated","moved":false,"exposed":false})";
+    if (!itemId)
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"target_item_id_required","moved":false,"exposed":false})";
 
-    const auto target=findTileItemAt(x,y,z,itemId,true);
-    if(!target)
-        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"target_item_not_found"})";
+    const auto tile=cachedTileAtPosition(x,y,z,true);
+    if (!tile)
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"tile_not_found","moved":false,"exposed":false})";
+    if (!prepareGameThreadDispatcher())
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"dispatcher_not_ready","moved":false,"exposed":false})";
 
-    return uncoverTileTargetResponse("UNCOVER_TILE_TARGET_AT",*target);
+    g_uncoverTileRequest={*tile,x,y,z,itemId};
+    g_uncoverTileResult.clear();
+    InterlockedExchange(&g_pendingActionKind,PendingUncoverTile);
+    DWORD win32{};
+    const bool dispatched=dispatchPendingActionToGameThread(win32);
+    g_uncoverTileRequest={};
+    if (!dispatched) {
+        std::ostringstream response;
+        response << R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"dispatcher_timeout","moved":false,"exposed":false,"win32":)"
+                 << win32 << "}";
+        return response.str();
+    }
+    if (g_uncoverTileResult.empty())
+        return R"({"ok":false,"cmd":"UNCOVER_TILE_TARGET_AT","error":"game_thread_result_missing","moved":false,"exposed":false})";
+    return g_uncoverTileResult;
 }
 
 std::string useTileItemAtResponse(
