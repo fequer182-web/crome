@@ -1200,3 +1200,22 @@ Crome automatic Pick Up Spear is now wired to:
 - pause tile polling during detected floor/map transitions.
 
 The requested 20% free-capacity reserve remains configured but is not enforced yet because GET_PLAYER does not currently expose a canonical capacity value. The capacity guard stays explicitly disabled until that field is wired and live-validated.
+
+
+### Crome automatic Pick Up Spear live validation
+
+Live-confirmed on Ramonia through the Crome UI with Bridge V35:
+- Pick Up Spear toggle enabled successfully;
+- configured spear ID 2389 was detected only in the local 3x3 player window;
+- exact-ID matching worked through Tile::things regardless of stack position;
+- ground spear was moved automatically to the correct hand;
+- existing item in the opposite hand was preserved;
+- repeated automatic pickup behavior worked as intended during the live test;
+- no crash was observed.
+
+Current status:
+- 3x3 discovery: LIVE CONFIRMED;
+- hand slot mapping 5/6: LIVE CONFIRMED;
+- ground -> hand Game::move encoding: LIVE CONFIRMED;
+- automatic Crome Pick Up Spear: LIVE CONFIRMED;
+- 20% free-capacity guard: still pending canonical CAP exposure in GET_PLAYER.
