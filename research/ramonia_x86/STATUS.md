@@ -1046,3 +1046,14 @@ Validation order:
 2. tileitems x y z;
 3. usetile x y z exactItemId (or 0 for top item diagnostic);
 4. once direct use is confirmed, retest Cavebot Ladder/Use.
+
+
+### Live validation - direct tile use / bueiro 430
+
+Confirmed live with Bridge V33:
+- `CromePipeTest_x64.exe usetile 1268 1284 7 430` successfully activated the bueiro;
+- therefore Tile::things target resolution, shared Item holder resolution, dispatcher execution, and Game::use are all working on this object;
+- item ID 430 is recorded in the global walker catalog as an open-hole/direct-use object for this validated Ramonia test;
+- Cavebot semantic correction: Hole/use_with_ground is now routed through direct `USE_TILE_ITEM_AT`, while Rope and Shovel remain `USE_WITH_TILE_AT` tool actions.
+
+Next validation: Cavebot node `Hole 430 @ 1268, 1284, 7` or generic `Use 430 @ ...` in a short route.
