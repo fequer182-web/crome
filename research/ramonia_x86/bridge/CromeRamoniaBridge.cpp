@@ -5050,40 +5050,39 @@ std::string topMoveAtResponse(
 
     if (!dispatched) {
         std::ostringstream o;
-        o << "{"ok":false,"cmd":"GET_TOP_MOVE_AT","
-          << ""error":"dispatcher_timeout","win32":" << win32 << "}";
+        o << R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"dispatcher_timeout","win32":)"
+          << win32 << "}";
         return o.str();
     }
     if (code!=1) {
         std::ostringstream o;
-        o << "{"ok":false,"cmd":"GET_TOP_MOVE_AT","
-          << ""error":"runtime_call_failed","actionCode":" << code << "}";
+        o << R"({"ok":false,"cmd":"GET_TOP_MOVE_AT","error":"runtime_call_failed","actionCode":)"
+          << code << "}";
         return o.str();
     }
 
     std::ostringstream o;
-    o << "{"ok":true,"cmd":"GET_TOP_MOVE_AT""
-      << ","diagnosticOnly":true,"movesItem":false"
-      << ","x":" << x << ","y":" << y
-      << ","z":" << static_cast<unsigned>(z)
-      << ","tile":"0x" << std::hex << std::uppercase << *tile << """
-      << ","thing":"0x" << g_topMoveThing << """
-      << ","vtable":"0x" << g_topMoveVtable << """ << std::dec
-      << ","nullResult":" << (g_topMoveThing?"false":"true")
-      << ","isItem":" << (g_topMoveWasItem?"true":"false");
+    o << R"({"ok":true,"cmd":"GET_TOP_MOVE_AT","diagnosticOnly":true,"movesItem":false,"x":)"
+      << x << R"(,"y":)" << y
+      << R"(,"z":)" << static_cast<unsigned>(z)
+      << R"(,"tile":"0x)" << std::hex << std::uppercase << *tile << R"(")"
+      << R"(,"thing":"0x)" << g_topMoveThing << R"(")"
+      << R"(,"vtable":"0x)" << g_topMoveVtable << R"(")" << std::dec
+      << R"(,"nullResult":)" << (g_topMoveThing?"false":"true")
+      << R"(,"isItem":)" << (g_topMoveWasItem?"true":"false");
 
     if (g_topMoveWasItem) {
-        o << ","itemId":" << g_topMoveItemId
-          << ","count":" << g_topMoveItemCount;
+        o << R"(,"itemId":)" << g_topMoveItemId
+          << R"(,"count":)" << g_topMoveItemCount;
     }
 
-    o << ","matchedTileEntry":" << (matchedTileEntry?"true":"false");
+    o << R"(,"matchedTileEntry":)" << (matchedTileEntry?"true":"false");
     if (matchedTileEntry)
-        o << ","stackIndex":" << stackIndex;
-    o << ","tileThingCount":" << things.size()
-      << ","refCountAfterCall":" << g_topMoveRefsAfterCall
-      << ","refReleased":" << (g_topMoveRefReleased?"true":"false")
-      << ","refCountAfterRelease":" << g_topMoveRefsAfterRelease
+        o << R"(,"stackIndex":)" << stackIndex;
+    o << R"(,"tileThingCount":)" << things.size()
+      << R"(,"refCountAfterCall":)" << g_topMoveRefsAfterCall
+      << R"(,"refReleased":)" << (g_topMoveRefReleased?"true":"false")
+      << R"(,"refCountAfterRelease":)" << g_topMoveRefsAfterRelease
       << "}";
 
     return o.str();
