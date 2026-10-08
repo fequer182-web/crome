@@ -307,7 +307,7 @@ if exist "%CXX64_DIR%objdump.exe" (
 echo [ARCH] Pipe client PE32+ x86-64: OK
 
 (
-    echo Crome Ramonia x86 - Pipe Bridge V29 - AutoWalk Safety Gate
+    echo Crome Ramonia x86 - Pipe Bridge V30 - V38 AutoWalk ABI
     echo.
     echo Bridge x86:
     echo   CromeRamoniaBridge_x86.dll
@@ -327,9 +327,9 @@ echo [ARCH] Pipe client PE32+ x86-64: OK
     echo.
     echo.
     echo IMPORTANTE - Cavebot:
-    echo   AUTO_WALK_TO fica BLOQUEADO com seguranca ate o V38 recapturar o contrato completo.
+    echo   AUTO_WALK_TO usa o contrato V38 confirmado: Directions ref + Position por valor.
     echo   Para pesquisa, injete RamoniaResearchProbe_V38.dll separadamente e capture autoWalk natural.
-    echo   Nao force Enabled enquanto walkReady=false.
+    echo   Primeiro teste walkto pelo CromePipeTest; depois Cavebot Enabled se walkReady=true.
 ) > "%PKG_DIR%\TESTE.txt"
 
 echo.
