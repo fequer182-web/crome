@@ -1,10 +1,10 @@
 {
-  "schema": "otclab-ramonia-x86-research-v39",
+  "schema": "otclab-ramonia-x86-research-v40",
   "mode": "read_only_no_hooks_no_internal_calls",
   "policy": "discovery_rules_only_no_cross_build_rva_oracle",
   "persistence": {
-    "profileVersion": 39,
-    "checkpoint": "autowalk_formal_abi_correction",
+    "profileVersion": 40,
+    "checkpoint": "autowalk_deep_abi_v40_confirmed",
     "resumeEnabled": true
   },
   "build": {
@@ -527,7 +527,7 @@
     "autoWalk": {
       "methodRva": "0x76860",
       "ownerRva": "0xA2D4D0",
-      "callingConvention": "x86_thiscall_like",
+      "callingConvention": "x86_ecx_callee_pop_16",
       "this": {
         "semantic": "Game",
         "location": "ecx"
@@ -538,11 +538,17 @@
           "index": 0,
           "semantic": "Directions",
           "abiType": "vector_direction_u32_ref",
-          "status": "runtime_confirmed",
-          "correction": "V39 formal ABI: function-body evidence confirms [EBP+8]; V38 trailing xyz stack values reclassified as caller-local evidence"
+          "status": "runtime_confirmed"
+        },
+        {
+          "index": 1,
+          "semantic": "Position",
+          "abiType": "position_u32_u32_u8_value",
+          "status": "runtime_confirmed"
         }
       ],
-      "correction": "V39: only Directions is treated as a formal argument. V38 trailing xyz values matched LocalPlayer but were not proven as callee parameters."
+      "correction": "V39: only Directions is treated as a formal argument. V38 trailing xyz values matched LocalPlayer but were not proven as callee parameters.",
+      "stackCleanupBytes": 16
     },
     "attack": {
       "methodRva": "0x79190",
