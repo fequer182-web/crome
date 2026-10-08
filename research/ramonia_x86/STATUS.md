@@ -1219,3 +1219,12 @@ Current status:
 - ground -> hand Game::move encoding: LIVE CONFIRMED;
 - automatic Crome Pick Up Spear: LIVE CONFIRMED;
 - 20% free-capacity guard: still pending canonical CAP exposure in GET_PLAYER.
+
+
+### Pick Up Spear live validation - item covered in tile stack
+
+Additional live confirmation on Ramonia:
+- another object was deliberately placed above spear ID 2389 on the same tile;
+- automatic Pick Up Spear did not remove or interact with the covering object;
+- it still found the spear by exact item ID inside Tile::things and moved only the spear to the hand;
+- therefore pickup does not depend on the spear being the top tile item and exact-ID any-stack matching is live-confirmed.
