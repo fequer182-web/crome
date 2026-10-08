@@ -910,3 +910,12 @@ Validation order:
 3. confirm HELLO `walkReady=true`;
 4. run `CromePipeTest_x64.exe walkto <near_x> <near_y> <z> [PID]`;
 5. only after direct walk succeeds, enable the Cavebot route.
+
+
+### Live validation - AUTO_WALK_TO
+
+Confirmed live on Ramonia after Bridge V30 / V38 profile update:
+- direct `CromePipeTest_x64.exe walkto ...` moves the character successfully;
+- no client crash observed on the corrected two-argument ABI;
+- V38-confirmed call contract is therefore promoted from capture-confirmed to live-action-confirmed for this exact build;
+- next validation stage is the Cavebot route state machine itself, beginning with Walk-only waypoints before tile actions.
