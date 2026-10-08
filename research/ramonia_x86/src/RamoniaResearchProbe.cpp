@@ -21,7 +21,7 @@
 #include <vector>
 
 // ============================================================================
-// OTCLab Ramonia x86 Research Probe V38
+// OTCLab Ramonia x86 Research Probe V39
 // DISCOVERY READ-ONLY + ONE-SHOT RUNTIME ABI CAPTURE
 // No internal game action is called by the probe. V33 temporarily replaces one
 // selected action entry byte with INT3, captures the natural game call made by
@@ -4460,10 +4460,10 @@ std::string SaveJson(const Report& r) {
     if (!o) return {};
 
     o << "{\n";
-    o << "  \"schema\": \"otclab-ramonia-x86-research-v38\",\n";
+    o << "  \"schema\": \"otclab-ramonia-x86-research-v39\",\n";
     o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
-    o << "  \"persistence\": {\"profileVersion\": 38, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
+    o << "  \"persistence\": {\"profileVersion\": 39, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
     o << "  \"build\": {\n";
     o << "    \"exe\": \"" << JsonEscape(r.module.path) << "\",\n";
@@ -4675,7 +4675,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V38\n"
+        << "        OTCLab Ramonia x86 Research Probe V39\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4693,7 +4693,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V38 - AUTOWALK ABI RECAPTURE");
+    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V39 - FORMAL ABI CORRECTION");
 }
 
 
@@ -9094,12 +9094,11 @@ void V34PromoteCapture(Report& r,const std::string& token) {
         g_v33Capture.ecx==static_cast<uint32_t>(r.module.base+r.gameOwnerRva);
 
     if(token=="autoWalk") {
-        // V37 only classified arg0 and could therefore falsely promote an
-        // incomplete contract. V38 keeps two logical arguments: Directions
-        // and the by-value start Position candidate reconstructed from the
-        // next three x86 stack DWORDs.
+        // V39 correction: only the formal argument proven by the callee body
+        // is promoted. V38 observed xyz values after arg0 that matched the
+        // LocalPlayer position, but that adjacency alone does not prove they
+        // are callee parameters; they are kept as caller-local evidence only.
         a.args.push_back(V34ClassifyArg(r,token,0,g_v33Capture));
-        a.args.push_back(V38ClassifyAutoWalkStartPositionValue(r,g_v33Capture));
     } else {
         const int argc=V33ExpectedArgs(token);
         for(int i=0;i<argc && i<6;++i)
@@ -9114,7 +9113,7 @@ void V34PromoteCapture(Report& r,const std::string& token) {
     r.actionAbi[token]=a;
     r.actionAbiRaw.erase(token);
 
-    std::cout << "    [V38 ABI] " << token
+    std::cout << "    [V39 ABI] " << token
               << " status=" << a.status
               << " cc=" << a.callingConvention << "\n";
     for(const auto& arg:a.args) {
@@ -9186,9 +9185,8 @@ void V33DescribeArg(const Report& r,const std::string& token,int idx,const V33Me
 }
 
 int V33ExpectedArgs(const std::string& token) {
-    // V38: autoWalk needs four x86 stack slots inspected: the Directions
-    // reference plus the three DWORDs occupied by the candidate Position value.
-    if(token=="autoWalk") return 4;
+    // V39 formal ABI: autoWalk exposes only Directions as a proven argument.
+    if(token=="autoWalk") return 1;
     if(token=="move") return 3;
     if(token=="useWith") return 2;
     if(token=="talkChannel") return 3;
@@ -9275,20 +9273,17 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] V38 recaptura autoWalk e so promove o contrato se Directions + start Position forem confirmados.\n";
+              << "[RULE] V39 promove autoWalk apenas pelo argumento formal Directions; xyz trailing nao e argumento sem prova do callee.\n";
 
     for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
         const bool alreadyConfirmed=V35ActionAlreadyConfirmed(r,tok);
-        if(alreadyConfirmed && std::string(tok)!="autoWalk") {
-            std::cout << "[V38 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
+        if(alreadyConfirmed) {
+            std::cout << "[V39 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
             continue;
-        }
-        if(alreadyConfirmed && std::string(tok)=="autoWalk") {
-            std::cout << "[V38 RECAPTURE] autoWalk V37 sera recapturado porque o contrato antigo tinha apenas Directions.\n";
         }
         // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
         if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
-            std::cout << "[V38 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
+            std::cout << "[V39 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
             continue;
         }
         V33CaptureAction(r,tok);
@@ -9296,7 +9291,7 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V38 COMPLETE] contrato principal de actions Ramonia persistido; autoWalk permanece observado se startPos nao fechar.\n";
+    std::cout << "\n[V39 COMPLETE] contrato principal persistido; autoWalk formal ABI = Directions ref.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
