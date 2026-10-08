@@ -307,7 +307,7 @@ if exist "%CXX64_DIR%objdump.exe" (
 echo [ARCH] Pipe client PE32+ x86-64: OK
 
 (
-    echo Crome Ramonia x86 - Pipe Bridge V37 - V40 AutoWalk + live stack uncover candidate
+    echo Crome Ramonia x86 - Pipe Bridge V38 - read-only getTopMoveThing ABI diagnostic
     echo.
     echo Bridge x86:
     echo   CromeRamoniaBridge_x86.dll
@@ -329,7 +329,7 @@ echo [ARCH] Pipe client PE32+ x86-64: OK
     echo IMPORTANTE - Cavebot:
     echo   AUTO_WALK_TO usa o contrato V40 confirmado: Directions ref + Position por valor + RET 16.
     echo   Research Probe V40: diagnostico profundo do autoWalk (RET + callsite); nao use junto do Cavebot.
-    echo   Walkto repetido validado; V35 confirmou chão -> mão. V37 usa a ordem real observada do Tile::things para escolher um bloqueador antes do alvo e testar chão -> chão.
+    echo   Walkto repetido validado; V35 confirmou chão -> mão. V38 trava pickup/uncover e coleta read-only o ABI/callsites de Tile::getTopMoveThing antes de reativar movimentos.
 ) > "%PKG_DIR%\TESTE.txt"
 
 echo.
