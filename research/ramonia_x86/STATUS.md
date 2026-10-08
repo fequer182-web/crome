@@ -1083,3 +1083,15 @@ Decision:
 - explicit waypoint/catalog IDs remain fallback diagnostics if top-item use does not work on a special tile;
 - Rope/Shovel remain explicit tool actions through USE_WITH_TILE_AT;
 - after Ladder/Hole use succeeds, Cavebot waits for GET_PLAYER Z to change before advancing the waypoint.
+
+
+### Live validation - Cavebot floor transitions up/down
+
+Confirmed live on Ramonia after the top-item tile-use and transition-wait changes:
+- Cavebot successfully performed a floor transition upward;
+- Cavebot successfully performed a floor transition downward;
+- no crash was observed during these transitions;
+- structural tile actions now use `USE_TILE_ITEM_AT` with `itemId=0` first, resolving the current top item from a fresh Tile::things snapshot;
+- after the use succeeds, Cavebot waits for GET_PLAYER Z to actually change before advancing the waypoint.
+
+This validates the current Ramonia behavior for direct structural Use / Ladder / Hole style transitions without hard-coding one build-specific structure ID.
