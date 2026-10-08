@@ -53,7 +53,8 @@ enum PendingActionKind : LONG {
     PendingUseWithSelf = 5,
     PendingAutoWalk = 6,
     PendingUseWithTile = 7,
-    PendingMoveTileToInventory = 8
+    PendingMoveTileToInventory = 8,
+    PendingMoveTileToGround = 9
 };
 
 volatile LONG g_lastActionCode{};
@@ -84,6 +85,10 @@ std::uintptr_t g_pendingMoveSourceTile{};
 std::uintptr_t g_pendingMoveTileExpectedItem{};
 std::uint16_t g_pendingMoveTileItemId{};
 std::uint8_t g_pendingMoveInventorySlot{};
+std::uint32_t g_pendingMoveGroundX{};
+std::uint32_t g_pendingMoveGroundY{};
+std::uint8_t g_pendingMoveGroundZ{};
+std::uint32_t g_pendingMoveGroundCount{};
 
 std::uint32_t g_pendingTalkMode{1};
 std::uint32_t g_pendingTalkChannel{};
@@ -2435,6 +2440,151 @@ std::optional<TileItemDiagnostic> findNearbyTileItemById(
     }
 
     return best;
+}
+
+struct TileTargetAccess {
+    bool valid{};
+    bool accessible{};
+    bool nonItemAbove{};
+    TileItemDiagnostic target;
+    std::optional<TileItemDiagnostic> blocker;
+};
+
+TileTargetAccess inspectTileTargetAccess(const TileItemDiagnostic& wanted) {
+    TileTargetAccess out;
+    out.target=wanted;
+
+    if (!g_profile || !g_profile->itemContractReady ||
+        !g_profile->tileThingsRuntimeConfirmed ||
+        !wanted.tileAddress || !wanted.address || !wanted.id)
+        return out;
+
+    std::vector<std::uintptr_t> things;
+    bool containsLocalPlayer=false;
+    if (!readStableTileThings(
+            wanted.tileAddress,things,containsLocalPlayer) ||
+        things.empty())
+        return out;
+
+    const auto wantedItemVtable=g_base+g_profile->itemVtableRva;
+    std::size_t targetIndex=things.size();
+
+    for(std::size_t i=0;i<things.size();++i) {
+        const auto thing=things[i];
+        if(thing!=wanted.address) continue;
+
+        std::uintptr_t vt{};
+        std::uint16_t id{};
+        if(!safeRead(thing,vt) || vt!=wantedItemVtable ||
+           !safeRead(thing+g_profile->itemIdOffset,id) ||
+           id!=wanted.id)
+            continue;
+
+        targetIndex=i;
+        break;
+    }
+
+    if(targetIndex>=things.size())
+        return out;
+
+    out.valid=true;
+    out.target.stackIndex=static_cast<std::uint32_t>(targetIndex);
+    out.target.tileThingCount=static_cast<std::uint32_t>(things.size());
+
+    // For pickup/use accessibility we care about movable Item blockers.
+    // A corpse is an Item as well. Walkers/creatures are not auto-moved.
+    for(std::size_t i=things.size(); i-- > targetIndex+1;) {
+        const auto thing=things[i];
+        std::uintptr_t vt{};
+        if(!safeRead(thing,vt))
+            continue;
+
+        if(vt!=wantedItemVtable) {
+            out.nonItemAbove=true;
+            continue;
+        }
+
+        std::uint16_t id{},count{};
+        std::uint32_t x{},y{};
+        std::uint8_t z{};
+        if(!safeRead(thing+g_profile->itemIdOffset,id) || !id ||
+           !safeRead(thing+g_profile->itemCountOffset,count) ||
+           !safeRead(thing+g_profile->posX,x) ||
+           !safeRead(thing+g_profile->posY,y) ||
+           !safeRead(thing+g_profile->posZ,z))
+            continue;
+
+        TileItemDiagnostic blocker;
+        blocker.address=thing;
+        blocker.tileAddress=wanted.tileAddress;
+        blocker.id=id;
+        blocker.count=count;
+        blocker.x=x;
+        blocker.y=y;
+        blocker.z=z;
+        blocker.stackIndex=static_cast<std::uint32_t>(i);
+        blocker.tileThingCount=static_cast<std::uint32_t>(things.size());
+        out.blocker=blocker;
+        break;
+    }
+
+    out.accessible=!out.blocker.has_value();
+    return out;
+}
+
+std::optional<MovePosition> chooseAdjacentGroundDestination(
+    std::uint32_t sourceX,
+    std::uint32_t sourceY,
+    std::uint8_t sourceZ) {
+
+    std::uint32_t px{},py{};
+    std::uint8_t pz{};
+    if(!localPlayerPosition(px,py,pz) || pz!=sourceZ)
+        return std::nullopt;
+
+    struct Delta { int dx; int dy; };
+    static constexpr Delta kOrder[] = {
+        {1,0},{-1,0},{0,1},{0,-1},
+        {1,1},{1,-1},{-1,1},{-1,-1}
+    };
+
+    std::vector<TileCoordCacheEntry> coords;
+    AcquireSRWLockShared(&g_tileCacheLock);
+    coords=g_tileCoordCache;
+    ReleaseSRWLockShared(&g_tileCacheLock);
+
+    auto exists=[&](std::uint32_t x,std::uint32_t y){
+        for(const auto& e:coords)
+            if(e.z==sourceZ && e.x==x && e.y==y)
+                return true;
+        return false;
+    };
+
+    // Prefer not to dump a blocker underneath the player. If there is no
+    // other cached neighbor, allow the player's tile as last resort.
+    for(int pass=0;pass<2;++pass) {
+        for(const auto d:kOrder) {
+            const auto nx64=static_cast<std::int64_t>(sourceX)+d.dx;
+            const auto ny64=static_cast<std::int64_t>(sourceY)+d.dy;
+            if(nx64<=0 || ny64<=0)
+                continue;
+            const auto nx=static_cast<std::uint32_t>(nx64);
+            const auto ny=static_cast<std::uint32_t>(ny64);
+            const bool isPlayerTile=nx==px && ny==py;
+            if((pass==0 && isPlayerTile) || (pass==1 && !isPlayerTile))
+                continue;
+            if(!exists(nx,ny))
+                continue;
+
+            MovePosition dest{};
+            dest.x=nx;
+            dest.y=ny;
+            dest.z=sourceZ;
+            return dest;
+        }
+    }
+
+    return std::nullopt;
 }
 
 struct InventorySlotSnapshot {
