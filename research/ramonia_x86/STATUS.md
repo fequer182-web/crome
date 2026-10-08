@@ -881,3 +881,32 @@ V38 does not call autoWalk itself. The user must trigger a normal client auto-wa
 5. Only after that evidence is confirmed, implement the matching active Game::autoWalk call and reopen `walkReady`.
 
 Do not test Cavebot Enabled as a movement test while `walkReady=false`.
+
+
+## Bridge V30 - V38-confirmed AutoWalk ABI
+
+Live V38 capture closed the Cavebot crash investigation.
+
+Observed natural Game::autoWalk entry:
+- ECX matched the exact Game owner;
+- arg1 was a 12-element direction vector and classified as `vector_direction_u32_ref`;
+- the next x86 stack DWORDs were `1266, 1284, 7`;
+- V38 compared them with LocalPlayer `1264,1284,7` and confirmed the logical second argument as `Position`;
+- final ABI: `Directions` by reference + `Position` by value, status `runtime_confirmed`.
+
+The V28 crash was caused by the bridge calling the correct method RVA with an incomplete one-argument typedef.
+
+Bridge V30 implementation:
+- `GameAutoWalkFn` now receives `(Game*, DirectionsRef, MovePosition value)`;
+- `MovePosition` is the existing 12-byte u32/u32/u8+padding layout;
+- the real LocalPlayer position is copied into `startPos` before the route-direction builder mutates its working x/y values;
+- the V38 safety latch is now enabled;
+- HELLO reports bridgeVersion 30 and `walkReady=true` only when the V38 two-argument profile contract is loaded;
+- canonical profile is promoted to schema/profileVersion V38 with both autoWalk arguments persisted.
+
+Validation order:
+1. build x86 package;
+2. inject Bridge V30;
+3. confirm HELLO `walkReady=true`;
+4. run `CromePipeTest_x64.exe walkto <near_x> <near_y> <z> [PID]`;
+5. only after direct walk succeeds, enable the Cavebot route.
