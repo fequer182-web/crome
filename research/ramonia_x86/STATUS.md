@@ -1128,3 +1128,17 @@ New read-only diagnostic:
 Expected response includes `scannedTiles` (normally up to 9), `found`, and exact spear x/y/z/stackIndex when present.
 
 This validates discovery only. Ground -> equipment Game::move destination encoding is still pending one live test before automatic pickup is enabled.
+
+
+### Bridge V34 live validation - 3x3 spear detection
+
+Live-confirmed on Ramonia:
+- Bridge HELLO reported bridgeVersion=34, buildMatched=true and dispatcherReady=true;
+- GET_NEARBY_ITEM for spear ID 2389 with radius=1 scanned exactly 9 tiles;
+- when the spear was outside the 3x3 window, response returned found=false;
+- after the player moved adjacent, the same command returned found=true;
+- detected spear: ID 2389 at 1220,1280,7, stackIndex=2, tileThingCount=3;
+- therefore exact-ID matching works even when other things share the same tile;
+- the feature can remain dormant while Pick Up Spear is disabled and poll only the 3x3 window while enabled.
+
+Next step: validate one Game::move from the exact ground Item holder to one equipment hand slot before enabling automatic pickup.
