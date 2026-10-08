@@ -4460,10 +4460,10 @@ std::string SaveJson(const Report& r) {
     if (!o) return {};
 
     o << "{\n";
-    o << "  \"schema\": \"otclab-ramonia-x86-research-v39\",\n";
+    o << "  \"schema\": \"otclab-ramonia-x86-research-v40\",\n";
     o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
-    o << "  \"persistence\": {\"profileVersion\": 39, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
+    o << "  \"persistence\": {\"profileVersion\": 40, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
     o << "  \"build\": {\n";
     o << "    \"exe\": \"" << JsonEscape(r.module.path) << "\",\n";
@@ -4530,8 +4530,10 @@ std::string SaveJson(const Report& r) {
         o << "    \"" << JsonEscape(name) << "\": {\n"
           << "      \"methodRva\": \"" << HexU32(a.methodRva) << "\",\n"
           << "      \"ownerRva\": \"" << HexU32(a.ownerRva) << "\",\n"
-          << "      \"callingConvention\": \"" << JsonEscape(a.callingConvention) << "\",\n"
-          << "      \"this\": {\"semantic\": \"" << JsonEscape(a.thisSemantic)
+          << "      \"callingConvention\": \"" << JsonEscape(a.callingConvention) << "\",\n";
+        if (name=="autoWalk")
+            o << "      \"stackCleanupBytes\": 16,\n";
+        o << "      \"this\": {\"semantic\": \"" << JsonEscape(a.thisSemantic)
           << "\", \"location\": \"" << JsonEscape(a.thisLocation) << "\"},\n"
           << "      \"status\": \"" << JsonEscape(a.status) << "\",\n"
           << "      \"args\": [";
@@ -9204,11 +9206,12 @@ void V34PromoteCapture(Report& r,const std::string& token) {
         g_v33Capture.ecx==static_cast<uint32_t>(r.module.base+r.gameOwnerRva);
 
     if(token=="autoWalk") {
-        // V39 correction: only the formal argument proven by the callee body
-        // is promoted. V38 observed xyz values after arg0 that matched the
-        // LocalPlayer position, but that adjacency alone does not prove they
-        // are callee parameters; they are kept as caller-local evidence only.
+        // V40 deep scan + natural callsite proved the complete x86 ABI:
+        // ECX=Game, Directions& at +8, Position value across +C/+10/+14,
+        // and callee cleanup with RET 16.
+        a.callingConvention="x86_ecx_callee_pop_16";
         a.args.push_back(V34ClassifyArg(r,token,0,g_v33Capture));
+        a.args.push_back(V38ClassifyAutoWalkStartPositionValue(r,g_v33Capture));
     } else {
         const int argc=V33ExpectedArgs(token);
         for(int i=0;i<argc && i<6;++i)
@@ -9223,7 +9226,7 @@ void V34PromoteCapture(Report& r,const std::string& token) {
     r.actionAbi[token]=a;
     r.actionAbiRaw.erase(token);
 
-    std::cout << "    [V39 ABI] " << token
+    std::cout << "    [V40 ABI] " << token
               << " status=" << a.status
               << " cc=" << a.callingConvention << "\n";
     for(const auto& arg:a.args) {
@@ -9295,7 +9298,8 @@ void V33DescribeArg(const Report& r,const std::string& token,int idx,const V33Me
 }
 
 int V33ExpectedArgs(const std::string& token) {
-    // V39 formal ABI: autoWalk exposes only Directions as a proven argument.
+    // V40 prints arg1 via the generic classifier; the 12-byte Position value
+    // is reconstructed from stack[2..4] by the dedicated classifier.
     if(token=="autoWalk") return 1;
     if(token=="move") return 3;
     if(token=="useWith") return 2;
@@ -9458,7 +9462,7 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
         }
         // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
         if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
-            std::cout << "[V39 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
+            std::cout << "[V40 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
             continue;
         }
         V33CaptureAction(r,tok);
