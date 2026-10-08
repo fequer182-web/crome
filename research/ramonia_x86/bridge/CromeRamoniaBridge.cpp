@@ -2491,41 +2491,51 @@ TileTargetAccess inspectTileTargetAccess(const TileItemDiagnostic& wanted) {
     out.target.stackIndex=static_cast<std::uint32_t>(targetIndex);
     out.target.tileThingCount=static_cast<std::uint32_t>(things.size());
 
-    // For pickup/use accessibility we care about movable Item blockers.
-    // A corpse is an Item as well. Walkers/creatures are not auto-moved.
-    for(std::size_t i=things.size(); i-- > targetIndex+1;) {
-        const auto thing=things[i];
-        std::uintptr_t vt{};
-        if(!safeRead(thing,vt))
-            continue;
+    // Ramonia live evidence shows the visible/move blocker is not the
+    // largest stackIndex. Example:
+    //   103[0], 16845[1], 20159[2], spear 2389[3]
+    // where 20159 is visually above the spear.
+    //
+    // OTC's classic getTopMoveThing semantics also walk Tile::things from
+    // lower indices toward higher common items. Until ThingType flags are
+    // mapped for this build, use the nearest Item immediately BEFORE the
+    // exact target as the one-layer uncover candidate. This is deliberately
+    // one layer per call and will be re-read after every move.
+    if(targetIndex>0) {
+        for(std::size_t i=targetIndex; i-- > 0;) {
+            const auto thing=things[i];
+            std::uintptr_t vt{};
+            if(!safeRead(thing,vt))
+                continue;
 
-        if(vt!=wantedItemVtable) {
-            out.nonItemAbove=true;
-            continue;
+            if(vt!=wantedItemVtable) {
+                out.nonItemAbove=true;
+                continue;
+            }
+
+            std::uint16_t id{},count{};
+            std::uint32_t x{},y{};
+            std::uint8_t z{};
+            if(!safeRead(thing+g_profile->itemIdOffset,id) || !id ||
+               !safeRead(thing+g_profile->itemCountOffset,count) ||
+               !safeRead(thing+g_profile->posX,x) ||
+               !safeRead(thing+g_profile->posY,y) ||
+               !safeRead(thing+g_profile->posZ,z))
+                continue;
+
+            TileItemDiagnostic blocker;
+            blocker.address=thing;
+            blocker.tileAddress=wanted.tileAddress;
+            blocker.id=id;
+            blocker.count=count;
+            blocker.x=x;
+            blocker.y=y;
+            blocker.z=z;
+            blocker.stackIndex=static_cast<std::uint32_t>(i);
+            blocker.tileThingCount=static_cast<std::uint32_t>(things.size());
+            out.blocker=blocker;
+            break;
         }
-
-        std::uint16_t id{},count{};
-        std::uint32_t x{},y{};
-        std::uint8_t z{};
-        if(!safeRead(thing+g_profile->itemIdOffset,id) || !id ||
-           !safeRead(thing+g_profile->itemCountOffset,count) ||
-           !safeRead(thing+g_profile->posX,x) ||
-           !safeRead(thing+g_profile->posY,y) ||
-           !safeRead(thing+g_profile->posZ,z))
-            continue;
-
-        TileItemDiagnostic blocker;
-        blocker.address=thing;
-        blocker.tileAddress=wanted.tileAddress;
-        blocker.id=id;
-        blocker.count=count;
-        blocker.x=x;
-        blocker.y=y;
-        blocker.z=z;
-        blocker.stackIndex=static_cast<std::uint32_t>(i);
-        blocker.tileThingCount=static_cast<std::uint32_t>(things.size());
-        out.blocker=blocker;
-        break;
     }
 
     out.accessible=!out.blocker.has_value();
@@ -3045,7 +3055,8 @@ std::string nearbyItemResponse(
           << ",\"z\":" << static_cast<unsigned>(match->z)
           << ",\"stackIndex\":" << match->stackIndex
           << ",\"tileThingCount\":" << match->tileThingCount
-          << ",\"accessible\":" << (access.valid && access.accessible ? "true" : "false");
+          << ",\"accessible\":" << (access.valid && access.accessible ? "true" : "false")
+          << ",\"blockerRule\":\"nearest_item_before_target_experimental\"";
         if(access.blocker) {
             o << ",\"blocker\":{"
               << "\"id\":" << access.blocker->id
@@ -5290,7 +5301,7 @@ std::string handleRequest(const std::string& request) {
     if (cmd == "HELLO") {
         std::ostringstream o;
         o << "{\"ok\":true,\"cmd\":\"HELLO\",\"bridge\":\"CromeRamoniaBridge\","
-          << "\"bridgeVersion\":36,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
+          << "\"bridgeVersion\":37,\"protocol\":1,\"pid\":" << GetCurrentProcessId()
           << ",\"pipe\":\"" << jsonEscape(pipeName()) << "\","
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
@@ -5547,7 +5558,7 @@ DWORD WINAPI bridgeThread(LPVOID) {
         // Reset diagnostics on every fresh DLL load.
         try {
             std::ofstream clear(bridgeLogPath(), std::ios::trunc | std::ios::binary);
-            if (clear) clear << "CromeRamoniaBridge V36 startup\r\n";
+            if (clear) clear << "CromeRamoniaBridge V37 startup\r\n";
         } catch (...) {}
 
         g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
