@@ -39,6 +39,11 @@ HHOOK g_gameThreadHook{};
 HANDLE g_actionEvent{};
 constexpr UINT kActionMessage = WM_APP + 0x620;
 
+// V29 hard safety latch. V38 will recapture the complete autoWalk ABI first.
+// Flip/remove this only after the live capture proves the extra Position
+// layout and the active-call typedef/call site is updated to match it.
+constexpr bool kAutoWalkActiveCallV38Implemented = false;
+
 enum PendingActionKind : LONG {
     PendingNone = 0,
     PendingAttack = 1,
@@ -2980,7 +2985,8 @@ bool executeAutoWalkOnGameThread() {
     }
 
     const auto& p=*g_profile;
-    if (!p.autoWalkRuntimeConfirmed ||
+    if (!kAutoWalkActiveCallV38Implemented ||
+        !p.autoWalkRuntimeConfirmed ||
         !p.autoWalkDirectionsVectorRefConfirmed ||
         !p.autoWalkStartPositionValueConfirmed ||
         !p.autoWalkMethodRva ||
@@ -4151,6 +4157,8 @@ std::string autoWalkToResponse(
         !g_profile->autoWalkStartPositionValueConfirmed ||
         !g_profile->autoWalkMethodRva)
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_contract_not_ready_v38_required"})";
+    if (!kAutoWalkActiveCallV38Implemented)
+        return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"autowalk_active_call_locked_pending_v38_live_capture"})";
     if (!prepareGameThreadDispatcher())
         return R"({"ok":false,"cmd":"AUTO_WALK_TO","error":"dispatcher_not_ready"})";
 
@@ -4318,7 +4326,8 @@ std::string handleRequest(const std::string& request) {
           << ((g_profile && g_profile->lookRuntimeConfirmed &&
                g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
           << ",\"walkReady\":"
-          << ((g_profile && g_profile->autoWalkRuntimeConfirmed &&
+          << ((kAutoWalkActiveCallV38Implemented &&
+               g_profile && g_profile->autoWalkRuntimeConfirmed &&
                g_profile->autoWalkDirectionsVectorRefConfirmed &&
                g_profile->autoWalkStartPositionValueConfirmed) ? "true" : "false")
           << ",\"lightReady\":"
