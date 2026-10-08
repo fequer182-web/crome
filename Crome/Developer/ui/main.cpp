@@ -1847,7 +1847,10 @@ static void RamoniaTargetWorker() {
 
         if (!targetPolicyActive) {
             SetRamoniaStatus("Ramonia Bridge pronta");
-            Sleep(300);
+            if (caveActive)
+                RunRamoniaCaveCycle(
+                    pid,caveCfg,caveState,nowMs,currentAttackId!=0);
+            Sleep(caveActive ? 120 : 300);
             continue;
         }
 
@@ -1856,13 +1859,18 @@ static void RamoniaTargetWorker() {
             monsters,targetCfg,currentAttackForTarget);
 
         if (!target) {
-            if (currentAttackForTarget)
+            if (currentAttackForTarget) {
                 SetRamoniaStatus(
                     "Target travado no ID " + std::to_string(currentAttackForTarget) +
                     " - aguardando confirmacao do jogo");
-            else
+                if (caveActive)
+                    RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,true);
+            } else {
                 SetRamoniaStatus("Target ativo - aguardando alvo");
-            Sleep(300);
+                if (caveActive)
+                    RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,false);
+            }
+            Sleep(caveActive ? 120 : 300);
             continue;
         }
 
@@ -1892,6 +1900,8 @@ static void RamoniaTargetWorker() {
         }
 
         SetRamoniaStatus("Target ativo",target->name,target->id,target->hpPercent);
+        if (caveActive)
+            RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,true);
         Sleep(300);
     }
 }
@@ -1924,6 +1934,11 @@ static bool RuneRuntimeReady() {
 static bool LootRuntimeReady() {
     return g_nativeRuntimeLoaded ||
            (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 21);
+}
+
+static bool CaveRuntimeReady() {
+    return g_nativeRuntimeLoaded ||
+           (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load() >= 27);
 }
 
 static bool IsModuleLoaded(DWORD pid, const wchar_t* moduleName) {
