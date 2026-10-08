@@ -1038,6 +1038,9 @@ struct RamoniaCaveWorkerState {
     std::uint32_t issuedWalkX{};
     std::uint32_t issuedWalkY{};
     std::uint32_t issuedWalkZ{};
+    bool transitionPending{};
+    std::uint32_t transitionFromZ{};
+    std::uint64_t transitionDeadlineMs{};
     int retries{};
     bool halted{};
 };
@@ -1062,6 +1065,9 @@ static void AdvanceRamoniaCaveNode(
     state.issuedWalkX=0;
     state.issuedWalkY=0;
     state.issuedWalkZ=0;
+    state.transitionPending=false;
+    state.transitionFromZ=0;
+    state.transitionDeadlineMs=0;
     state.retries=0;
     state.halted=false;
 }
@@ -1177,6 +1183,35 @@ static void RunRamoniaCaveCycle(
     if (!pos.valid) {
         SetRamoniaCaveStatus("Cavebot: posicao indisponivel");
         return;
+    }
+
+    // Structural map use can change floors asynchronously. Keep the current
+    // node until GET_PLAYER proves the Z transition really happened.
+    if (state.transitionPending) {
+        if (pos.z!=state.transitionFromZ) {
+            SetRamoniaCaveStatus(
+                "Cavebot: transicao OK z=" +
+                std::to_string(state.transitionFromZ) + "->" +
+                std::to_string(pos.z) +
+                " #" + std::to_string(state.index));
+            AdvanceRamoniaCaveNode(cfg,state);
+            return;
+        }
+
+        if (state.transitionDeadlineMs && nowMs>=state.transitionDeadlineMs) {
+            state.transitionPending=false;
+            state.transitionFromZ=0;
+            state.transitionDeadlineMs=0;
+            state.nextActionMs=nowMs+650;
+            SetRamoniaCaveStatus(
+                "Cavebot: transicao nao ocorreu; tentando use novamente #" +
+                std::to_string(state.index));
+        } else {
+            SetRamoniaCaveStatus(
+                "Cavebot: aguardando mudanca de andar #" +
+                std::to_string(state.index));
+            return;
+        }
     }
 
     if (pos.z!=node.z) {
@@ -1363,11 +1398,25 @@ static void RunRamoniaCaveCycle(
         }
 
         if (used) {
-            SetRamoniaCaveStatus(
-                "Cavebot: " + node.type +
-                " OK id=" + std::to_string(usedId) +
-                " #" + std::to_string(state.index));
-            AdvanceRamoniaCaveNode(cfg,state);
+            const bool expectsFloorChange =
+                node.type=="ladder" || node.type=="use_with_ground";
+
+            if (expectsFloorChange) {
+                state.transitionPending=true;
+                state.transitionFromZ=pos.z;
+                state.transitionDeadlineMs=nowMs+3000;
+                state.nextActionMs=0;
+                SetRamoniaCaveStatus(
+                    "Cavebot: " + node.type +
+                    " use OK id=" + std::to_string(usedId) +
+                    " | aguardando Z #" + std::to_string(state.index));
+            } else {
+                SetRamoniaCaveStatus(
+                    "Cavebot: " + node.type +
+                    " OK id=" + std::to_string(usedId) +
+                    " #" + std::to_string(state.index));
+                AdvanceRamoniaCaveNode(cfg,state);
+            }
         } else {
             const auto error=
                 actionResponse.is_object()
