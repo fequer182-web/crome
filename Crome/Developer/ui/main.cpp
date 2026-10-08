@@ -1130,9 +1130,18 @@ static void RunRamoniaCaveCycle(
         return;
     }
 
-    if (node.type!="walk" && node.type!="stand") {
+    const bool isWalkNode =
+        node.type=="walk" || node.type=="stand";
+    const bool isDirectUseNode =
+        node.type=="use" || node.type=="ladder";
+    const bool isToolUseNode =
+        node.type=="rope" ||
+        node.type=="shovel" ||
+        node.type=="use_with_ground";
+
+    if (!isWalkNode && !isDirectUseNode && !isToolUseNode) {
         SetRamoniaCaveStatus(
-            "Cavebot: " + node.type + " aguardando backend");
+            "Cavebot: tipo nao suportado " + node.type);
         return;
     }
 
@@ -1148,17 +1157,24 @@ static void RunRamoniaCaveCycle(
         return;
     }
 
-    if (pos.x==node.x && pos.y==node.y && pos.z==node.z) {
-        SetRamoniaCaveStatus(
-            "Cavebot: chegou #" + std::to_string(state.index));
-        AdvanceRamoniaCaveNode(cfg,state);
-        return;
-    }
-
     if (pos.z!=node.z) {
         SetRamoniaCaveStatus(
             "Cavebot: waypoint em outro andar #" +
             std::to_string(state.index));
+        return;
+    }
+
+    const auto dx =
+        pos.x>node.x ? pos.x-node.x : node.x-pos.x;
+    const auto dy =
+        pos.y>node.y ? pos.y-node.y : node.y-pos.y;
+    const auto distance=std::max(dx,dy);
+
+    if (isWalkNode &&
+        pos.x==node.x && pos.y==node.y) {
+        SetRamoniaCaveStatus(
+            "Cavebot: chegou #" + std::to_string(state.index));
+        AdvanceRamoniaCaveNode(cfg,state);
         return;
     }
 
@@ -1185,6 +1201,124 @@ static void RunRamoniaCaveCycle(
     if (state.nextActionMs && nowMs<state.nextActionMs)
         return;
 
+    // Use/Rope/Shovel/Ladder/Hole are tile actions. Get adjacent first,
+    // never auto-walk onto the target tile just to perform the action.
+    if (!isWalkNode && distance>1u) {
+        std::uint32_t approachX=node.x;
+        std::uint32_t approachY=node.y;
+
+        if (pos.x<node.x) approachX=node.x-1u;
+        else if (pos.x>node.x) approachX=node.x+1u;
+
+        if (pos.y<node.y) approachY=node.y-1u;
+        else if (pos.y>node.y) approachY=node.y+1u;
+
+        nlohmann::json approachResponse;
+        const bool approached=
+            RamoniaPipeRequest(
+                pid,
+                {{"cmd","AUTO_WALK_TO"},
+                 {"x",approachX},
+                 {"y",approachY},
+                 {"z",node.z}},
+                approachResponse) &&
+            approachResponse.value("ok",false);
+
+        if (approached) {
+            SetRamoniaCaveStatus(
+                "Cavebot: aproximando #" + std::to_string(state.index));
+            state.nextActionMs=nowMs+650;
+            if (!state.lastProgressMs)
+                state.lastProgressMs=nowMs;
+        } else {
+            const auto error=
+                approachResponse.is_object()
+                    ? approachResponse.value(
+                        "error",
+                        approachResponse.value(
+                            "result",
+                            std::string("approach_failed")))
+                    : std::string("pipe_failed");
+            SetRamoniaCaveStatus("Cavebot: aproximacao " + error);
+            state.nextActionMs=nowMs+650;
+        }
+        return;
+    }
+
+    if (isDirectUseNode) {
+        nlohmann::json actionResponse;
+        const bool used=
+            RamoniaPipeRequest(
+                pid,
+                {{"cmd","USE_TILE_ITEM_AT"},
+                 {"x",node.x},
+                 {"y",node.y},
+                 {"z",node.z},
+                 {"itemId",node.itemId}},
+                actionResponse) &&
+            actionResponse.value("ok",false);
+
+        if (used) {
+            SetRamoniaCaveStatus(
+                "Cavebot: " + node.type +
+                " OK #" + std::to_string(state.index));
+            AdvanceRamoniaCaveNode(cfg,state);
+        } else {
+            const auto error=
+                actionResponse.is_object()
+                    ? actionResponse.value(
+                        "error",
+                        actionResponse.value(
+                            "result",
+                            std::string("use_failed")))
+                    : std::string("pipe_failed");
+            SetRamoniaCaveStatus(
+                "Cavebot: " + node.type + " " + error);
+            state.nextActionMs=nowMs+650;
+        }
+        return;
+    }
+
+    if (isToolUseNode) {
+        if (!node.itemId || node.itemId>0xFFFFu) {
+            SetRamoniaCaveStatus(
+                "Cavebot: " + node.type + " Item ID invalido");
+            return;
+        }
+
+        nlohmann::json actionResponse;
+        const bool used=
+            RamoniaPipeRequest(
+                pid,
+                {{"cmd","USE_WITH_TILE_AT"},
+                 {"toolItemId",node.itemId},
+                 {"x",node.x},
+                 {"y",node.y},
+                 {"z",node.z}},
+                actionResponse) &&
+            actionResponse.value("ok",false);
+
+        if (used) {
+            SetRamoniaCaveStatus(
+                "Cavebot: " + node.type +
+                " OK #" + std::to_string(state.index));
+            AdvanceRamoniaCaveNode(cfg,state);
+        } else {
+            const auto error=
+                actionResponse.is_object()
+                    ? actionResponse.value(
+                        "error",
+                        actionResponse.value(
+                            "result",
+                            std::string("usewith_failed")))
+                    : std::string("pipe_failed");
+            SetRamoniaCaveStatus(
+                "Cavebot: " + node.type + " " + error);
+            state.nextActionMs=nowMs+650;
+        }
+        return;
+    }
+
     nlohmann::json walkResponse;
     const bool walked=
         RamoniaPipeRequest(
@@ -1208,8 +1342,11 @@ static void RunRamoniaCaveCycle(
     } else {
         const auto error=
             walkResponse.is_object()
-                ? walkResponse.value("error",
-                    walkResponse.value("result",std::string("walk_failed")))
+                ? walkResponse.value(
+                    "error",
+                    walkResponse.value(
+                        "result",
+                        std::string("walk_failed")))
                 : std::string("pipe_failed");
 
         SetRamoniaCaveStatus("Cavebot: " + error);
