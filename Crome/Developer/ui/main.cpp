@@ -2888,6 +2888,7 @@ static void DrawCavebot(const Theme& t) {
                     const int x=n.value("x",0), y=n.value("y",0), z=n.value("z",0), item=n.value("item_id",0), ms=n.value("ms",1000);
                     std::string line;
                     if(type=="walk") line=BuildWaypointLine(0,x,y,z,0,0,"");
+                    else if(type=="stand") line=BuildWaypointLine(1,x,y,z,0,0,"");
                     else if(type=="use") line=BuildWaypointLine(2,x,y,z,item,0,"");
                     else if(type=="rope") line=BuildWaypointLine(3,x,y,z,item,0,"");
                     else if(type=="shovel") line=BuildWaypointLine(4,x,y,z,item,0,"");
@@ -2941,6 +2942,7 @@ static void DrawCavebot(const Theme& t) {
     } else if(!recording) recordInitialized=false;
 
     const bool targetRuntimeReady = TargetRuntimeReady();
+    const bool caveRuntimeReady = CaveRuntimeReady();
 
     // The main left column has a fixed height. Use exactly the remaining
     // vertical space so Cavebot cannot be clipped by its parent child window.
@@ -2948,14 +2950,14 @@ static void DrawCavebot(const Theme& t) {
         std::max(1.0f,ImGui::GetContentRegionAvail().y);
     CardBegin("cave","Cavebot",CardIcon::Pin,
               ImVec4(0.12f,0.62f,1.0f,1),caveCardHeight,t);
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    if(!caveRuntimeReady) ImGui::BeginDisabled();
     ImGui::Checkbox("Enabled",&enabled);
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    if(!caveRuntimeReady) ImGui::EndDisabled();
     ImGui::SameLine(); ImGui::TextColored(t.blue,"Waypoints");
     ImGui::SameLine(210); if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("Walker IDs");
     ImGui::SameLine(255); ImGui::TextColored(recording?t.green:t.muted,recording?"REC ON":"REC OFF");
     if(!g_nativeRuntimeLoaded){
-        enabled=false;
+        if(!caveRuntimeReady) enabled=false;
         ImGui::SameLine(315);
         if(g_ramoniaBridgeReady.load()) ImGui::TextColored(t.green,"RAMONIA READY");
         else ImGui::TextColored(ImVec4(1.0f,0.55f,0.25f,1),"WAITING RUNTIME");
