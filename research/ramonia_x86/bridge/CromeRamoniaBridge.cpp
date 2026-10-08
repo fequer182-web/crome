@@ -52,7 +52,8 @@ enum PendingActionKind : LONG {
     PendingTalk = 4,
     PendingUseWithSelf = 5,
     PendingAutoWalk = 6,
-    PendingUseWithTile = 7
+    PendingUseWithTile = 7,
+    PendingMoveTileToInventory = 8
 };
 
 volatile LONG g_lastActionCode{};
@@ -78,6 +79,11 @@ std::uint32_t g_pendingMoveCount{};
 std::uintptr_t g_pendingMoveTargetContainer{};
 std::uint32_t g_pendingMoveTargetContainerId{};
 std::uint8_t g_pendingMoveTargetSlot{};
+
+std::uintptr_t g_pendingMoveSourceTile{};
+std::uintptr_t g_pendingMoveTileExpectedItem{};
+std::uint16_t g_pendingMoveTileItemId{};
+std::uint8_t g_pendingMoveInventorySlot{};
 
 std::uint32_t g_pendingTalkMode{1};
 std::uint32_t g_pendingTalkChannel{};
@@ -117,6 +123,10 @@ struct Profile {
     std::size_t itemIdOffset{};
     std::size_t itemCountOffset{};
     bool itemContractReady{};
+
+    std::size_t inventoryArrayOffset{};
+    std::size_t inventoryStride{};
+    bool inventoryContractReady{};
 
     std::size_t openContainersOffset{};
     std::size_t containerIdOffset{};
@@ -637,6 +647,17 @@ Profile loadProfile(const std::string& path) {
         p.itemIdOffset = itemId.offset;
         p.itemCountOffset = itemCount.offset;
         p.itemContractReady = true;
+    }
+
+    const auto inventoryArray = readField(fields, "inventoryArray");
+    const auto inventoryStride = readField(fields, "inventoryStride");
+    if (inventoryArray.valid && inventoryStride.valid &&
+        inventoryArray.type == "ptr_array10" &&
+        inventoryStride.type == "bytes" &&
+        inventoryStride.offset == 4) {
+        p.inventoryArrayOffset = inventoryArray.offset;
+        p.inventoryStride = inventoryStride.offset;
+        p.inventoryContractReady = true;
     }
 
     const auto openContainers = readField(fields, "openContainersMap");
