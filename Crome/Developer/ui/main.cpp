@@ -2680,7 +2680,7 @@ static void DrawCavebot(const Theme& t) {
     // The main left column has a fixed height. Use exactly the remaining
     // vertical space so Cavebot cannot be clipped by its parent child window.
     const float caveCardHeight =
-        std::max(196.0f,ImGui::GetContentRegionAvail().y);
+        std::max(1.0f,ImGui::GetContentRegionAvail().y);
     CardBegin("cave","Cavebot",CardIcon::Pin,
               ImVec4(0.12f,0.62f,1.0f,1),caveCardHeight,t);
     if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
@@ -2698,7 +2698,7 @@ static void DrawCavebot(const Theme& t) {
     }
 
     const float waypointListHeight =
-        g_nativeRuntimeLoaded ? 66.0f : 56.0f;
+        g_nativeRuntimeLoaded ? 48.0f : 42.0f;
     ImVec2 listSize(
         ImGui::GetContentRegionAvail().x-100,
         waypointListHeight);
@@ -2706,12 +2706,32 @@ static void DrawCavebot(const Theme& t) {
     if(wps.empty()) ImGui::TextDisabled("Nenhum waypoint carregado");
     for(int i=0;i<(int)wps.size();++i) if(ImGui::Selectable(wps[i].c_str(),selected==i)) selected=i;
     ImGui::EndChild(); ImGui::SameLine(); ImGui::BeginGroup();
-    if(ImGui::Button("Add",ImVec2(84,18))){ if(g_livePlayer.valid){addX=g_livePlayer.position.x;addY=g_livePlayer.position.y;addZ=(int)g_livePlayer.position.z;} ImGui::OpenPopup("Add waypoint"); }
-    if(ImGui::Button("Edit",ImVec2(84,18)) && selected>=0 && selected<(int)wps.size()){
-        std::string txt; if(ParseWaypointLine(wps[selected],editType,editX,editY,editZ,editItemId,editDelay,txt)){ std::snprintf(editText,sizeof(editText),"%s",txt.c_str()); ImGui::OpenPopup("Edit waypoint"); }
+    if(ImGui::Button("Add",ImVec2(40,18))){
+        if(g_livePlayer.valid){
+            addX=g_livePlayer.position.x;
+            addY=g_livePlayer.position.y;
+            addZ=(int)g_livePlayer.position.z;
+        }
+        ImGui::OpenPopup("Add waypoint");
     }
-    if(ImGui::Button("Remove",ImVec2(84,18))&&selected>=0){wps.erase(wps.begin()+selected);selected=-1;}
-    if(ImGui::Button(recording?"Stop Rec":"Record",ImVec2(84,18))){recording=!recording;recordInitialized=false;}
+    ImGui::SameLine(0,4);
+    if(ImGui::Button("Edit",ImVec2(40,18)) &&
+       selected>=0 && selected<(int)wps.size()){
+        std::string txt;
+        if(ParseWaypointLine(wps[selected],editType,editX,editY,editZ,editItemId,editDelay,txt)){
+            std::snprintf(editText,sizeof(editText),"%s",txt.c_str());
+            ImGui::OpenPopup("Edit waypoint");
+        }
+    }
+    if(ImGui::Button("Remove",ImVec2(40,18))&&selected>=0){
+        wps.erase(wps.begin()+selected);
+        selected=-1;
+    }
+    ImGui::SameLine(0,4);
+    if(ImGui::Button(recording?"Stop":"Rec",ImVec2(40,18))){
+        recording=!recording;
+        recordInitialized=false;
+    }
     ImGui::EndGroup();
 
     if(ImGui::BeginPopupModal("Walker IDs",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
@@ -2770,7 +2790,6 @@ static void DrawCavebot(const Theme& t) {
     if(keep && g_nativeRuntimeLoaded) ImGui::TextDisabled("Follow/chase pode disputar movimento com o Cavebot.");
     ImGui::Checkbox("Should Attack Me",&shouldAttack);ImGui::SameLine(160);ImGui::TextUnformatted("Mode:");ImGui::SameLine();ImGui::SetNextItemWidth(120);ImGui::Combo("##targetmode",&mode,modes,IM_ARRAYSIZE(modes));
     if(!targetRuntimeReady) ImGui::EndDisabled();
-    if(!attackAny&&monsters[0]=='\0')ImGui::TextDisabled("Target: informe os monstros, ex.: Rat, Wolf ou *");
 
     nlohmann::json tcfg={{"enabled",targetRuntimeReady&&targeting},{"poll_ms",300},{"attack_any_monster",attackAny},{"pause_walker",true},{"chase_enabled",keep},{"chase_distance",1},{"chase_scan_range",15},{"chase_interval_ms",350},{"hp_min",hpMin},{"hp_max",hpMax},{"max_range",range},{"chase_repath_ms",900},{"chase_force_refresh_ms",1800},{"manual_input_pause_ms",1500},{"targets",nlohmann::json::array()}};
     const auto targetNames=SplitCsv(monsters);
@@ -3242,7 +3261,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.11 Cavebot UI Fix");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.12 Cavebot Compact");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
