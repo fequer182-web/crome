@@ -1306,22 +1306,63 @@ static void RunRamoniaCaveCycle(
     }
 
     if (isDirectUseNode) {
+        std::vector<std::uint32_t> candidateIds;
+        auto pushCandidate=[&](int id){
+            if(id<=0 || id>0xFFFF) return;
+            const auto u=static_cast<std::uint32_t>(id);
+            if(std::find(candidateIds.begin(),candidateIds.end(),u)==candidateIds.end())
+                candidateIds.push_back(u);
+        };
+
+        // Preserve the exact waypoint ID first. Then try all known IDs for the
+        // semantic category. This keeps Olders IDs usable while allowing the
+        // same route type to work on Ramonia builds with different item IDs.
+        pushCandidate(static_cast<int>(node.itemId));
+        if(node.type=="ladder") {
+            for(int id:CatalogIds("ladder")) pushCandidate(id);
+        } else if(node.type=="use_with_ground") {
+            for(int id:CatalogIds("openHoles")) pushCandidate(id);
+        }
+
+        // Generic Use may intentionally use itemId=0 to select the top Item.
+        if(candidateIds.empty() && node.type=="use")
+            candidateIds.push_back(0);
+
         nlohmann::json actionResponse;
-        const bool used=
-            RamoniaPipeRequest(
-                pid,
-                {{"cmd","USE_TILE_ITEM_AT"},
-                 {"x",node.x},
-                 {"y",node.y},
-                 {"z",node.z},
-                 {"itemId",node.itemId}},
-                actionResponse) &&
-            actionResponse.value("ok",false);
+        bool used=false;
+        std::uint32_t usedId=0;
+
+        for(const auto candidateId:candidateIds) {
+            actionResponse=nlohmann::json::object();
+            const bool callOk=
+                RamoniaPipeRequest(
+                    pid,
+                    {{"cmd","USE_TILE_ITEM_AT"},
+                     {"x",node.x},
+                     {"y",node.y},
+                     {"z",node.z},
+                     {"itemId",candidateId}},
+                    actionResponse);
+            if(callOk && actionResponse.value("ok",false)) {
+                used=true;
+                usedId=actionResponse.value("itemId",candidateId);
+                break;
+            }
+
+            // Only an item-resolution miss should try the next known ID.
+            const auto error=
+                actionResponse.is_object()
+                    ? actionResponse.value("error",std::string())
+                    : std::string();
+            if(error!="tile_item_not_found")
+                break;
+        }
 
         if (used) {
             SetRamoniaCaveStatus(
                 "Cavebot: " + node.type +
-                " OK #" + std::to_string(state.index));
+                " OK id=" + std::to_string(usedId) +
+                " #" + std::to_string(state.index));
             AdvanceRamoniaCaveNode(cfg,state);
         } else {
             const auto error=
@@ -2375,6 +2416,19 @@ static int CatalogFirst(const char* key, int fallback=0) {
     EnsureWalkerIdCatalog(); if (!g_walkerIds.data.contains(key)) return fallback;
     for (auto& v: g_walkerIds.data[key]) if (v.is_number_integer()) return v.get<int>();
     return fallback;
+}
+static std::vector<int> CatalogIds(const char* key) {
+    EnsureWalkerIdCatalog();
+    std::vector<int> out;
+    if (!g_walkerIds.data.contains(key) || !g_walkerIds.data[key].is_array())
+        return out;
+    for (auto& v : g_walkerIds.data[key]) {
+        if (!v.is_number_integer()) continue;
+        const int id=v.get<int>();
+        if (id>0 && std::find(out.begin(),out.end(),id)==out.end())
+            out.push_back(id);
+    }
+    return out;
 }
 static void SaveItemClass(const char* key,int id) {
     if(id<=0) return; EnsureWalkerIdCatalog();
