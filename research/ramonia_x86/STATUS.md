@@ -976,3 +976,12 @@ Validation order:
 3. confirm HELLO bridgeVersion=31 and walkReady=true;
 4. perform several alternating direct walkto calls manually;
 5. only if repeated direct calls remain stable, enable a Walk-only Cavebot loop.
+
+
+### Live validation - Bridge V31 repeated walkto
+
+Confirmed live after the V39 formal ABI correction:
+- repeated direct `CromePipeTest_x64.exe walkto ...` calls remained stable for about 5 minutes;
+- no Ramonia crash observed during repeated alternating walks;
+- Bridge V31 / one-argument Game::autoWalk(Directions&) is therefore promoted to repeated live-action validated for this exact build;
+- next validation stage is the external Cavebot state machine using Walk-only waypoints in loop.
