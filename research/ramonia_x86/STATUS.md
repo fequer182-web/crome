@@ -1095,3 +1095,15 @@ Confirmed live on Ramonia after the top-item tile-use and transition-wait change
 - after the use succeeds, Cavebot waits for GET_PLAYER Z to actually change before advancing the waypoint.
 
 This validates the current Ramonia behavior for direct structural Use / Ladder / Hole style transitions without hard-coding one build-specific structure ID.
+
+
+### Spear pickup tile matching policy
+
+Pick Up Spear must not use top-item semantics.
+
+Policy:
+- spear item ID: 2389;
+- scan every Item in the tile's Tile::things stack;
+- select the exact Item whose ID is 2389 regardless of stackIndex;
+- corpses, blood, gold or other objects on the same tile do not block spear detection;
+- itemId=0/top-item semantics remain for structural Use/Ladder/Hole, not spear pickup.
