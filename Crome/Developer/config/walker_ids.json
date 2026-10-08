@@ -21,7 +21,11 @@
   "clearBeforeUse": [],
   "counter": [],
   "depot": [],
-  "food": [],
+  "food": [
+    3578,
+    2667,
+    2690
+  ],
   "rock": [],
   "corpseBag": [],
   "fishingRod": [
@@ -41,7 +45,8 @@
     "3003": "Crome SDK v21.6 / tile_action_test rope_item_id",
     "3457": "Crome SDK v21.6 / tile_action_test shovel_item_id",
     "3483": "Crome SDK v21.6 / fishing rod test",
-    "4597-4602": "IDs de agua usados no fishing.json de teste do Crome; edite no catalogo se o OT usar outros IDs"
+    "4597-4602": "IDs de agua usados no fishing.json de teste do Crome; edite no catalogo se o OT usar outros IDs",
+    "3578,2667,2690": "Food IDs configurados pelo usuario no catalogo global do Crome"
   },
   "notes": "Categorias do Rifbot recuperadas: Pathable, Rope, Shovel, Pick, Mine Pick, Machete, Counter, Depot, Ladder, Food, Rock, Open Holes, Non Pathable, Corpse Bag. Numeros nao encontrados nas fontes ficam vazios para nao inventar IDs."
 }
