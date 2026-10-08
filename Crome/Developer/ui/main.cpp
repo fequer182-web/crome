@@ -132,6 +132,9 @@ struct RamoniaCaveNodeUi {
 struct RamoniaCaveConfigUi {
     bool enabled{};
     bool loop{true};
+    std::uint32_t stuckMs{3500};
+    std::uint32_t retryDelayMs{650};
+    int maxRetries{2};
     std::vector<RamoniaCaveNodeUi> nodes;
 };
 
@@ -1031,7 +1034,12 @@ struct RamoniaCaveWorkerState {
     std::uint64_t nextActionMs{};
     std::uint64_t lastProgressMs{};
     RamoniaPositionUi lastPosition{};
+    bool walkIssued{};
+    std::uint32_t issuedWalkX{};
+    std::uint32_t issuedWalkY{};
+    std::uint32_t issuedWalkZ{};
     int retries{};
+    bool halted{};
 };
 
 static void ResetRamoniaCaveWorkerState(RamoniaCaveWorkerState& state) {
@@ -1050,7 +1058,12 @@ static void AdvanceRamoniaCaveNode(
     state.nextActionMs=0;
     state.lastProgressMs=0;
     state.lastPosition={};
+    state.walkIssued=false;
+    state.issuedWalkX=0;
+    state.issuedWalkY=0;
+    state.issuedWalkZ=0;
     state.retries=0;
+    state.halted=false;
 }
 
 static void RunRamoniaCaveCycle(
@@ -1083,6 +1096,13 @@ static void RunRamoniaCaveCycle(
 
     if (pausedForCombat) {
         SetRamoniaCaveStatus("Cavebot: pausado por Target/Loot");
+        return;
+    }
+
+    if (state.halted) {
+        SetRamoniaCaveStatus(
+            "Cavebot: parado por excesso de retries #" +
+            std::to_string(state.index));
         return;
     }
 
@@ -1186,16 +1206,34 @@ static void RunRamoniaCaveCycle(
 
         state.lastPosition=pos;
         state.lastProgressMs=nowMs;
+        // Any real movement proves the current auto-walk is still alive.
+        // Keep it in-flight and do NOT send another native Game::autoWalk.
         state.retries=0;
-    } else if (state.lastProgressMs &&
-               nowMs-state.lastProgressMs>=3500) {
+    } else if (state.walkIssued &&
+               state.lastProgressMs &&
+               nowMs-state.lastProgressMs>=
+                   std::max<std::uint32_t>(500u,cfg.stuckMs)) {
 
         ++state.retries;
+        state.walkIssued=false;
+        state.issuedWalkX=0;
+        state.issuedWalkY=0;
+        state.issuedWalkZ=0;
         state.lastProgressMs=nowMs;
-        state.nextActionMs=0;
+        state.nextActionMs=
+            nowMs+std::max<std::uint32_t>(250u,cfg.retryDelayMs);
+
+        if (state.retries>std::max(0,cfg.maxRetries)) {
+            state.halted=true;
+            SetRamoniaCaveStatus(
+                "Cavebot: STOP retry limit waypoint #" +
+                std::to_string(state.index));
+            return;
+        }
 
         SetRamoniaCaveStatus(
             "Cavebot: retry " + std::to_string(state.retries) +
+            "/" + std::to_string(std::max(0,cfg.maxRetries)) +
             " waypoint #" + std::to_string(state.index));
     }
 
@@ -1205,6 +1243,11 @@ static void RunRamoniaCaveCycle(
     // Use/Rope/Shovel/Ladder/Hole are tile actions. Get adjacent first,
     // never auto-walk onto the target tile just to perform the action.
     if (!isWalkNode && distance>1u) {
+        // One auto-walk at a time. While the previously accepted native walk
+        // is making progress, only poll GET_PLAYER.
+        if (state.walkIssued)
+            return;
+
         std::uint32_t approachX=node.x;
         std::uint32_t approachY=node.y;
 
@@ -1228,7 +1271,11 @@ static void RunRamoniaCaveCycle(
         if (approached) {
             SetRamoniaCaveStatus(
                 "Cavebot: aproximando #" + std::to_string(state.index));
-            state.nextActionMs=nowMs+650;
+            state.walkIssued=true;
+            state.issuedWalkX=approachX;
+            state.issuedWalkY=approachY;
+            state.issuedWalkZ=node.z;
+            state.nextActionMs=0;
             if (!state.lastProgressMs)
                 state.lastProgressMs=nowMs;
         } else {
@@ -1241,9 +1288,20 @@ static void RunRamoniaCaveCycle(
                             std::string("approach_failed")))
                     : std::string("pipe_failed");
             SetRamoniaCaveStatus("Cavebot: aproximacao " + error);
-            state.nextActionMs=nowMs+650;
+            state.walkIssued=false;
+            state.nextActionMs=
+                nowMs+std::max<std::uint32_t>(250u,cfg.retryDelayMs);
         }
         return;
+    }
+
+    // Once adjacent, the approach auto-walk is finished from the Cavebot
+    // point of view and the tile action may run.
+    if (!isWalkNode && distance<=1u) {
+        state.walkIssued=false;
+        state.issuedWalkX=0;
+        state.issuedWalkY=0;
+        state.issuedWalkZ=0;
     }
 
     if (isDirectUseNode) {
@@ -1320,6 +1378,11 @@ static void RunRamoniaCaveCycle(
         return;
     }
 
+    // Walk/Stand: never re-enter Game::autoWalk while the accepted request is
+    // still progressing toward this waypoint.
+    if (state.walkIssued)
+        return;
+
     nlohmann::json walkResponse;
     const bool walked=
         RamoniaPipeRequest(
@@ -1337,7 +1400,11 @@ static void RunRamoniaCaveCycle(
             " -> " + std::to_string(node.x) + "," +
             std::to_string(node.y) + "," +
             std::to_string(node.z));
-        state.nextActionMs=nowMs+750;
+        state.walkIssued=true;
+        state.issuedWalkX=node.x;
+        state.issuedWalkY=node.y;
+        state.issuedWalkZ=node.z;
+        state.nextActionMs=0;
         if (!state.lastProgressMs)
             state.lastProgressMs=nowMs;
     } else {
@@ -1351,7 +1418,9 @@ static void RunRamoniaCaveCycle(
                 : std::string("pipe_failed");
 
         SetRamoniaCaveStatus("Cavebot: " + error);
-        state.nextActionMs=nowMs+650;
+        state.walkIssued=false;
+        state.nextActionMs=
+            nowMs+std::max<std::uint32_t>(250u,cfg.retryDelayMs);
     }
 }
 
@@ -3298,11 +3367,11 @@ static void DrawCavebot(const Theme& t) {
     };
 
     RamoniaCaveConfigUi ramCave;
-    ramCave.enabled =
-        g_ramoniaBridgeReady.load() &&
-        g_ramoniaBridgeVersion.load()>=27 &&
-        enabled;
+    ramCave.enabled=caveRuntimeReady&&enabled;
     ramCave.loop=true;
+    ramCave.stuckMs=3500;
+    ramCave.retryDelayMs=650;
+    ramCave.maxRetries=2;
 
     for(const auto& line:wps){
         int x=0,y=0,z=0,item=0,ms=0;
