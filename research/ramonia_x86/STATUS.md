@@ -1267,3 +1267,31 @@ Live Ramonia tile evidence:
 V37 changes the experimental uncover candidate for an exact target to the nearest Item before the target in Tile::things. For the validated example, spear 2389 selects blocker 20159.
 
 This is still one-layer experimental behavior. Ground -> ground Game::move must be live-confirmed before automatic uncover is enabled for Pick Up Spear or Cavebot.
+
+
+### V38 read-only getTopMoveThing ABI diagnostic
+
+Additional live stack evidence superseded the V37 nearest-before-target heuristic:
+- base/static-looking prefix remained 103,16845;
+- with one user-visible blocker: 20159 appeared before spear 2389;
+- after placing another item visually on top, stack became:
+  103[0], 16845[1], 2384[2], 20159[3], 2389[4];
+- therefore choosing the nearest Item immediately before the target is incorrect for multiple blockers;
+- the newest/top visual blocker in this test is 2384, not 20159.
+
+The canonical profile already contains semantic bind:
+- Tile::getTopMoveThing RVA 0x197AD0.
+
+V38 adds GET_TOP_MOVE_ABI, which is strictly read-only:
+- reads the method bytes;
+- reports RET cleanup candidates;
+- scans .text for rel32 CALL sites to the method and returns small caller windows;
+- does NOT execute getTopMoveThing.
+
+Safety gate:
+- MOVE_NEARBY_ITEM_TO_HAND is temporarily blocked with top_move_access_pending_v38;
+- UNCOVER_NEARBY_ITEM / UNCOVER_TILE_TARGET_AT are temporarily blocked with top_move_abi_validation_required_v38;
+- this prevents the V37 heuristic from moving the wrong item while ABI is being resolved.
+
+Pipe diagnostic:
+  CromePipeTest_x64.exe topmoveabi
