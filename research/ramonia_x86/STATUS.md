@@ -1166,3 +1166,14 @@ Safety:
 - destination encoding under test is OTC inventory Position x=0xFFFF, y=slot, z=0.
 
 This destination encoding is not yet live-confirmed on Ramonia. Automatic Pick Up Spear remains disabled until this one-shot move test succeeds.
+
+
+### Bridge V35 live validation - hand slots
+
+Live-confirmed on Ramonia through GET_HANDS:
+- inventory slot 5 = right hand;
+- inventory slot 6 = left hand;
+- observed state during validation: right slot 5 occupied by item ID 2512 count 1;
+- left slot 6 empty.
+
+This confirms the hand-slot mapping used by the guarded Pick Up Spear test. The next one-shot pickup should preserve item 2512 and choose empty slot 6 for spear ID 2389.
