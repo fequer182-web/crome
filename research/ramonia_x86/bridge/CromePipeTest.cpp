@@ -639,6 +639,7 @@ int main(int argc, char** argv) {
     std::uint32_t creatureId = 0;
     std::string wantedName;
     std::string sayMessage="exura";
+    std::uint32_t walkX{},walkY{},walkZ{};
     std::uint32_t lootItemId = 2813;
     std::uint32_t sourceContainerId = 0;
     std::uint32_t targetContainerId = 0;
@@ -690,6 +691,18 @@ int main(int argc, char** argv) {
         if (argc >= 3) sayMessage = argv[2];
         if (argc >= 4) {
             try { pid = static_cast<DWORD>(std::stoul(argv[3])); }
+            catch (...) {}
+        }
+    } else if (mode == "walkto" || mode == "autowalk") {
+        if (argc >= 5) {
+            try {
+                walkX=static_cast<std::uint32_t>(std::stoul(argv[2]));
+                walkY=static_cast<std::uint32_t>(std::stoul(argv[3]));
+                walkZ=static_cast<std::uint32_t>(std::stoul(argv[4]));
+            } catch (...) {}
+        }
+        if (argc >= 6) {
+            try { pid=static_cast<DWORD>(std::stoul(argv[5])); }
             catch (...) {}
         }
     } else if (mode == "usecorpse" || mode == "useloot") {
@@ -813,6 +826,23 @@ int main(int argc, char** argv) {
     if (mode == "lookget") {
         std::cout << "[REAL LOOK ID - RESULT]\n";
         ok &= request(pid, R"({"cmd":"GET_LOOK_ID"})");
+        return ok ? 0 : 2;
+    }
+
+    if (mode == "walkto" || mode == "autowalk") {
+        if (!walkX || !walkY || walkZ>0xFFu) {
+            std::cout << "[ERRO] Uso: CromePipeTest_x64.exe walkto <x> <y> <z> [PID]\n";
+            return 1;
+        }
+        std::cout << "[AUTO_WALK_TO - Game::autoWalk]\n";
+        const std::string cmd=
+            "{\"cmd\":\"AUTO_WALK_TO\",\"x\":"+std::to_string(walkX)+
+            ",\"y\":"+std::to_string(walkY)+
+            ",\"z\":"+std::to_string(walkZ)+"}";
+        ok &= request(pid,cmd);
+        std::cout << "\n" << (ok
+            ? "[OK] Rota enviada ao Game::autoWalk. Confira o movimento.\n"
+            : "[FALHOU] AUTO_WALK_TO nao foi confirmado.\n");
         return ok ? 0 : 2;
     }
 
