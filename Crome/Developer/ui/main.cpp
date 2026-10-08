@@ -2499,8 +2499,10 @@ static void DrawRune(const Theme& t) {
     const bool ramoniaRuneReady=
         g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=26;
 
+    const float runeCardHeight =
+        ramoniaRuneReady ? 90.0f : 104.0f;
     CardBegin("rune","Rune Maker / Trainer",CardIcon::Rune,
-              ImVec4(0.72f,0.35f,1.0f,1),104,t);
+              ImVec4(0.72f,0.35f,1.0f,1),runeCardHeight,t);
 
     if(!runeRuntimeReady) ImGui::BeginDisabled();
     ImGui::Checkbox("Enabled",&en);
@@ -2811,7 +2813,9 @@ static void DrawTools(const Theme& t) {
             if(tj.contains("reammo")){ reAmmo=tj["reammo"].value("enabled",false); if(tj["reammo"].contains("item_ids")&&tj["reammo"]["item_ids"].is_array()&&!tj["reammo"]["item_ids"].empty()) ammo=tj["reammo"]["item_ids"][0].get<int>(); }
         }
     }
-    CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),176,t);
+    const float toolsCardHeight =
+        g_nativeRuntimeLoaded ? (fish ? 200.0f : 166.0f) : 148.0f;
+    CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),toolsCardHeight,t);
     const bool foodRuntimeReady = FoodRuntimeReady();
     const bool lightRuntimeReady = LightRuntimeReady();
     if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
@@ -2974,7 +2978,9 @@ static void DrawLoot(const Theme& t) {
     const bool ramoniaLootReady=
         g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=21;
 
-    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),170,t);
+    const float lootCardHeight =
+        g_nativeRuntimeLoaded ? 138.0f : 122.0f;
+    CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),lootCardHeight,t);
 
     // Top controls: keep Ramonia-visible values inside fixed columns so
     // Destination Bag ID never gets clipped at the right edge.
@@ -3226,7 +3232,7 @@ static void DrawTopBar(const Theme& t) {
     d->AddTriangleFilled(ImVec2(wp.x+25,wp.y+13),ImVec2(wp.x+30,wp.y+12),ImVec2(wp.x+28,wp.y+17),Col(t.blue));
     ImGui::SetCursorPos(ImVec2(35,8));
     ImGui::PushFont(g_fontTitle ? g_fontTitle : g_fontBold); ImGui::TextUnformatted("Crome"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.9 Rune Trainer");
+    ImGui::SameLine(); ImGui::TextColored(t.muted,"v0.9.10 Compact UI");
     ImGui::SetCursorPos(ImVec2(ws.x-225,10)); ImGui::TextUnformatted(g_dark?"Dark Mode":"Light Mode"); ImGui::SameLine(); Toggle("theme",&g_dark,t);
     ImGui::SetCursorPos(ImVec2(ws.x-72,7));
     if(ImGui::Button("—",ImVec2(26,24))) ShowWindow(g_hWnd,SW_MINIMIZE);
