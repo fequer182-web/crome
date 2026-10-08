@@ -42,7 +42,7 @@
     "item_ids": [
       2389
     ],
-    "status": "pending_live_move_to_equipment_validation",
+    "status": "ramonia_ground_to_hand_live_validated",
     "reserve_free_capacity_percent": 20,
     "capacity_baseline": "free_capacity_at_enable",
     "hand_policy": "existing_spear_else_free_hand",
@@ -55,7 +55,10 @@
     "scan_shape": "center_plus_8_neighbors",
     "scan_only_when_enabled": true,
     "tile_index_policy": "coordinate_index_built_on_tile_cache_refresh",
-    "poll_policy": "nearby_tiles_only"
+    "poll_policy": "nearby_tiles_only",
+    "capacity_guard_enabled": false,
+    "capacity_guard_status": "pending_GET_PLAYER_capacity",
+    "ramonia_bridge_min_version": 35
   },
   "reammo": {
     "enabled": false,
