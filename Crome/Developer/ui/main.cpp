@@ -1610,6 +1610,7 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeVersion.store(
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
+            nextSpearAttemptMs = 0;
             nextLightRefreshMs = 0;
             nextHealAttemptMs = 0;
             nextRuneAttemptMs = 0;
