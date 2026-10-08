@@ -3132,9 +3132,141 @@ static void DrawCavebot(const Theme& t) {
     ramCfg.names=targetNames;
     SetRamoniaTargetConfig(ramCfg);
 
-    nlohmann::json rcfg={{"enabled",g_nativeRuntimeLoaded&&enabled},{"loop",true},{"reach_distance",0},{"timeout_ms",15000},{"stuck_ms",3500},{"retry_delay_ms",650},{"max_retries",2},{"action_wait_ms",450},{"tool_ids",{{"rope",CatalogFirst("rope",3003)},{"shovel",CatalogFirst("shovel",3457)},{"fishing_rod",CatalogFirst("fishingRod",3483)}}},{"waypoints",nlohmann::json::array()}};
-    for(const auto&line:wps){int x=0,y=0,z=0,item=0,ms=0;if(std::sscanf(line.c_str(),"Walk %d, %d, %d",&x,&y,&z)==3||std::sscanf(line.c_str(),"Stand %d, %d, %d",&x,&y,&z)==3||std::sscanf(line.c_str(),"FloorChange %d, %d, %d",&x,&y,&z)==3)rcfg["waypoints"].push_back({{"type","walk"},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Wait %d ms",&ms)==1)rcfg["waypoints"].push_back({{"type","wait"},{"ms",ms}});else if(line.rfind("Say ",0)==0)rcfg["waypoints"].push_back({{"type","say"},{"text",line.substr(4)}});else if(std::sscanf(line.c_str(),"Use %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","use"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Rope %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","rope"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Shovel %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","shovel"},{"item_id",item},{"x",x},{"y",y},{"z",z}});else if(std::sscanf(line.c_str(),"Ladder %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","ladder"},{"item_id",item},{"x",x},{"y",y},{"z",z},{"after_ms",500}});else if(std::sscanf(line.c_str(),"Hole %d @ %d, %d, %d",&item,&x,&y,&z)==4)rcfg["waypoints"].push_back({{"type","use_with_ground"},{"item_id",item},{"x",x},{"y",y},{"z",z}});}
-    WriteJsonIfChanged("waypoints.json",rcfg);CardEnd();
+    nlohmann::json rcfg={
+        {"enabled",caveRuntimeReady&&enabled},
+        {"loop",true},
+        {"reach_distance",0},
+        {"timeout_ms",15000},
+        {"stuck_ms",3500},
+        {"retry_delay_ms",650},
+        {"max_retries",2},
+        {"action_wait_ms",450},
+        {"tool_ids",{
+            {"rope",CatalogFirst("rope",3003)},
+            {"shovel",CatalogFirst("shovel",3457)},
+            {"fishing_rod",CatalogFirst("fishingRod",3483)}
+        }},
+        {"waypoints",nlohmann::json::array()}
+    };
+
+    RamoniaCaveConfigUi ramCave;
+    ramCave.enabled =
+        g_ramoniaBridgeReady.load() &&
+        g_ramoniaBridgeVersion.load()>=27 &&
+        enabled;
+    ramCave.loop=true;
+
+    for(const auto& line:wps){
+        int x=0,y=0,z=0,item=0,ms=0;
+        RamoniaCaveNodeUi node;
+        bool haveNode=false;
+
+        if(std::sscanf(line.c_str(),"Walk %d, %d, %d",&x,&y,&z)==3){
+            rcfg["waypoints"].push_back({
+                {"type","walk"},{"x",x},{"y",y},{"z",z}});
+            node.type="walk";
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(line.c_str(),"Stand %d, %d, %d",&x,&y,&z)==3){
+            rcfg["waypoints"].push_back({
+                {"type","stand"},{"x",x},{"y",y},{"z",z}});
+            node.type="stand";
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(line.c_str(),"FloorChange %d, %d, %d",&x,&y,&z)==3){
+            rcfg["waypoints"].push_back({
+                {"type","walk"},{"x",x},{"y",y},{"z",z}});
+            node.type="walk";
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(line.c_str(),"Wait %d ms",&ms)==1){
+            rcfg["waypoints"].push_back({
+                {"type","wait"},{"ms",ms}});
+            node.type="wait";
+            node.waitMs=static_cast<std::uint32_t>(std::max(1,ms));
+            haveNode=true;
+        } else if(line.rfind("Say ",0)==0){
+            const auto text=line.substr(4);
+            rcfg["waypoints"].push_back({
+                {"type","say"},{"text",text}});
+            node.type="say";
+            node.text=text;
+            haveNode=true;
+        } else if(std::sscanf(
+                      line.c_str(),"Use %d @ %d, %d, %d",
+                      &item,&x,&y,&z)==4){
+            rcfg["waypoints"].push_back({
+                {"type","use"},{"item_id",item},
+                {"x",x},{"y",y},{"z",z}});
+            node.type="use";
+            node.itemId=static_cast<std::uint32_t>(std::max(0,item));
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(
+                      line.c_str(),"Rope %d @ %d, %d, %d",
+                      &item,&x,&y,&z)==4){
+            rcfg["waypoints"].push_back({
+                {"type","rope"},{"item_id",item},
+                {"x",x},{"y",y},{"z",z}});
+            node.type="rope";
+            node.itemId=static_cast<std::uint32_t>(std::max(0,item));
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(
+                      line.c_str(),"Shovel %d @ %d, %d, %d",
+                      &item,&x,&y,&z)==4){
+            rcfg["waypoints"].push_back({
+                {"type","shovel"},{"item_id",item},
+                {"x",x},{"y",y},{"z",z}});
+            node.type="shovel";
+            node.itemId=static_cast<std::uint32_t>(std::max(0,item));
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(
+                      line.c_str(),"Ladder %d @ %d, %d, %d",
+                      &item,&x,&y,&z)==4){
+            rcfg["waypoints"].push_back({
+                {"type","ladder"},{"item_id",item},
+                {"x",x},{"y",y},{"z",z},{"after_ms",500}});
+            node.type="ladder";
+            node.itemId=static_cast<std::uint32_t>(std::max(0,item));
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        } else if(std::sscanf(
+                      line.c_str(),"Hole %d @ %d, %d, %d",
+                      &item,&x,&y,&z)==4){
+            rcfg["waypoints"].push_back({
+                {"type","use_with_ground"},{"item_id",item},
+                {"x",x},{"y",y},{"z",z}});
+            node.type="use_with_ground";
+            node.itemId=static_cast<std::uint32_t>(std::max(0,item));
+            node.x=static_cast<std::uint32_t>(std::max(0,x));
+            node.y=static_cast<std::uint32_t>(std::max(0,y));
+            node.z=static_cast<std::uint32_t>(std::max(0,z));
+            haveNode=true;
+        }
+
+        if(haveNode)
+            ramCave.nodes.push_back(std::move(node));
+    }
+
+    SetRamoniaCaveConfig(ramCave);
+    WriteJsonIfChanged("waypoints.json",rcfg);
+    CardEnd();
 }
 
 static void DrawTools(const Theme& t) {
