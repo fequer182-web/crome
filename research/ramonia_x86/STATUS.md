@@ -940,3 +940,39 @@ Fix:
 - Ramonia Cavebot enable state now follows the central CaveRuntimeReady/walkReady gate instead of the older Bridge >=27 check.
 
 This change is in the Crome Developer executable; Bridge V30 / V38 ABI remains unchanged.
+
+
+## Bridge V31 - V39 formal AutoWalk ABI correction
+
+A second live Cavebot crash occurred after the V30 two-argument call was enabled.
+
+Crash report evidence:
+- exception 0xC0000005 (access violation);
+- crash addresses were in the Ramonia executable at low RVAs relative to the captured module base, not at Game::autoWalk RVA 0x76860;
+- this is consistent with post-call stack/control-flow corruption rather than an immediate failure inside the auto-walk path builder.
+
+ABI correction:
+- V32 static function-body evidence had only proven a formal stack argument at [EBP+8] for Game::autoWalk;
+- V38 observed three trailing DWORDs after Directions that matched LocalPlayer xyz, but stack adjacency alone did not prove those DWORDs were callee parameters;
+- V39 therefore reclassifies those xyz values as caller-local/trailing stack evidence and removes Position from the formal action ABI;
+- canonical autoWalk formal ABI is now Game::autoWalk(Directions&) with Game in ECX.
+
+Bridge V31:
+- GameAutoWalkFn is back to one formal Directions argument;
+- the V30 Position-by-value argument is removed;
+- bridge-level 500 ms native autoWalk cooldown added;
+- action result code 39 = autowalk_cooldown;
+- HELLO bridgeVersion = 31;
+- walkReady is based on the corrected V39 one-argument profile contract.
+
+Crome:
+- Ramonia Cavebot requires Bridge V31+ and walkReady=true;
+- old V30 bridge is rejected by the Cavebot gate;
+- the one-request-per-waypoint / stuck-only retry controller remains in place.
+
+Validation order:
+1. rebuild Developer and x86 package;
+2. inject Bridge V31 only after fully restarting Ramonia;
+3. confirm HELLO bridgeVersion=31 and walkReady=true;
+4. perform several alternating direct walkto calls manually;
+5. only if repeated direct calls remain stable, enable a Walk-only Cavebot loop.
