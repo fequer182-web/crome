@@ -1216,6 +1216,7 @@ static void RamoniaTargetWorker() {
     std::uint64_t lootLastTargetMarkMs = 0;
     std::uint64_t lootDiffDeadlineMs = 0;
     std::vector<std::uint32_t> lootKnownCorpseIds{2813};
+    RamoniaCaveWorkerState caveState{};
 
     RamoniaPositionUi lastPosition{};
     std::uint64_t mapTransitionUntilMs = 0;
@@ -1234,12 +1235,14 @@ static void RamoniaTargetWorker() {
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
+            ResetRamoniaCaveWorkerState(caveState);
             lastPosition = {};
             mapTransitionUntilMs = 0;
             SetRamoniaStatus("Ramonia nao esta aberto");
             SetRamoniaFoodStatus("Auto Food: Ramonia fechado");
             SetRamoniaHealingStatus("Healing: Ramonia fechado");
             SetRamoniaRuneStatus("Trainer: Ramonia fechado");
+            SetRamoniaCaveStatus("Cavebot: Ramonia fechado");
             SetRamoniaLootStatus("Loot: Ramonia fechado");
             Sleep(700);
             continue;
@@ -1263,12 +1266,14 @@ static void RamoniaTargetWorker() {
             lootMarkedTargetId = 0;
             lootLastTargetMarkMs = 0;
             lootDiffDeadlineMs = 0;
+            ResetRamoniaCaveWorkerState(caveState);
             lastPosition = {};
             mapTransitionUntilMs = 0;
             SetRamoniaStatus("Ramonia aberto - injete CromeRamoniaBridge_x86.dll");
             SetRamoniaFoodStatus("Auto Food: bridge aguardando");
             SetRamoniaHealingStatus("Healing: bridge aguardando");
             SetRamoniaRuneStatus("Trainer: bridge aguardando");
+            SetRamoniaCaveStatus("Cavebot: bridge aguardando");
             SetRamoniaLootStatus("Loot: bridge aguardando");
             Sleep(500);
             continue;
