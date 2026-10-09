@@ -138,6 +138,7 @@ inline bool phase(Report& r,const guided_discovery::Activity& activity,int phase
                   const std::vector<Site*>& active,std::map<uint32_t,Evidence>& evidence,std::string& references) {
     std::cout << "[OBSERVANDO] " << activity.label << " " << (phaseIndex==0?"CONTROLE PARADO":phaseIndex==1?"ACAO A":"ACAO B")
               << " por " << duration << " segundos. Pode ficar no jogo; nao precisa voltar para ENTER.\n" << std::flush;
+    probe_console::ui()<<"Observando por "<<duration<<" segundos. Fique no jogo durante esta etapa.\n";
     const auto before=reference(r);const auto end=GetTickCount64()+duration*1000ull;
     unsigned rounds=0;ULONGLONG progress=0;
     while(GetTickCount64()<end) {
@@ -155,9 +156,11 @@ inline bool phase(Report& r,const guided_discovery::Activity& activity,int phase
             std::cout << "[PROGRESSO] " << (end-std::min(end,GetTickCount64())+999)/1000 << "s restantes; " << active.size() << " enderecos acompanhados.\n" << std::flush;
             progress=GetTickCount64()+3000;
         }
+        probe_console::ui()<<"\r  Tempo restante: "<<(end-std::min(end,GetTickCount64())+999)/1000<<"s       "<<std::flush;
     }
     std::ostringstream refs;refs << "{\"phase\":" << phaseIndex << ",\"rounds\":" << rounds << ",\"before\":" << before << ",\"after\":" << reference(r) << "}";
-    references=refs.str();std::cout << "[FASE CONCLUIDA] " << activity.label << "\n";return true;
+    references=refs.str();std::cout << "[FASE CONCLUIDA] " << activity.label << "\n";
+    probe_console::ui()<<"\r  Etapa concluida.                  \n";return true;
 }
 inline std::string resultJson(const BindResult& bind,const std::vector<std::string>& previous,
                              const std::map<uint32_t,Evidence>& evidence,const std::string& activity,const std::vector<std::string>& refs) {
@@ -185,7 +188,13 @@ inline std::string resultJson(const BindResult& bind,const std::vector<std::stri
 }
 }
 
+#include "ObservationSummary.hpp"
+
 void RunGuidedDiscoveryValidation(Report& r) {
+    observation_summary::sessionRows.clear();observation_summary::skipped.clear();
+    observation_summary::basics(r);
+    probe_console::ui()<<"\nTestes por atividade: todos os candidatos sao acompanhados juntos.\n"
+        <<"CANDIDATO indica uma pista consistente; nao significa ABI liberada.\n";
     std::cout << "\n[SESSOES POR ATIVIDADE R3]\nCalibracao basica primeiro; todos os candidatos do grupo acompanhados juntos.\n"
               << "Cada atividade: 2s parado, 10s acao A, 10s acao B. Nenhuma chamada interna e executada.\n";
     for(auto it=r.guidedEvidence.begin();it!=r.guidedEvidence.end();) {
@@ -205,8 +214,9 @@ void RunGuidedDiscoveryValidation(Report& r) {
     for(const auto& method:queue){const auto bind=r.binds.find(method);if(bind==r.binds.end()||guided_discovery::candidates(bind->second).empty())missing.push_back(method);}
     if(!missing.empty()) {
         std::cout << "[SEM CANDIDATO] ";for(const auto& method:missing)std::cout << method << " ";std::cout << "\n";
-        if(AskYesNo("Quer fornecer uma entrada encontrada no debugger desta build antes das sessoes?")=='s') {
-            std::cout << "Informe METODO RVA (ex.: getTile 0x1234); linha vazia termina:\n";
+        probe_console::ui()<<missing.size()<<" funcoes ainda sem candidato; registradas como pendentes.\n";
+        if(AskYesNo("Adicionar manualmente uma entrada encontrada no debugger? (opcional)")=='s') {
+            probe_console::ui() << "Informe METODO RVA (ex.: getTile 0x1234); linha vazia termina:\n";
             for(std::string line;std::getline(std::cin,line)&&!line.empty();) {
                 std::istringstream input(line);std::string method,address,extra;input >> method >> address >> extra;
                 uint32_t rva=0;size_t consumed=0;
@@ -229,16 +239,17 @@ void RunGuidedDiscoveryValidation(Report& r) {
         }
         if(addresses.empty())continue;
         std::cout << "\n[ATIVIDADE] " << activity.label << " metodos=" << methods.size() << " candidatos unicos=" << addresses.size() << "\n";
-        if(AskYesNo("Observar este grupo agora?")!='s')continue;
+        probe_console::ui()<<"\nTeste: "<<activity.label<<"\n";
+        if(AskYesNo("Fazer este teste agora?")!='s'){probe_console::ui()<<"  [NAO TESTADO] "<<activity.label<<"\n";observation_summary::skipped.push_back(activity.label);continue;}
         V33Disarm();std::vector<grouped_observation::Site*> active;std::map<uint32_t,grouped_observation::Evidence> evidence;
         for(auto rva:addresses) {
             auto* site=grouped_observation::add(r.module,rva);
             if(site){active.push_back(site);evidence[rva];}else std::cout << "[PENDENTE] " << HexU32(rva) << " breakpoint indisponivel.\n";
         }
-        if(active.empty()){grouped_observation::stop();continue;}
+        if(active.empty()){grouped_observation::stop();probe_console::ui()<<"  [NAO TESTADO] Observacao indisponivel neste grupo.\n";continue;}
         std::vector<std::string> refs;bool success=true;
         for(int phase=0;phase<3;++phase) {
-            std::cout << "\n" << (phase==0?"Fique parado, sem abrir/mover itens.":phase==1?activity.a:activity.b) << "\n";
+            probe_console::ui() << "\n" << (phase==0?"Fique parado, sem abrir/mover itens.":phase==1?activity.a:activity.b) << "\n";
             WaitEnter("ENTER quando estiver pronto; depois acompanhe pelo jogo... ");
             std::string reference;
             success=grouped_observation::phase(r,activity,phase,phase==0?2:10,active,evidence,reference);
@@ -252,6 +263,7 @@ void RunGuidedDiscoveryValidation(Report& r) {
         }
         SaveCheckpoint(r,"grouped_"+activity.key);
         std::cout << "[ATIVIDADE CONCLUIDA] " << activity.label << "; comparacao e capturas salvas.\n";
+        observation_summary::activity(r,activity,methods,evidence,success&&stopped);
         if(!success||!stopped){std::cout << "[STOP] Observacao interrompida; DLL mantida carregada.\n";return;}
     }
     std::cout << "[PENDENCIAS DE BUSCA/ATIVIDADE]\n";

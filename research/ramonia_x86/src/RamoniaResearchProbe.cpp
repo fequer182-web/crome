@@ -19,6 +19,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include "ProbeConsole.hpp"
 #include "RamoniaPipeBaseline.hpp"
 #include "GuidedDiscovery.hpp"
 #include "../../../Crome/Developer/native_runtime/profiles/MiniJson.hpp"
@@ -997,7 +998,7 @@ struct RuntimePositionValidation {
 };
 
 char AskYesNo(const std::string& text) {
-    std::cout << text << " [S/N]: " << std::flush;
+    probe_console::ui() << text << " [S/N]: " << std::flush;
     std::string s;
     std::getline(std::cin, s);
     if (s.empty()) return 'n';
@@ -1005,7 +1006,7 @@ char AskYesNo(const std::string& text) {
 }
 
 void WaitEnter(const std::string& text) {
-    std::cout << text << std::flush;
+    probe_console::ui() << text << std::flush;
     std::string dummy;
     std::getline(std::cin, dummy);
 }
@@ -1816,11 +1817,11 @@ SelectedField ResolveChangedValueTransition(uintptr_t base,
 
 double AskDouble(const std::string& label) {
     for (;;) {
-        std::cout << label << ": " << std::flush;
+        probe_console::ui() << label << ": " << std::flush;
         std::string s;
         std::getline(std::cin, s);
         try { return std::stod(s); }
-        catch (...) { std::cout << "Valor invalido.\n"; }
+        catch (...) { probe_console::ui() << "Valor invalido.\n"; }
     }
 }
 
@@ -2523,7 +2524,7 @@ void PrintLoadedFieldQuickChecks(Report& r) {
 void SaveCheckpoint(Report& r, const std::string& checkpoint);
 
 std::string AskText(const std::string& label) {
-    std::cout << label << ": " << std::flush;
+    probe_console::ui() << label << ": " << std::flush;
     std::string s;
     std::getline(std::cin, s);
     return s;
@@ -4454,7 +4455,7 @@ void RunCreatureLayoutDiscovery(Report& r) {
                         SafeRead(game + r.gameLayout.attackTarget, afterKill);
                         bool sawClear = afterKill==0;
                         if(!sawClear) {
-                            std::cout << "[HP% AUTO] AttackTarget ainda nao zerou. Espere/cancele o target e ENTER... ";
+                            probe_console::ui() << "AttackTarget ainda nao zerou. Espere/cancele o target e ENTER... " << std::flush;
                             std::string dummy; std::getline(std::cin,dummy);
                             afterKill=0; SafeRead(game + r.gameLayout.attackTarget,afterKill);
                             sawClear = afterKill==0;
@@ -4810,8 +4811,8 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab x86 Research Probe V40 - Activity Sessions R3\n"
-        << "[BUILD REVISION] x86-activity-r3-all-candidates-per-session\n"
+        << "        OTCLab x86 Research Probe V40 - Clear Results R4\n"
+        << "[BUILD REVISION] x86-results-r4-simple-console-diagnostic-log\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4831,7 +4832,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Activity Sessions R3");
+    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Clear Results R4");
 }
 
 
@@ -4852,13 +4853,13 @@ struct V19InventoryCandidate {
 
 int AskIntRangeV19(const std::string& label, int lo, int hi) {
     for (;;) {
-        std::cout << label << " [" << lo << "-" << hi << "]: " << std::flush;
+        probe_console::ui() << label << " [" << lo << "-" << hi << "]: " << std::flush;
         std::string x; std::getline(std::cin,x);
         try {
             int v=std::stoi(x);
             if(v>=lo && v<=hi) return v;
         } catch(...) {}
-        std::cout << "Valor invalido.\n";
+        probe_console::ui() << "Valor invalido.\n";
     }
 }
 
@@ -9765,6 +9766,10 @@ bool GuidedExecutableRva(const ModuleView& module,uint32_t rva) {
 
 DWORD WINAPI Worker(LPVOID) {
     OpenConsole();
+    SetConsoleOutputCP(CP_UTF8);
+    probe_console::Session presentation(g_self);
+    probe_console::ui()<<"Crome - Descoberta x86 R4\nBuscando estruturas do cliente...\n"
+        <<"Detalhes tecnicos: ResearchProbeDiagnostic.log ao lado da DLL.\n";
     PrintHeader();
 
     Report r;
@@ -9772,6 +9777,7 @@ DWORD WINAPI Worker(LPVOID) {
         std::cout << "[STOP] Esta DLL e x86: exige executavel PE32/i386 valido.\n"
                   << "Para clientes x64, use o BuildExplorer/ABIBuilder x64.\n";
         WaitEnter("ENTER para descarregar... ");
+        presentation.close();
         if(grouped_observation::veh){FreeConsole();return 0;} // Retain delayed INT3 handler until client shutdown.
     FreeLibraryAndExitThread(g_self, 0);
     }
@@ -10263,7 +10269,13 @@ DWORD WINAPI Worker(LPVOID) {
               << "PROFILE JSON     : " << (saved.empty()?"<save failed>":saved) << "\n"
               << "============================================================\n";
 
-    WaitEnter("ENTER para descarregar a DLL... ");
+    observation_summary::basics(r);
+    observation_summary::finish();
+    probe_console::ui()<<"\nSessao encerrada. Resultados das atividades exibidos acima.\n"
+        <<"Funcoes observadas continuam aguardando validacao da ABI.\n"
+        <<"Profile: "<<saved<<"\nDetalhes: ResearchProbeDiagnostic.log\n";
+    WaitEnter("ENTER para encerrar... ");
+    presentation.close();
     if(grouped_observation::veh){FreeConsole();return 0;} // Retain delayed INT3 handler until client shutdown.
     FreeLibraryAndExitThread(g_self, 0);
     return 0;

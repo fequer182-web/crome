@@ -214,3 +214,23 @@ próprio já restaurado. Reinicie o cliente antes de atualizar/reinjetar a DLL.
 `tests/GroupedObservationTests.cpp` testa 16 candidatos simultâneos, controle/A/B,
 rearmamento concorrente, preservação de this/stack, proteção compartilhada e
 ausência de promoção. A validação no cliente WAD ainda depende do teste real.
+
+## R4: resultados claros no console
+
+A tela principal mostra perguntas, tempo restante e resultados. Enderecos,
+listas de candidatos, scores e snapshots ficam em `ResearchProbeDiagnostic.log`,
+ao lado da DLL (renovado em cada execucao). O JSON continua preservando as evidencias.
+Se o log nao puder ser aberto, os detalhes permanecem visiveis na tela.
+
+Memorias basicas: CONFIRMADO quando houve validacao por mudanca em runtime;
+IDENTIFICADO quando corresponde ao valor informado; PENDENTE quando falta
+identificar/validar. Campos salvos exigem receptor local e leitura atual validos.
+
+Funcoes: CANDIDATO quando uma alternativa foi observada nas duas acoes com
+receptor esperado e mesma thread; INCONCLUSIVO quando ha alternativas, evidencia
+insuficiente ou cobertura parcial; NAO OBSERVADO quando as acoes nao dispararam
+o candidato; NAO TESTADO quando nao foi possivel observar. CANDIDATO nao conclui
+ABI: retorno, argumentos, ownership/refcount e chamadas ativas continuam pendentes.
+Nenhum desses resultados habilita `callable`. O final resume atividades e testes
+pulados. Os testes de ConsoleSummaryTests cobrem classificacao, cobertura parcial,
+receptor/thread, leitura atual e separacao entre tela e log.
