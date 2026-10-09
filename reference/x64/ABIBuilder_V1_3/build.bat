@@ -32,6 +32,6 @@ echo - Coloque/substitua em profiles\ o JSON MAIS NOVO da build.
 echo - A DLL atualiza o MESMO JSON e cria .pre_abi.bak.json.
 echo - IDs nao precisam ser digitados nos testes Look/Move/Use/UseWith.
 echo - V1.3 preserva temporarios e grava automaticamente CALL site/caller natural no JSON.
-echo - callable permanece FALSE; esta versao continua 100%% passiva.
+echo - Conclusao: retorno/refcount, vetor autoWalk, getters e chamadas ativas guiadas.
+echo - callable depende do adaptador runtime; evidencias completas ficam em abiCompletion.
 pause
-

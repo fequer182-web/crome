@@ -1,8 +1,8 @@
 # OTCLab ABI Builder V1.3 X64 — AutoCalibrator / Caller Evidence
 
-O padrão do pipe exige o JSON recém-gerado pelo BuildExplorer atualizado, com `pipeDiscovery` e fingerprint exata. Profiles legados sem esse catálogo não autorizam captura. Todas as funções continuam passivas (`callable=false`). Veja [fluxo e pendências](../PIPE_DISCOVERY.md).
+O padrão do pipe exige o JSON recém-gerado pelo BuildExplorer atualizado, com `pipeDiscovery` e fingerprint exata. Profiles legados sem esse catálogo não autorizam captura. Os testes não habilitam funções no runtime (`callable=false`). Veja [fluxo e pendências](../PIPE_DISCOVERY.md).
 
-A V1.3 continua **100% passiva**: não chama funções internas. O jogador só produz ações reais no cliente e o Builder coleta e combina as evidências automaticamente.
+A etapa inicial observa ações naturais. A revisão Completion V1 acrescenta testes de retorno, ownership e chamadas ativas guiadas, oferecidos separadamente. O jogador fornece os estímulos pedidos; não são usados ponteiros históricos em chamadas.
 
 ## O que a V1.3 adiciona
 
@@ -67,8 +67,60 @@ Cada snapshot inclui os bytes medidos em `bytesHex`. `frozenCandidateReplay` com
 
 `validationProgress` separa evidências medidas de contrato completo, retorno, ownership, dispatch e teste ativo ainda pendentes. Ao retomar a mesma fingerprint e mesmo RVA redescoberto, o console revisa os candidatos salvos. `lastEvidenceSession` agora conserva as últimas observações de cada função pulada, mesmo inconclusivas, enquanto `functions` preserva a melhor evidência. Mudança de fingerprint/RVA invalida a observação correspondente. Os testes `CandidateEvidenceTests.cpp` verificam esses casos.
 
-Esta revisão de dados históricos não executa chamadas ativas e não substitui os validadores de retorno/refcount ou a etapa de chamada ativa, que ainda precisam ser implementados antes da liberação para o Crome.
+A revisão de dados históricos continua passiva. Depois dela, a etapa Completion V1 executa os validadores descritos abaixo.
 
 ## Próximo estágio
 
 Depois de CALL site/caller estáveis, o estágio seguinte pode aprender **como o caller constrói cada argumento antes do CALL**, ainda passivamente, e persistir essas fontes no JSON para automatizar migrações entre builds.
+
+## Completion V1: testes que faltavam
+
+Depois do resumo inicial, confirme `Executar os testes de conclusao pendentes agora?`.
+O Builder lista todos os candidatos da fingerprint atual, incluindo alternativas
+ambíguas, e pergunta quais testar. Os cinco primeiros grupos são oferecidos por
+padrão; os demais são opcionais. Falta de hit/caller/estrutura permanece explícita.
+
+- **TopMove/TopUse:** pareia entrada e retorno no mesmo thread e frame; reconhece
+  armazenamento de retorno na pilha do caller, confere o objeto no mesmo
+  `Tile::things`, identifica candidatos a refcount e repete a ação com watchpoints
+  de escrita. Exige incremento `+1` e liberação pelo caller até o valor inicial,
+  em dois objetos diferentes, com offset único. Depois oferece chamada ativa
+  usando o Tile e armazenamento da invocação atual; o caller original libera
+  esse resultado. Baixamento diferente de `RCX=Tile/RDX=storage` permanece pendente.
+- **Game::autoWalk:** dois cliques em linhas retas livres, com quantidade de SQMs
+  informada; verifica vetor de direções de 1 ou 4 bytes, posição inicial e Game,
+  retorno consumido como bool e consistência do thread. Depois oferece um clique
+  ativo e pede confirmação do movimento. Outros layouts/consumidores de retorno
+  ficam pendentes, em vez de receber um tipo presumido.
+- **Item::getId/getCount:** verifica candidatos cujo corpo seja exatamente uma
+  leitura escalar de campo seguida de RET. Confere offset/largura com o profile
+  e chama esse getter em dois Items atuais com valores diferentes, no thread do
+  Look natural. Corpos complexos não são chamados por esse teste.
+- **Ações Game:** oferece relay dos argumentos atuais quando houver evidência
+  de entrada/caller e descarte do retorno. Registra efeito e thread, mas marca
+  `replayOnly=true`: isso não valida construção independente de holders, strings,
+  modo/canal ou ownership. Nunca libera uma função por esse relay.
+- **Demais getters:** registra entrada/retorno pareados em dois estímulos e
+  conserva as pendências de receptor tipado, representação e ownership. Ainda
+  não há validadores completos para todos os getters de Map/Container/Position.
+
+Os resultados incrementais ficam em `abiCompletion` no mesmo JSON, separados
+do catálogo passivo. `contractComplete` exige todas as etapas do validador;
+`selectedRva` só aparece após testar o conjunto inteiro e obter um único contrato
+completo. Uma mudança de fingerprint ou conjunto de candidatos invalida a
+reutilização. `callable=false` e `runtimeAdapterReady=false` permanecem até existir
+um adaptador independente no runtime do Crome; concluir o teste guiado não instala
+esse adaptador. O Crome e o Cavebot não são alterados nesta revisão.
+
+Capturas são limitadas a 30 mil instruções/150 ms no thread interceptado. Um
+timeout ou ausência de release não prova ownership. INT3 e registradores de debug
+são restaurados; a DLL mantém um handler sem hooks armados até fechar o cliente
+para reconhecer uma entrega atrasada de INT3 já restaurado. Portanto encerre e
+reabra o cliente antes de substituir/reinjetar esta revisão. ENTER encerra a sessão
+e fecha o console, mas não força descarregamento desse handler.
+
+`tests/CompletionTraceTests.cpp` executa uma função real de laboratório x64,
+medindo entrada/retorno, escrita de incremento, liberação pelo caller e chamada
+ativa sem duplicação. Também verifica cancelamento sem hit, INT3 atrasado,
+breakpoints alheios, leitura escalar e rejeição de vetor/refcount inválidos.
+Esses testes não substituem a validação no Olders da fingerprint correspondente.

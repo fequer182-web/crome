@@ -1184,9 +1184,11 @@ static void ProfileCrossCheck(const Profile& p){
     struct E{const char* n;uintptr_t r;const std::string* s;};std::vector<E> v={{"attack",p.fnGameAttack,&p.sigGameAttack},{"follow",p.fnGameFollow,&p.sigGameFollow},{"look",p.fnGameLook,&p.sigGameLook},{"move",p.fnGameMove,&p.sigGameMove},{"use",p.fnGameUse,&p.sigGameUse},{"useWith",p.fnGameUseWith,&p.sigGameUseWith},{"autoWalk",p.fnGameAutoWalk,&p.sigGameAutoWalk},{"lpAutoWalk",p.fnLocalPlayerAutoWalk,&p.sigLocalPlayerAutoWalk}};int checked=0,ok=0;std::cout<<"[PROFILE CROSS-CHECK] function prologue prefixes:\n";for(auto&e:v){if(!e.r||e.s->empty())continue;++checked;bool m=MatchSignaturePrefix(e.r,*e.s);if(m)++ok;std::cout<<"  "<<e.n<<" @ "<<Hex(e.r)<<" : "<<(m?"MATCH":"DIFF")<<"\n";}std::cout<<"[PROFILE CROSS-CHECK] matched "<<ok<<"/"<<checked<<" known function prefixes.\n";
 }
 
+#include "CompletionSession.hpp"
+
 static void RunAbiSession(){
-    LogStage("session_start; no_breakpoint_installed");
-    std::cout<<"============================================================\n       OTCLab ABI Builder V1.3 X64 - AUTOCALIBRATOR / CALLER EVIDENCE\n============================================================\nRecebe o BuildProfile pronto e reutiliza Game/Target/Item/Look/Position/RVAs como evidencias.\nO usuario gera somente a acao real no jogo; IDs e ponteiros sao lidos automaticamente quando possivel.\nNao chama funcoes internas nesta versao. INT3+VEH sao temporarios e reversiveis.\nEvidencia fraca nunca sobrescreve uma evidencia anterior mais forte.\nO jogador apenas executa a acao real; CALL site/caller sao descobertos automaticamente e gravados no JSON.\nV1.3 preserva snapshots e resolve automaticamente return RVA, CALL site e funcao caller natural via .pdata.\n============================================================\n";
+    LogStage("session_start; completion_tests_v1; no_breakpoint_installed");
+    std::cout<<"============================================================\n       OTCLab ABI Builder V1.3 X64 - AUTOCALIBRATOR / CALLER EVIDENCE\n============================================================\nRecebe o BuildProfile pronto e reutiliza Game/Target/Item/Look/Position/RVAs como evidencias.\nO usuario gera somente a acao real no jogo; IDs e ponteiros sao lidos automaticamente quando possivel.\nEtapa inicial passiva; conclusao oferece chamadas ativas guiadas no thread natural. INT3+VEH sao temporarios e reversiveis.\nEvidencia fraca nunca sobrescreve uma evidencia anterior mais forte.\nO jogador apenas executa a acao real; CALL site/caller sao descobertos automaticamente e gravados no JSON.\nV1.3 preserva snapshots e resolve automaticamente return RVA, CALL site e funcao caller natural via .pdata.\n============================================================\n";
     LogStage("fingerprint_begin");
     Fingerprint fp{};if(!GetFingerprint(fp)){std::cout<<"[STOP] Falha no fingerprint.\n";Wait("ENTER...");return;}
     std::cout<<"Timestamp : "<<Hex(fp.timestamp)<<"\nSizeImage : "<<Hex(fp.sizeOfImage)<<"\nTextHash  : "<<Hex(fp.textHash)<<"\n";
@@ -1228,8 +1230,9 @@ static void RunAbiSession(){
         }else std::cout<<"    caller site -> unresolved\n";
     }
     if(SaveProfile(p,fp,results))std::cout<<"\n[SAVE][OK] ABI catalog gravado no MESMO JSON:\n"<<DisplayPath(p.path)<<"\nBackup preservado: "<<DisplayPath(p.path)<<".pre_abi.bak.json\n";else std::cout<<"\n[SAVE][FAIL] Nao consegui atualizar JSON.\n";
-    std::cout<<"\nIMPORTANTE: V1.3 resolve automaticamente CALL site e funcao caller natural a partir do return address de cada acao real. callerCandidateReady exige ABI + thread + mesmo CALL site observado nos dois estimulos. callable continua FALSE; nenhuma chamada interna ativa e executada nesta versao.\n";
-    Wait("ENTER para descarregar ABI Builder...\n");
+    RunCompletionTests(p,fp,results);
+    std::cout<<"\n[ABI COMPLETION] Retorno/refcount, vetor e chamadas ativas sao etapas separadas. Resultados ficam em abiCompletion; testes incompletos e replay de holders existentes nao habilitam construcao independente de argumentos.\n";
+    Wait("ENTER para encerrar a sessao ABI Builder...\n");
 }
 
 static DWORD WINAPI MainThread(LPVOID){
@@ -1253,15 +1256,16 @@ static DWORD WINAPI MainThread(LPVOID){
     }catch(const std::exception& e){LogStage("session_exception");LogStage(e.what());}
     catch(...){LogStage("session_unknown_cpp_exception");}
     // Do not unload code while a capture is still armed.
-    if(InterlockedCompareExchange(&g_bp.installed,0,0)){
+    if(InterlockedCompareExchange(&g_bp.installed,0,0) || completion_probe::state.installed){
         LogStage("capture_still_installed; DLL_retained_to_avoid_unsafe_unload");
         return 0;
     }
     if(input!=INVALID_HANDLE_VALUE)CloseHandle(input);
     if(output!=INVALID_HANDLE_VALUE)CloseHandle(output);
     if(ownsConsole)FreeConsole();
-    LogStage("session_finished; unloading");
+    LogStage("session_finished; completion_handler_retained_if_used");
     if(g_startupLog!=INVALID_HANDLE_VALUE){CloseHandle(g_startupLog);g_startupLog=INVALID_HANDLE_VALUE;}
+    if(completion_probe::retainedHandler)return 0; // Delayed INT3 handler lives until client shutdown.
     FreeLibraryAndExitThread(g_self,0);
     return 0;
 }
