@@ -26,6 +26,7 @@
 #include "core/runtime/ClientSession.hpp"
 #include "core/readers/ProfileBackedPlayerReader.hpp"
 #include "core/profile/Capabilities.hpp"
+#include "modules/support/RamoniaSpearPickup.hpp"
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -194,6 +195,7 @@ struct RamoniaPositionUi {
 static std::atomic<bool> g_ramoniaWorkerRun{true};
 static std::atomic<bool> g_ramoniaBridgeReady{false};
 static std::atomic<bool> g_ramoniaWalkReady{false};
+static std::atomic<bool> g_ramoniaSpearReady{false};
 static std::atomic<int> g_ramoniaBridgeVersion{0};
 static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
@@ -1572,6 +1574,7 @@ static void RamoniaTargetWorker() {
         if (!pid) {
             g_ramoniaBridgeReady.store(false);
             g_ramoniaWalkReady.store(false);
+            g_ramoniaSpearReady.store(false);
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
             nextSpearAttemptMs = 0;
@@ -1607,6 +1610,7 @@ static void RamoniaTargetWorker() {
             hello.value("bridgeVersion",0) < 6) {
             g_ramoniaBridgeReady.store(false);
             g_ramoniaWalkReady.store(false);
+            g_ramoniaSpearReady.store(false);
             g_ramoniaBridgeVersion.store(
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
@@ -1637,6 +1641,7 @@ static void RamoniaTargetWorker() {
         const int bridgeVersion = hello.value("bridgeVersion",0);
         g_ramoniaBridgeReady.store(true);
         g_ramoniaBridgeVersion.store(bridgeVersion);
+        g_ramoniaSpearReady.store(hello.value("spearPickupReady",false));
         g_ramoniaWalkReady.store(
             bridgeVersion>=33 && hello.value("walkReady",false));
 
@@ -2025,14 +2030,14 @@ static void RamoniaTargetWorker() {
         const bool caveActive =
             caveCfg.enabled && caveWalkReady;
         const bool spearActive =
-            spearCfg.enabled && bridgeVersion>=35 && !spearCfg.itemIds.empty();
+            spearCfg.enabled && g_ramoniaSpearReady.load() && !spearCfg.itemIds.empty();
 
         if (!spearCfg.enabled) {
             nextSpearAttemptMs=0;
             SetRamoniaSpearStatus("Pick Up Spear: desligado");
-        } else if (bridgeVersion<35) {
+        } else if (!g_ramoniaSpearReady.load()) {
             nextSpearAttemptMs=0;
-            SetRamoniaSpearStatus("Pick Up Spear: requer Bridge V35+");
+            SetRamoniaSpearStatus("Pick Up Spear: aguardando bridge atualizada");
         } else if (spearCfg.itemIds.empty()) {
             nextSpearAttemptMs=0;
             SetRamoniaSpearStatus("Pick Up Spear: informe um Item ID");
@@ -2092,74 +2097,44 @@ static void RamoniaTargetWorker() {
                 mapTransitionUntilMs = 0;
         }
 
-        // Pick Up Spear is intentionally local and dormant when OFF.
-        // Bridge V35 scans only the player 3x3 window and moves one exact-ID
-        // item at a time to the existing-spear hand or an empty hand.
+        // One pickup/uncover action per cycle, followed by a delay so the
+        // server can update the tile before the next game-thread revalidation.
         if (spearActive &&
             (!nextSpearAttemptMs || nowMs>=nextSpearAttemptMs)) {
-
-            bool moved=false;
-            bool transportFailed=false;
-            std::string lastError="item_not_found_in_3x3";
-            std::uint32_t movedItemId=0;
-            std::uint32_t destinationSlot=0;
-
-            for(const auto itemId:spearCfg.itemIds) {
-                if(!itemId || itemId>0xFFFFu) continue;
-
-                nlohmann::json moveJson;
-                const bool transportOk=
-                    RamoniaPipeRequest(
-                        pid,
-                        {{"cmd","MOVE_NEARBY_ITEM_TO_HAND"},
-                         {"itemId",itemId}},
-                        moveJson);
-
-                if(!transportOk) {
-                    transportFailed=true;
-                    break;
-                }
-
-                if(moveJson.value("ok",false)) {
-                    moved=true;
-                    movedItemId=itemId;
-                    destinationSlot=moveJson.value("destinationSlot",0u);
-                    break;
-                }
-
-                lastError=moveJson.value("error",std::string("pickup_failed"));
-                if(lastError=="item_not_found_in_3x3")
-                    continue;
-
-                // Any real action/equipment error stops this cycle. Do not try
-                // other IDs after a hand/state race.
+            crome::RamoniaSpearCycleResult result;
+            std::uint32_t selectedItemId{};
+            for (const auto itemId:spearCfg.itemIds) {
+                if (!itemId || itemId>0xFFFFu) continue;
+                selectedItemId=itemId;
+                result=crome::RunRamoniaSpearPickupCycle(itemId,
+                    [&](const nlohmann::json& command,nlohmann::json& response) {
+                        return RamoniaPipeRequest(pid,command,response);
+                    });
+                if (result.error=="item_not_found_in_3x3") continue;
                 break;
             }
-
-            if(moved) {
+            if (result.moved) {
                 SetRamoniaSpearStatus(
-                    "Pick Up Spear: pegou " +
-                    std::to_string(movedItemId) +
-                    " -> mao slot " +
-                    std::to_string(destinationSlot));
-                nextSpearAttemptMs=
-                    nowMs+std::max<std::uint32_t>(150u,spearCfg.retryMs);
+                    "Pick Up Spear: enviou " + std::to_string(selectedItemId) +
+                    " para a mao " + std::to_string(result.destinationSlot));
+            } else if (result.uncovered) {
+                SetRamoniaSpearStatus(
+                    "Pick Up Spear: retirou bloqueador " +
+                    std::to_string(result.blockerId));
+            } else if (result.transportFailed) {
+                SetRamoniaSpearStatus("Pick Up Spear: pipe indisponivel");
+            } else if (result.error=="item_not_found_in_3x3") {
+                SetRamoniaSpearStatus("Pick Up Spear: procurando ao redor");
+            } else if (result.error=="both_hands_occupied_by_other_items" ||
+                       result.error=="inventory_hand_occupied_by_other_item") {
+                SetRamoniaSpearStatus("Pick Up Spear: maos ocupadas");
+            } else if (result.error.empty()) {
+                SetRamoniaSpearStatus("Pick Up Spear: alvo exposto - aguardando");
             } else {
-                if(transportFailed)
-                    SetRamoniaSpearStatus("Pick Up Spear: pipe indisponivel");
-                else if(lastError=="item_not_found_in_3x3")
-                    SetRamoniaSpearStatus("Pick Up Spear: procurando 3x3");
-                else if(lastError=="both_hands_occupied_by_other_items" ||
-                        lastError=="inventory_hand_occupied_by_other_item")
-                    SetRamoniaSpearStatus("Pick Up Spear: duas maos ocupadas");
-                else if(lastError=="tile_pickup_item_changed")
-                    SetRamoniaSpearStatus("Pick Up Spear: item mudou - tentando novamente");
-                else
-                    SetRamoniaSpearStatus("Pick Up Spear: "+lastError);
-
-                nextSpearAttemptMs=
-                    nowMs+std::max<std::uint32_t>(200u,spearCfg.retryMs);
+                SetRamoniaSpearStatus("Pick Up Spear: "+result.error);
             }
+            nextSpearAttemptMs=static_cast<std::uint64_t>(GetTickCount64())+
+                std::max<std::uint32_t>(500u,spearCfg.retryMs);
         }
 
         if (!targetPolicyActive && !lootActive) {
@@ -3814,13 +3789,14 @@ static void DrawTools(const Theme& t) {
         }
     }
     const float toolsCardHeight =
-        g_nativeRuntimeLoaded ? (fish ? 200.0f : 166.0f) : 148.0f;
+        g_nativeRuntimeLoaded ? (fish ? 200.0f : 166.0f) :
+        (g_ramoniaBridgeReady.load() ? 170.0f : 148.0f);
     CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),toolsCardHeight,t);
     const bool foodRuntimeReady = FoodRuntimeReady();
     const bool lightRuntimeReady = LightRuntimeReady();
     const bool spearRuntimeReady =
         g_nativeRuntimeLoaded ||
-        (g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=35);
+        (g_ramoniaBridgeReady.load() && g_ramoniaSpearReady.load());
     if (ImGui::BeginTable("tools_grid",3,ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("left",0,1.05f); ImGui::TableSetupColumn("right",0,1.05f); ImGui::TableSetupColumn("value",0,1.25f);
         auto row=[&](const char* lid,bool* lv,const char* rid,bool* rv,const char* iid,char* buf,size_t cap){ ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox(lid,lv); ImGui::TableSetColumnIndex(1); ImGui::Checkbox(rid,rv); ImGui::TableSetColumnIndex(2); SmallInput(iid,buf,cap,-1); };
@@ -3891,6 +3867,9 @@ static void DrawTools(const Theme& t) {
         ImGui::TextDisabled("%s",RamoniaLightStatusText().c_str());
     }
 
+    if (g_ramoniaBridgeReady.load())
+        ImGui::TextDisabled("%s",RamoniaSpearStatusText().c_str());
+
     EnsureWalkerIdCatalog();
     nlohmann::json waters=nlohmann::json::array(); for(auto&v:g_walkerIds.data["fishingWater"]) if(v.is_number_integer()) waters.push_back(v);
     nlohmann::json foodIds=nlohmann::json::array();
@@ -3938,7 +3917,7 @@ static void DrawTools(const Theme& t) {
     }
     ramSpear.enabled =
         g_ramoniaBridgeReady.load() &&
-        g_ramoniaBridgeVersion.load()>=35 &&
+        g_ramoniaSpearReady.load() &&
         spear;
     ramSpear.retryMs=250;
     SetRamoniaSpearConfig(ramSpear);
@@ -3966,14 +3945,14 @@ static void DrawTools(const Theme& t) {
           {"scan_radius",1},
           {"scan_shape","center_plus_8_neighbors"},
           {"scan_only_when_enabled",true},
-          {"tile_match_policy","exact_item_id_any_stack_index"},
+          {"tile_match_policy","runtime_getTopMoveThing"},
           {"hand_policy","existing_spear_else_free_hand"},
           {"right_hand_slot",5},
           {"left_hand_slot",6},
           {"reserve_free_capacity_percent",20},
           {"capacity_guard_enabled",false},
           {"capacity_guard_status","pending_GET_PLAYER_capacity"},
-          {"ramonia_bridge_min_version",35},
+          {"ramonia_bridge_min_version",39},
           {"status","ramonia_ground_to_hand_live_validated"}
       }},
       {"reammo",{{"enabled",g_nativeRuntimeLoaded&&reAmmo},{"item_ids",nlohmann::json::array({ammo})},{"min_count",1},{"status","requires_move_equip_backend"}}}

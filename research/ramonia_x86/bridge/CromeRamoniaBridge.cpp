@@ -4292,7 +4292,10 @@ bool executePickupTopMoveOnGameThread() {
                  << (exposed ? "true" : "false")
                  << R"(,"itemId":)" << request.targetId
                  << R"(,"topMoveItemId":)" << topMoveId
-                 << R"(,"error":")" << error << R"("})";
+                 << R"(,"source":{"x":)" << request.x
+                 << R"(,"y":)" << request.y << R"(,"z":)"
+                 << static_cast<unsigned>(request.z)
+                 << R"(},"error":")" << error << R"("})";
         g_pickupTileResult=response.str();
         return false;
     };
@@ -5948,6 +5951,17 @@ std::string handleRequest(const std::string& request) {
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
           << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
+          << ",\"spearPickupReady\":"
+          << ((g_buildMatched && g_profile &&
+               g_profile->getTopMoveThingMethodRva==0x197AD0u &&
+               g_profile->itemContractReady &&
+               g_profile->tileThingsRuntimeConfirmed &&
+               g_profile->inventoryContractReady &&
+               g_profile->moveMethodRva &&
+               g_profile->moveRuntimeConfirmed &&
+               g_profile->moveItemSharedRefConfirmed &&
+               g_profile->movePositionRefConfirmed &&
+               g_profile->moveCountConfirmed) ? "true" : "false")
           << ",\"lookReady\":"
           << ((g_profile && g_profile->lookRuntimeConfirmed &&
                g_profile->lookItemSharedRefConfirmed) ? "true" : "false")
