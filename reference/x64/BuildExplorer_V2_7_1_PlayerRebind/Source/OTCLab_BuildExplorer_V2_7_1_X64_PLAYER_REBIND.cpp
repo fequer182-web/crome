@@ -34932,15 +34932,15 @@ bool EnsureBuildMigratorFunctionStage(
     if (BMIsGoldenOpenGlBuild(
             profile))
     {
-        ok =
-            BMCaptureGoldenFunctionSignatures(
-                profile
-            );
-
-        std::cout
-            << "\n[FUNCTION GOLDEN] "
-            << profile.functionsStatus
-            << "\n";
+        // Known fingerprints must follow the same live semantic search.
+        // Golden RVAs are reference evidence, never the default discovery path.
+        V49ResolveOtcStyleDirectBindings(profile, BMFunctionSpecs());
+        ok = V49CoreActionSetReady(profile);
+        profile.functionsStatus = ok
+            ? "current_build_direct_bind_core_optional_pending"
+            : "current_build_direct_bind_partial";
+        std::cout << "\n[FUNCTION CURRENT BUILD] "
+                  << profile.functionsStatus << "\n";
     }
     else
     {
@@ -36344,6 +36344,11 @@ bool BMSaveCompleteProfile(
         )
         << "\",\n";
 
+    // A resumed profile can skip the function stage. Rebuild live owner
+    // evidence before exporting its pipe catalog, independently of that skip.
+    if(p.gameRva && p.mapRva &&
+       (!g_v49DirectState.gameObjectBaseRva || !g_v49DirectState.mapObjectRva))
+        V49ResolveOtcStyleDirectBindings(p, BMFunctionSpecs());
     j << "  \"pipeDiscovery\": " << V49PipeDiscoveryJson(build) << ",\n";
 
     V39WriteMigratorState(
