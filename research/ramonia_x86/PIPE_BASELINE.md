@@ -1,6 +1,10 @@
-# Padrão atual de busca e ABI do pipe Ramonia
+# Padrão de busca x86 com Ramonia como referência
 
 O catálogo em `src/RamoniaPipeBaseline.hpp` é usado pela busca de semantic binds, pelos diagnósticos estáticos de ABI e pela persistência de ações do probe x86. Ele mantém o trabalho atual como padrão, sem importar RVAs de outra build.
+
+`RamoniaResearchProbe_V40.dll` aceita executáveis PE32/i386 independentemente do nome do cliente. Ramonia é a referência semântica, não uma lista de clientes permitidos. Em outra build, a pesquisa usa a fingerprint, RTTI, binds, layouts e capturas próprios; ausência ou ambiguidade mantém a evidência pendente. O profile confirmado do Ramonia só pode ser reutilizado com fingerprint exata e endereço redescoberto compatível.
+
+A DLL é compilada para x86 e não pode ser injetada em um processo x64. Clientes x64 seguem o mesmo princípio usando o BuildExplorer e ABIBuilder de `reference/x64`. Os nomes históricos da DLL, pasta e schema são preservados para compatibilidade, sem restringir a descoberta pelo nome do executável. Remover a restrição de nome não torna a bridge específica do Ramonia compatível com uma build ainda não validada.
 
 ## Cobertura
 

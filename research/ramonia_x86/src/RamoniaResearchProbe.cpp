@@ -4731,7 +4731,7 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V40\n"
+        << "        OTCLab x86 Research Probe V40 - Ramonia Baseline\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4739,6 +4739,8 @@ void PrintHeader() {
         << "[MODE] byte original restaurado no primeiro hit ou cancelamento\n"
         << "[MODE] nenhuma chamada interna do jogo feita pelo probe\n"
         << "[RULE] Nenhum RVA de outra build e usado como oracle\n"
+        << "[RULE] Nome do cliente nao restringe a descoberta; exige PE32/i386\n"
+        << "[RULE] Cada build usa sua fingerprint e valida seus proprios binds/ABI\n"
         << "[RULE] IDs externos/server sao separados do Client Thing ID em memoria\n"
         << "============================================================\n\n";
 }
@@ -4749,7 +4751,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V40 - AUTOWALK DEEP ABI");
+    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Ramonia Baseline");
 }
 
 
@@ -9589,14 +9591,8 @@ DWORD WINAPI Worker(LPVOID) {
 
     Report r;
     if (!BuildModuleView(r.module)) {
-        std::cout << "[STOP] Executavel nao e PE32/i386 valido.\n";
-        WaitEnter("ENTER para descarregar... ");
-        FreeLibraryAndExitThread(g_self, 0);
-    }
-
-    if (Lower(r.module.path).find("ramonia") == std::string::npos) {
-        std::cout << "[STOP] Esta DLL de pesquisa e exclusiva para Ramonia.\n"
-                  << "Executable: " << r.module.path << "\n";
+        std::cout << "[STOP] Esta DLL e x86: exige executavel PE32/i386 valido.\n"
+                  << "Para clientes x64, use o BuildExplorer/ABIBuilder x64.\n";
         WaitEnter("ENTER para descarregar... ");
         FreeLibraryAndExitThread(g_self, 0);
     }
