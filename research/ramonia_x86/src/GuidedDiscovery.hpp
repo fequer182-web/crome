@@ -9,6 +9,24 @@
 #include <vector>
 
 namespace guided_discovery {
+struct Activity {
+    std::string key,label,a,b;
+    std::vector<std::string> methods;
+};
+inline std::vector<Activity> activities() {
+    return {
+        {"status","Status / campos basicos","Observe o status parado; abra as janelas de skills/status pelo cliente.","Se possivel, gaste mana ou altere capacity movendo um item; depois observe o status.",{"getHealthPercent","getSpeed","getBaseSpeed","getMagicLevel","getStates","getSoul","getStamina","getSkull","getShield"}},
+        {"walk","Andar / mapa","Caminhe por cliques em destinos livres diferentes.","Caminhe em OUTRA direcao e vire o personagem.",{"autoWalk","getTile","getPosition","isWalkable","isPathable","getDirection","setDirection"}},
+        {"bags","Bags / containers","Abra e feche uma bag varias vezes.","Abra OUTRA bag e mova itens entre as bags; arraste a janela da bag tambem.",{"getContainers","getContainer","getItems","getItem","getName","getCapacity"}},
+        {"items","Itens / inventario / chao","Mova itens entre inventario, bag e chao; varie quantidades.","Use OUTRO item/tile e outra quantidade; de LOOK nos itens.",{"move","getId","getCount","getInventoryItem","getThings","getThing","getThingCount","getTopMoveThing","getTopLookThing","getGround","getName"}},
+        {"look","Look / criaturas","De LOOK em itens e criaturas diferentes.","De LOOK em OUTROS objetos e criaturas.",{"look","getId","getName","getCreatureById","getCreatureByName","getHealthPercent"}},
+        {"use","Use / ferramentas","Use objetos normalmente pelo cliente.","Use outra ferramenta COM um alvo diferente.",{"use","useWith","getTopUseThing"}},
+        {"targets","Attack / follow","Ataque uma criatura e cancele; repita.","Use FOLLOW em OUTRA criatura e cancele; repita.",{"attack","follow","getTopCreature"}},
+        {"chat","Chat","Fale ABI_TEST_ALPHA no canal Default.","Fale ABI_TEST_BETA no mesmo canal Default.",{"talkChannel","talk"}},
+        {"light","Luz","Altere a opcao de luz pela interface do cliente.","Alterne para OUTRO estado de luz.",{"getAmbientLight","setAmbientLight","getMinimumAmbientLight","setMinimumAmbientLight","setDrawLights","isDrawingLights"}},
+        {"outfit","Outfit","Altere o outfit pela interface normal.","Altere para OUTRO outfit.",{"getOutfit","setOutfit"}}
+    };
+}
 // One pass for all exact token+NUL patterns, including overlapping suffixes.
 // Completed transitions keep the work per input byte independent of token count.
 class TokenIndex {

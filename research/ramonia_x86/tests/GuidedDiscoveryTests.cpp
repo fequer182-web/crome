@@ -101,7 +101,7 @@ int main() {
         bind.selected.methodRva++;
         RunGuidedDiscoveryValidation(r);
         std::cin.rdbuf(previous);
-        check(!r.guidedEvidence.count("move"),"changed address retained old observations");
+        check(GuidedSavedObservations(r.guidedEvidence.at("move")).empty(),"changed address retained old observations");
         check(r.localPlayerPtr==0 && r.actionAbi.empty(),"guide requires LP or promotes legacy ABI");
         // Walk the complete missing-method sequence without a LocalPlayer or
         // breakpoints: offer help and preserve explicit discovery prerequisites.

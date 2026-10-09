@@ -4810,8 +4810,8 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab x86 Research Probe V40 - Guided Discovery R2\n"
-        << "[BUILD REVISION] x86-guided-r2-batched-strings-all-candidates\n"
+        << "        OTCLab x86 Research Probe V40 - Activity Sessions R3\n"
+        << "[BUILD REVISION] x86-activity-r3-all-candidates-per-session\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4831,7 +4831,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Guided Discovery R2");
+    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Activity Sessions R3");
 }
 
 
@@ -9761,129 +9761,7 @@ bool GuidedExecutableRva(const ModuleView& module,uint32_t rva) {
     return false;
 }
 
-void RunGuidedDiscoveryValidation(Report& r) {
-    std::cout << "\n[VALIDACAO GUIADA X86]\n"
-              << "A descoberta terminou. Agora voce ajuda a observar os candidatos pelo jogo.\n"
-              << "LocalPlayer nao e requisito para estas capturas.\n"
-              << "Retorno/refcount e chamada ativa continuam pendentes ate haver prova propria.\n";
-    // Imported observations are historical snapshots, never live pointers or
-    // permission to execute an address. Reuse only an identical fresh bind set.
-    std::vector<std::string> methods(guided_discovery::methods.begin(),guided_discovery::methods.end());
-    for(const auto& entry:r.binds)
-        if(std::find(methods.begin(),methods.end(),entry.first)==methods.end()) methods.push_back(entry.first);
-    const auto priority=[&](const std::string& name) {
-        const auto bind=r.binds.find(name);
-        const size_t count=bind==r.binds.end()?0:guided_discovery::candidates(bind->second).size();
-        return count>1?0:(count==0?1:2);
-    };
-    std::stable_sort(methods.begin(),methods.end(),[&](const auto& a,const auto& b) { return priority(a)<priority(b); });
-    for(auto old=r.guidedEvidence.begin();old!=r.guidedEvidence.end();) {
-        const auto bind=r.binds.find(old->first);
-        if(bind==r.binds.end() || JsonStringValue(old->second,"candidateSignature")!=GuidedCandidateSignature(bind->second))
-            old=r.guidedEvidence.erase(old);
-        else ++old;
-    }
-    SaveCheckpoint(r,"guided_discovery_ready");
-    std::cout << "[FILA DE VALIDACAO] " << methods.size() << " metodos; candidatos ambiguos e ausentes incluidos.\n";
-    if(AskYesNo("Iniciar testes guiados dos candidatos pendentes agora? [S/N]")!='s') return;
-    WaitEnter("Entre no personagem e deixe o mundo carregado. ENTER para comecar... ");
-    for(const auto& method:methods) {
-        auto bind=r.binds.find(method);
-        auto candidates=bind==r.binds.end()?std::vector<uint32_t>{}:guided_discovery::candidates(bind->second);
-        std::cout << "\n[TESTE PENDENTE] " << method << " candidatos=" << candidates.size() << "\n";
-        if(candidates.empty()) {
-            std::cout << "[BUSCA PENDENTE] Nenhum endereco para observar. A acao de referencia e: "
-                      << guided_discovery::instruction(method) << "\n"
-                      << "Sera salvo como discovery_required; nenhuma ABI herdada.\n";
-            if(AskYesNo("Voce encontrou uma entrada de funcao desta build no debugger para observar? [S/N]")=='s') {
-                std::cout << "RVA da ENTRADA da funcao (ex.: 0x1234; nao endereco absoluto): " << std::flush;
-                std::string text;
-                std::getline(std::cin,text);
-                size_t consumed=0;
-                uint32_t rva=0;
-                try {
-                    const auto value=std::stoul(text,&consumed,0);
-                    if(consumed==text.size() && value<=0xFFFFFFFFul) rva=static_cast<uint32_t>(value);
-                } catch(...) {}
-                if(GuidedExecutableRva(r.module,rva)) {
-                    auto& supplied=r.binds[method];
-                    supplied.name=method;
-                    BindCandidate candidate;
-                    candidate.methodRva=rva;
-                    candidate.ownerSection="user_supplied_unvalidated";
-                    supplied.candidates.push_back(candidate);
-                    bind=r.binds.find(method);
-                    candidates=guided_discovery::candidates(supplied);
-                    std::cout << "[CANDIDATO DO USUARIO] Sera observado sem promover o bind/ABI.\n";
-                } else std::cout << "[REJEITADO] RVA invalido ou fora de secao executavel.\n";
-            }
-            if(candidates.empty()) {
-                r.guidedEvidence[method]=GuidedMethodJson("",{},"discovery_required");
-                SaveCheckpoint(r,std::string("guided_missing_")+method);
-                continue;
-            }
-        }
-        const std::string signature=GuidedCandidateSignature(bind->second);
-        const bool prior=r.guidedEvidence.count(method)!=0;
-        if(prior) std::cout << "Ha evidencias salvas desta build; ainda nao equivalem a ABI completa.\n";
-        if(AskYesNo(std::string(prior?"Repetir/complementar":"Testar")+" "+method+" pelo jogo? [S/N]")!='s') {
-            if(!prior) r.guidedEvidence[method]=GuidedMethodJson(signature,{},"not_tested_pending_contract");
-            SaveCheckpoint(r,std::string("guided_skipped_")+method);
-            continue;
-        }
-        std::vector<std::string> observations;
-        // Retain earlier frozen evidence when complementing an exact bind set.
-        if(prior) {
-            const auto json=r.guidedEvidence.at(method);
-            observations=GuidedSavedObservations(json);
-        }
-        bool hit=std::any_of(observations.begin(),observations.end(),[](const std::string& object) {
-            return object.find("\"threadId\"")!=std::string::npos;
-        });
-        for(uint32_t candidate:candidates) {
-            if(!GuidedExecutableRva(r.module,candidate)) {
-                std::cout << "[REJEITADO] " << HexU32(candidate) << " fora de secao executavel.\n";
-                observations.push_back("{\"methodRva\":\""+HexU32(candidate)+"\",\"status\":\"non_executable\"}");
-                continue;
-            }
-            if(AskYesNo("Observar candidato "+HexU32(candidate)+"? [S/N]")!='s') continue;
-            for(int sample=0;sample<2;++sample) {
-                V33Disarm();
-                uint8_t entryByte=0;
-                if(!V33ReadProcessSafe(r.module.base+candidate,&entryByte,1) || entryByte==0xCC ||
-                   !V33InstallOneShot(r.module.base+candidate,candidate)) {
-                    observations.push_back("{\"methodRva\":\""+HexU32(candidate)+"\",\"status\":\"breakpoint_unavailable\"}");
-                    break;
-                }
-                std::cout << "[AMOSTRA " << (sample==0?"A":"B") << "] "
-                          << guided_discovery::instruction(method) << "\n";
-                WaitEnter("Faca a acao no jogo e depois ENTER aqui... ");
-                V33Disarm();
-                const bool observed=InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0;
-                if(observed) {
-                    hit=true;
-                    observations.push_back(GuidedCaptureJson(r,g_v33Capture));
-                    std::cout << "[CAPTURADO] " << method << " " << HexU32(candidate)
-                              << " thread=" << g_v33Capture.threadId
-                              << " thisRTTI=" << V33ClassFromSnap(r,g_v33Capture.ecxSnap) << "\n";
-                } else {
-                    observations.push_back("{\"methodRva\":\""+HexU32(candidate)+"\",\"status\":\"no_hit\"}");
-                    std::cout << "[NAO OBSERVADO] A acao nao atingiu este candidato.\n";
-                }
-                r.guidedEvidence[method]=GuidedMethodJson(signature,observations,"entry_observations_pending_contract");
-                SaveCheckpoint(r,std::string("guided_")+method);
-                if(sample==0 && AskYesNo("Fazer segunda amostra com objeto/valor diferente? [S/N]")!='s') break;
-            }
-        }
-        r.guidedEvidence[method]=GuidedMethodJson(signature,observations,
-            hit?"entry_observations_pending_contract":"inconclusive_pending_contract");
-        SaveCheckpoint(r,std::string("guided_")+method);
-    }
-    V33Disarm();
-    if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[GUIA SALVO] Candidatos, capturas e pendencias salvos por fingerprint.\n"
-              << "Proxima etapa: layouts/objetos. Entrada observada nao libera chamadas no Crome.\n";
-}
+#include "GroupedObservation.hpp"
 
 DWORD WINAPI Worker(LPVOID) {
     OpenConsole();
@@ -9894,7 +9772,8 @@ DWORD WINAPI Worker(LPVOID) {
         std::cout << "[STOP] Esta DLL e x86: exige executavel PE32/i386 valido.\n"
                   << "Para clientes x64, use o BuildExplorer/ABIBuilder x64.\n";
         WaitEnter("ENTER para descarregar... ");
-        FreeLibraryAndExitThread(g_self, 0);
+        if(grouped_observation::veh){FreeConsole();return 0;} // Retain delayed INT3 handler until client shutdown.
+    FreeLibraryAndExitThread(g_self, 0);
     }
 
     r.fp = FingerprintTextFromDisk(r.module.path);
@@ -10068,7 +9947,6 @@ DWORD WINAPI Worker(LPVOID) {
     if (r.binds["follow"].selectedOk) followRva = r.binds["follow"].selected.methodRva;
     r.gameLayout = InferGameLayout(r.module, attackRva, followRva);
     ApplyLoadedProfile(r, cached);
-    RunGuidedDiscoveryValidation(r);
     std::cout << "\n[CONTINUANDO] Buscando hints de luz em blocos de memoria...\n" << std::flush;
     const auto lightStrings = FindAsciiStringsContaining(r.module, "light");
     std::cout << "\n[LIGHT SEMANTIC HINTS] strings containing 'light'=" << lightStrings.size() << "\n";
@@ -10123,79 +10001,8 @@ DWORD WINAPI Worker(LPVOID) {
               << "LP VTable RVA   : " << HexU32(r.localPlayerVtableRva) << "\n"
               << "RTTI match      : " << (r.localPlayerVtableMatch?"YES":"NO") << "\n";
 
+    bool activitySessionsStarted=false;
     if (r.localPlayerPtr && r.localPlayerVtableMatch) {
-        if (r.gameOwnerRva) {
-            const uintptr_t game = r.module.base + r.gameOwnerRva;
-            const bool attackKnown = r.gameLayout.attackTarget >= 0 && EvidenceScore(r.attackTargetSource) >= 90;
-            const bool followKnown = r.gameLayout.followTarget >= 0 && EvidenceScore(r.followTargetSource) >= 90;
-            if (attackKnown) std::cout << "[SKIP] AttackTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.attackTarget) << "\n";
-            if (followKnown) std::cout << "[SKIP] FollowTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.followTarget) << "\n";
-            r.gameRuntime = RunGameTargetValidation(game, r.gameLayout.localPlayer, r.module, r.rtti, !attackKnown, !followKnown);
-            if (r.gameRuntime.attackTarget >= 0) { r.gameLayout.attackTarget = r.gameRuntime.attackTarget; r.attackTargetSource = "runtime_transition"; }
-            if (r.gameRuntime.followTarget >= 0) { r.gameLayout.followTarget = r.gameRuntime.followTarget; r.followTargetSource = "runtime_transition"; }
-            r.gameLayout.inferred = r.gameLayout.localPlayer >= 0 && r.gameLayout.attackTarget >= 0 &&
-                                    r.gameLayout.followTarget >= 0 &&
-                                    r.gameLayout.localPlayer != r.gameLayout.attackTarget &&
-                                    r.gameLayout.attackTarget != r.gameLayout.followTarget;
-            SaveCheckpoint(r, "game_layout");
-            std::cout << "\n[GAME LAYOUT RUNTIME RESULT]\n"
-                      << "LocalPlayer : +" << poff(r.gameLayout.localPlayer) << "\n"
-                      << "AttackTarget: +" << poff(r.gameLayout.attackTarget)
-                      << (EvidenceScore(r.attackTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n"
-                      << "FollowTarget: +" << poff(r.gameLayout.followTarget)
-                      << (EvidenceScore(r.followTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n";
-        }
-
-        uint32_t qx=0,qy=0; uint8_t qz=0;
-        const bool loadedPositionOk = EvidenceScore(r.positionSource) >= 90 &&
-                                      QuickCheckPosition(r.localPlayerPtr,r.positionRuntime,&qx,&qy,&qz);
-        if (loadedPositionOk) {
-            std::cout << "\n[POSITION QUICK-CHECK] OK -> " << qx << "," << qy << "," << static_cast<int>(qz)
-                      << " offsets +" << HexU32(r.positionRuntime.x) << "/+" << HexU32(r.positionRuntime.y)
-                      << "/+" << HexU32(r.positionRuntime.z) << " dir +" << HexU32(r.positionRuntime.direction) << "\n"
-                      << "[SKIP] Position calibration ja confirmada para esta fingerprint.\n";
-        } else {
-            r.positionCandidates = FindPositionCandidates(r.localPlayerPtr);
-            std::cout << "\n[POSITION STRUCTURAL CANDIDATES]\n";
-            for (const auto& c : r.positionCandidates) {
-                std::cout << "  +" << HexU32(c.offset)
-                          << " -> " << c.x << "," << c.y << "," << static_cast<int>(c.z)
-                          << " score=" << c.score << "\n";
-            }
-            r.positionRuntime = RunPositionValidation(r.localPlayerPtr, r.positionCandidates);
-            if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0)
-                r.positionSource = r.positionRuntime.xyzPromotedByAdjacency ? "runtime_transition_plus_xyz_adjacency" : "runtime_transition";
-        }
-        std::cout << "\n[POSITION RESULT]\n"
-                  << "X         : +" << poff(r.positionRuntime.x) << "\n"
-                  << "Y         : +" << poff(r.positionRuntime.y) << "\n"
-                  << "Z         : +" << poff(r.positionRuntime.z) << "\n"
-                  << "Direction : +" << poff(r.positionRuntime.direction) << "\n";
-        if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0) SaveCheckpoint(r,"position");
-
-        if (r.mapOwnerRva) {
-            const uintptr_t mapObj = r.module.base + r.mapOwnerRva;
-            const bool loadedMapOk = r.mapCenterOffset>=0 && EvidenceScore(r.mapCenterStatus)>=80 &&
-                                     QuickCheckMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime,r.mapCenterOffset);
-            if (loadedMapOk) {
-                std::cout << "\n[MAP CENTER QUICK-CHECK] +" << HexU32(r.mapCenterOffset)
-                          << " == LocalPlayer Position [OK]\n"
-                          << "[SKIP] Map.Center calibration ja confirmada para esta fingerprint.\n";
-            } else {
-                r.mapCenters = FindMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime);
-                std::cout << "\n[MAP CENTER CANDIDATES]\n";
-                if (r.mapCenters.empty()) std::cout << "  <none>\n";
-                for (const auto& c : r.mapCenters) std::cout << "  +" << HexU32(c.offset) << " (X/Y/Z contiguous)\n";
-                if (!r.mapCenters.empty() && AskYesNo("Validar Map.Center por transicoes runtime agora?")=='s') {
-                    r.mapCenterOffset = ValidateMapCenterV3(mapObj, r.mapCenters, r.mapCenterStatus);
-                }
-            }
-            std::cout << "[MAP CENTER RESULT] "
-                      << (r.mapCenterOffset>=0 ? ("+"+HexU32(r.mapCenterOffset)) : std::string("<pending>"))
-                      << " [" << r.mapCenterStatus << "]\n";
-            if (r.mapCenterOffset>=0) SaveCheckpoint(r,"map_center");
-        }
-
         PrintLoadedFieldQuickChecks(r);
         const auto knownField=[&](const std::string& n){ auto it=r.selectedFields.find(n); return it!=r.selectedFields.end() && it->second.offset>=0; };
         const bool numericCoreComplete = knownField("health") && knownField("maxHealth") &&
@@ -10305,6 +10112,81 @@ DWORD WINAPI Worker(LPVOID) {
             SaveCheckpoint(r,"numeric_fields");
         }
 
+        if (r.gameOwnerRva) {
+            const uintptr_t game = r.module.base + r.gameOwnerRva;
+            const bool attackKnown = r.gameLayout.attackTarget >= 0 && EvidenceScore(r.attackTargetSource) >= 90;
+            const bool followKnown = r.gameLayout.followTarget >= 0 && EvidenceScore(r.followTargetSource) >= 90;
+            if (attackKnown) std::cout << "[SKIP] AttackTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.attackTarget) << "\n";
+            if (followKnown) std::cout << "[SKIP] FollowTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.followTarget) << "\n";
+            r.gameRuntime = RunGameTargetValidation(game, r.gameLayout.localPlayer, r.module, r.rtti, !attackKnown, !followKnown);
+            if (r.gameRuntime.attackTarget >= 0) { r.gameLayout.attackTarget = r.gameRuntime.attackTarget; r.attackTargetSource = "runtime_transition"; }
+            if (r.gameRuntime.followTarget >= 0) { r.gameLayout.followTarget = r.gameRuntime.followTarget; r.followTargetSource = "runtime_transition"; }
+            r.gameLayout.inferred = r.gameLayout.localPlayer >= 0 && r.gameLayout.attackTarget >= 0 &&
+                                    r.gameLayout.followTarget >= 0 &&
+                                    r.gameLayout.localPlayer != r.gameLayout.attackTarget &&
+                                    r.gameLayout.attackTarget != r.gameLayout.followTarget;
+            SaveCheckpoint(r, "game_layout");
+            std::cout << "\n[GAME LAYOUT RUNTIME RESULT]\n"
+                      << "LocalPlayer : +" << poff(r.gameLayout.localPlayer) << "\n"
+                      << "AttackTarget: +" << poff(r.gameLayout.attackTarget)
+                      << (EvidenceScore(r.attackTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n"
+                      << "FollowTarget: +" << poff(r.gameLayout.followTarget)
+                      << (EvidenceScore(r.followTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n";
+        }
+
+        uint32_t qx=0,qy=0; uint8_t qz=0;
+        const bool loadedPositionOk = EvidenceScore(r.positionSource) >= 90 &&
+                                      QuickCheckPosition(r.localPlayerPtr,r.positionRuntime,&qx,&qy,&qz);
+        if (loadedPositionOk) {
+            std::cout << "\n[POSITION QUICK-CHECK] OK -> " << qx << "," << qy << "," << static_cast<int>(qz)
+                      << " offsets +" << HexU32(r.positionRuntime.x) << "/+" << HexU32(r.positionRuntime.y)
+                      << "/+" << HexU32(r.positionRuntime.z) << " dir +" << HexU32(r.positionRuntime.direction) << "\n"
+                      << "[SKIP] Position calibration ja confirmada para esta fingerprint.\n";
+        } else {
+            r.positionCandidates = FindPositionCandidates(r.localPlayerPtr);
+            std::cout << "\n[POSITION STRUCTURAL CANDIDATES]\n";
+            for (const auto& c : r.positionCandidates) {
+                std::cout << "  +" << HexU32(c.offset)
+                          << " -> " << c.x << "," << c.y << "," << static_cast<int>(c.z)
+                          << " score=" << c.score << "\n";
+            }
+            r.positionRuntime = RunPositionValidation(r.localPlayerPtr, r.positionCandidates);
+            if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0)
+                r.positionSource = r.positionRuntime.xyzPromotedByAdjacency ? "runtime_transition_plus_xyz_adjacency" : "runtime_transition";
+        }
+        std::cout << "\n[POSITION RESULT]\n"
+                  << "X         : +" << poff(r.positionRuntime.x) << "\n"
+                  << "Y         : +" << poff(r.positionRuntime.y) << "\n"
+                  << "Z         : +" << poff(r.positionRuntime.z) << "\n"
+                  << "Direction : +" << poff(r.positionRuntime.direction) << "\n";
+        if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0) SaveCheckpoint(r,"position");
+
+        if (r.mapOwnerRva) {
+            const uintptr_t mapObj = r.module.base + r.mapOwnerRva;
+            const bool loadedMapOk = r.mapCenterOffset>=0 && EvidenceScore(r.mapCenterStatus)>=80 &&
+                                     QuickCheckMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime,r.mapCenterOffset);
+            if (loadedMapOk) {
+                std::cout << "\n[MAP CENTER QUICK-CHECK] +" << HexU32(r.mapCenterOffset)
+                          << " == LocalPlayer Position [OK]\n"
+                          << "[SKIP] Map.Center calibration ja confirmada para esta fingerprint.\n";
+            } else {
+                r.mapCenters = FindMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime);
+                std::cout << "\n[MAP CENTER CANDIDATES]\n";
+                if (r.mapCenters.empty()) std::cout << "  <none>\n";
+                for (const auto& c : r.mapCenters) std::cout << "  +" << HexU32(c.offset) << " (X/Y/Z contiguous)\n";
+                if (!r.mapCenters.empty() && AskYesNo("Validar Map.Center por transicoes runtime agora?")=='s') {
+                    r.mapCenterOffset = ValidateMapCenterV3(mapObj, r.mapCenters, r.mapCenterStatus);
+                }
+            }
+            std::cout << "[MAP CENTER RESULT] "
+                      << (r.mapCenterOffset>=0 ? ("+"+HexU32(r.mapCenterOffset)) : std::string("<pending>"))
+                      << " [" << r.mapCenterStatus << "]\n";
+            if (r.mapCenterOffset>=0) SaveCheckpoint(r,"map_center");
+        }
+
+        RunGuidedDiscoveryValidation(r);
+        activitySessionsStarted=true;
+        if(AskYesNo("Executar tambem a descoberta detalhada de layouts/ABI (testes adicionais)?") == 's') {
         RunCreatureLayoutDiscovery(r);
         RunCreatureIdDiscoveryV18(r);
         RunCreatureSemanticFieldsV18(r);
@@ -10313,16 +10195,16 @@ DWORD WINAPI Worker(LPVOID) {
         RunTileGroundDiscoveryV30(r);
         RunGameActionAbiProbeV32(r);
         RunAutoWalkDeepAbiProbeV40(r);
-        // Entry observations were already collected independently of LocalPlayer
-        // in the guided phase. Do not silently promote a new build using the
-        // legacy single-sample classifier's family-specific ABI assumptions.
+        // Group entry observations never imply a complete ABI.
         RunOpenContainerDiscoveryV24Multi(r);
         RunWorldAmbientLightDiscovery(r);
+        }
     } else {
         std::cout << "\n[NOTE] LocalPlayer nao foi promovido. O probe preserva os resultados offline\n"
                   << "       e nao executa scan cego de heap como fallback.\n";
     }
 
+    if(!activitySessionsStarted)RunGuidedDiscoveryValidation(r);
     RunTopMoveAbiBaseline(r);
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
@@ -10382,6 +10264,7 @@ DWORD WINAPI Worker(LPVOID) {
               << "============================================================\n";
 
     WaitEnter("ENTER para descarregar a DLL... ");
+    if(grouped_observation::veh){FreeConsole();return 0;} // Retain delayed INT3 handler until client shutdown.
     FreeLibraryAndExitThread(g_self, 0);
     return 0;
 }

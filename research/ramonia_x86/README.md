@@ -152,6 +152,9 @@ strings entre blocos. Isso elimina as consultas de memória por byte após
 
 ### Guided Discovery R2
 
+Nota: a revisão atual R3 substitui a fila por candidato descrita na R2 por
+sessões por atividade. A busca semântica em blocos da R2 permanece.
+
 O console identifica a DLL como `Guided Discovery R2` e imprime
 `[BUILD REVISION] x86-guided-r2-batched-strings-all-candidates`.
 A busca semântica indexa todos os nomes em uma passagem pelas seções legíveis,
@@ -166,3 +169,48 @@ ambíguos, depois os ausentes e então os candidatos únicos. Evidências desses
 métodos adicionais também são retomadas no profile. O score permanece uma pista,
 sem concluir a ABI. A revisão não implementa validação completa de retorno/refcount
 ou chamadas ativas; essas etapas continuam explicitamente pendentes.
+
+### Activity Sessions R3
+
+Identificação: `[BUILD REVISION] x86-activity-r3-all-candidates-per-session`.
+Após RTTI/semântica e obtenção do LocalPlayer, os campos básicos HP/Mana/XP/Level/
+Capacity são calibrados antes de target, posição e centro do mapa. Depois vêm
+sessões por atividade: status, andar, bags, itens, Look, Use, target, chat, luz e
+outfit. Sem LocalPlayer, o observador ainda funciona; referências numéricas ficam
+explicitamente indisponíveis. Descoberta detalhada adicional de layouts/ABI é
+oferecida separadamente, depois das sessões, e não é obrigatória.
+
+Cada sessão acompanha TODOS os RVAs executáveis dos métodos relacionados, com
+deduplicação por endereço físico (máximo 512 endereços nesta revisão; excedentes
+ficam pendentes). Não pergunta por candidato. Um endereço compartilhado por
+vários métodos conserva suas observações em cada bind, sem atribuir sua classe
+por score. A identificação de receptor RTTI é registrada por snapshot.
+
+Fluxo: ENTER para preparar **2 segundos parado**, ENTER para preparar **10 segundos
+da ação A**, ENTER para preparar **10 segundos da ação B**. Durante cada janela
+o jogador permanece no jogo, sem retornar ao console. Bags A: abrir/fechar a bag;
+B: outra bag, mover itens entre elas e arrastar a janela. Mover a janela não
+garante uma chamada de Container; esse comportamento também fica registrado.
+Andar A/B usa destinos/direções diferentes. O console mostra detecções, progresso
+e `ATIVIDADE CONCLUIDA` ao terminar.
+
+O observador usa INT3 reversível em cada candidato, uma captura por endereço
+por rodada de 200 ms, renovada fora do handler. Não executa candidatos para
+descobri-los. Por candidato/fase, conserva dois snapshots completos e o número
+de rodadas com hit (não representa a quantidade total de chamadas). `guidedValidation`
+inclui comparação controle/A/B, classes observadas, valores conhecidos do
+LocalPlayer e posição antes/depois de cada fase. Campos ainda desconhecidos não
+recebem offsets presumidos. Referências históricas são snapshots, nunca ponteiros
+para chamada. Sem hit não descarta o candidato; hit isolado não conclui ABI.
+
+Os resultados anteriores só são retomados para fingerprint e candidatos/owners
+exatos. Métodos ainda sem candidato aparecem em uma lista, com uma opção única
+para fornecer entradas encontradas no debugger desta build. O guia conserva
+pendências dos métodos ainda sem uma atividade mapeada.
+
+Ao finalizar, os bytes e proteções originais das páginas são restaurados. A DLL
+permanece carregada sem breakpoints para tratar uma entrega atrasada de INT3
+próprio já restaurado. Reinicie o cliente antes de atualizar/reinjetar a DLL.
+`tests/GroupedObservationTests.cpp` testa 16 candidatos simultâneos, controle/A/B,
+rearmamento concorrente, preservação de this/stack, proteção compartilhada e
+ausência de promoção. A validação no cliente WAD ainda depende do teste real.
