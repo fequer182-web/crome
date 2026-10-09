@@ -1484,7 +1484,7 @@ static void RunRamoniaCaveCycle(
                 std::to_string(result.blockerId) + " #" +
                 std::to_string(state.index));
             state.nextActionMs=static_cast<std::uint64_t>(GetTickCount64())+
-                std::max<std::uint32_t>(500u,cfg.retryDelayMs);
+                150u;
         } else if (result.used) {
             SetRamoniaCaveStatus(
                 "Cavebot: " + node.type + " OK #" +
@@ -2030,6 +2030,28 @@ static void RamoniaTargetWorker() {
             caveCfg.enabled && caveWalkReady;
         const bool spearActive =
             spearCfg.enabled && g_ramoniaSpearReady.load() && !spearCfg.itemIds.empty();
+        // Wake close to the next tile-action deadline instead of adding the
+        // worker's ordinary 120/300 ms sleep to each blocker delay.
+        auto workerCycleDelay=[&](DWORD normalDelay) {
+            const auto tick=static_cast<std::uint64_t>(GetTickCount64());
+            auto beforeDeadline=[&](std::uint64_t deadline) {
+                const auto remaining=deadline>tick ? deadline-tick : 25u;
+                return static_cast<DWORD>(
+                    std::clamp<std::uint64_t>(remaining,25u,normalDelay));
+            };
+            DWORD delay=normalDelay;
+            if (spearActive && nextSpearAttemptMs)
+                delay=std::min(delay,beforeDeadline(nextSpearAttemptMs));
+            if (caveActive && !caveState.halted &&
+                caveState.index<caveCfg.nodes.size()) {
+                const auto& current=caveCfg.nodes[caveState.index];
+                if (current.type=="rope" || current.type=="shovel")
+                    delay=std::min(delay,caveState.nextActionMs
+                        ? beforeDeadline(caveState.nextActionMs) : 50u);
+            }
+            return delay;
+        };
+
 
         if (!spearCfg.enabled) {
             nextSpearAttemptMs=0;
@@ -2133,7 +2155,8 @@ static void RamoniaTargetWorker() {
                 SetRamoniaSpearStatus("Pick Up Spear: "+result.error);
             }
             nextSpearAttemptMs=static_cast<std::uint64_t>(GetTickCount64())+
-                std::max<std::uint32_t>(500u,spearCfg.retryMs);
+                (result.moved || result.uncovered || result.error.empty()
+                    ? 150u : 500u);
         }
 
         if (!targetPolicyActive && !lootActive) {
@@ -2147,7 +2170,7 @@ static void RamoniaTargetWorker() {
             if (caveActive)
                 RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,false);
 
-            Sleep(caveActive ? 120 : 300);
+            Sleep(workerCycleDelay(caveActive ? 120 : 300));
             continue;
         }
 
@@ -2156,7 +2179,7 @@ static void RamoniaTargetWorker() {
             !RamoniaPipeRequest(pid, {{"cmd","GET_COMBAT_TARGETS"}}, combatJson)) {
             if (targetPolicyActive) SetRamoniaStatus("Target: aguardando bridge");
             if (lootActive) SetRamoniaLootStatus("Loot: aguardando bridge");
-            Sleep(300);
+            Sleep(workerCycleDelay(300));
             continue;
         }
 
@@ -2317,7 +2340,7 @@ static void RamoniaTargetWorker() {
             if (caveActive)
                 RunRamoniaCaveCycle(
                     pid,caveCfg,caveState,nowMs,currentAttackId!=0);
-            Sleep(caveActive ? 120 : 300);
+            Sleep(workerCycleDelay(caveActive ? 120 : 300));
             continue;
         }
 
@@ -2337,7 +2360,7 @@ static void RamoniaTargetWorker() {
                 if (caveActive)
                     RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,false);
             }
-            Sleep(caveActive ? 120 : 300);
+            Sleep(workerCycleDelay(caveActive ? 120 : 300));
             continue;
         }
 
@@ -2369,7 +2392,7 @@ static void RamoniaTargetWorker() {
         SetRamoniaStatus("Target ativo",target->name,target->id,target->hpPercent);
         if (caveActive)
             RunRamoniaCaveCycle(pid,caveCfg,caveState,nowMs,true);
-        Sleep(300);
+        Sleep(workerCycleDelay(300));
     }
 }
 
