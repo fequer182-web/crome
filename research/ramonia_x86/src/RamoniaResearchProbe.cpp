@@ -19,6 +19,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include "RamoniaPipeBaseline.hpp"
 
 // ============================================================================
 // OTCLab Ramonia x86 Research Probe V39
@@ -2050,7 +2051,7 @@ ProfileCache ParseProfileFile(const std::string& path, const Report& r) {
     p.mapOwnerRva = HexU32Value(JsonStringValue(owners, "mapRva"));
 
     const std::string actions = FindJsonObject(json, "actions");
-    for (const char* tok : {"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
+    for (const char* tok : ramonia_baseline::abiMethods) {
         const std::string obj = FindJsonObject(actions, tok);
         if (!obj.empty()) p.actionAbiRaw[tok] = obj;
     }
@@ -4454,6 +4455,58 @@ void RunCreatureLayoutDiscovery(Report& r) {
     SaveCheckpoint(r,"creature_layout");
 }
 
+
+bool TopMoveContractMatches(const std::string& raw,uint32_t methodRva) {
+    const auto self=FindJsonObject(raw,"this");
+    const auto ret=FindJsonObject(raw,"return");
+    const auto hidden=FindJsonObject(ret,"hiddenStorage");
+    const auto refs=FindJsonObject(ret,"refCount");
+    return methodRva && HexU32Value(JsonStringValue(raw,"methodRva"))==methodRva &&
+        JsonStringValue(raw,"status")=="runtime_confirmed" &&
+        JsonStringValue(raw,"callingConvention")=="x86_thiscall_sret" &&
+        JsonStringValue(self,"semantic")=="Tile" &&
+        JsonStringValue(self,"location")=="ecx" &&
+        HexU32Value(JsonStringValue(raw,"stackCleanupBytes"))==4 &&
+        JsonStringValue(ret,"abiType")=="shared_object_ptr<Thing>" &&
+        JsonStringValue(ret,"status")=="runtime_confirmed" &&
+        JsonStringValue(hidden,"entryLocation")=="[esp+4]" &&
+        JsonStringValue(hidden,"frameLocation")=="[ebp+8]" &&
+        HexU32Value(JsonStringValue(refs,"offset"))==4 &&
+        JsonStringValue(refs,"status")=="increment_and_release_runtime_confirmed" &&
+        JsonStringValue(ret,"tileMembership")=="runtime_confirmed";
+}
+
+std::string CurrentPipeBaselineJson(const Report& r) {
+    std::ostringstream o;
+    o << "{\"id\":\"" << ramonia_baseline::id
+      << "\",\"policy\":\"current_build_discovery_then_runtime_abi\","
+      << "\"binds\":{";
+    bool first=true;
+    for(const char* token:ramonia_baseline::requiredBinds) {
+        if(!first) o << ",";
+        first=false;
+        const auto it=r.binds.find(token);
+        o << "\"" << token << "\":\""
+          << (it!=r.binds.end() && it->second.selectedOk ? "discovered" : "pending") << "\"";
+    }
+    o << "},\"requiredAbi\":[";
+    first=true;
+    for(const char* token:ramonia_baseline::abiMethods) {
+        if(std::string(token)=="talk") continue; // talkChannel is the live UI route.
+        if(!first) o << ",";
+        first=false;
+        o << "\"" << token << "\"";
+    }
+    o << "],\"requiredFields\":[\"tileThings\",\"tileThingsElem\","
+      << "\"tileVtableRva\",\"itemId\",\"itemCount\",\"inventoryArray\",\"inventoryStride\","
+      << "\"containerItems\",\"openContainersMap\"],"
+      << "\"tileAccessPolicy\":\"runtime_getTopMoveThing_same_tile_membership\","
+      << "\"uncoverPolicy\":\"one_blocker_then_reread\","
+      << "\"toolUsePolicy\":\"require_exposed_target_then_useWith\","
+      << "\"abiPromotion\":\"static_or_entry_only_evidence_is_not_confirmation\"}";
+    return o.str();
+}
+
 std::string SaveJson(const Report& r) {
     const std::string path = PersistentProfilePath(r);
     std::ofstream o(path, std::ios::binary);
@@ -4510,10 +4563,11 @@ std::string SaveJson(const Report& r) {
     o << "  \"owners\": {\"gameRva\": \"" << HexU32(r.gameOwnerRva)
       << "\", \"mapRva\": \"" << HexU32(r.mapOwnerRva) << "\"},\n";
 
+    o << "  \"pipeBaseline\": " << CurrentPipeBaselineJson(r) << ",\n";
+
     o << "  \"actions\": {\n";
-    const std::vector<std::string> actionOrder = {
-        "autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"
-    };
+    const std::vector<std::string> actionOrder(
+        ramonia_baseline::abiMethods.begin(),ramonia_baseline::abiMethods.end());
     std::vector<std::string> actionPresent;
     for (const auto& name : actionOrder) {
         if (r.actionAbi.count(name) || r.actionAbiRaw.count(name)) actionPresent.push_back(name);
@@ -8498,7 +8552,7 @@ void RunGameActionAbiProbeV32(Report& r) {
               << "============================================================\n"
               << "[MODE] READ-ONLY / NO ACTION CALLS / NO HOOKS / NO MEMORY WRITES\n"
               << "[RULE] RVAs are current-build semantic binds; ABI is reported, not assumed.\n";
-    for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"})
+    for(const char* tok:ramonia_baseline::abiMethods)
         V32DumpActionAbi(r,tok);
     std::cout << "\n[V32 NOTE] Envie este bloco inteiro. O proximo passo so chama uma acao depois de fecharmos assinatura/calling convention por evidencia.\n";
 }
@@ -9451,7 +9505,7 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
               << "[RULE] V40 recaptura autoWalk e imprime caller/callee cleanup antes de qualquer nova mudanca de ABI.\n";
 
-    for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"}) {
+    for(const char* tok:ramonia_baseline::gameActions) {
         const bool alreadyConfirmed=V35ActionAlreadyConfirmed(r,tok);
         if(alreadyConfirmed && std::string(tok)!="autoWalk") {
             std::cout << "[V40 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
@@ -9471,6 +9525,62 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
     std::cout << "\n[V40 COMPLETE] diagnostico autoWalk capturado; aguarde revisao antes de alterar ABI ativa.\n";
+}
+
+
+void RunTopMoveAbiBaseline(Report& r) {
+    const auto bind=r.binds.find("getTopMoveThing");
+    const uint32_t rva=bind!=r.binds.end() && bind->second.selectedOk
+        ? bind->second.selected.methodRva : 0;
+    const auto old=r.actionAbiRaw.find("getTopMoveThing");
+    if(old!=r.actionAbiRaw.end() && TopMoveContractMatches(old->second,rva)) {
+        std::cout << "[PIPE BASELINE] Tile::getTopMoveThing ABI/return/refcount "
+                     "confirmados no profile da mesma build e mesmo bind.\n";
+        return;
+    }
+    // Discovery never imports a known RVA or treats a RET/entry hit as proof
+    // of returned ownership. A changed bind invalidates prior confirmation.
+    r.actionAbi.erase("getTopMoveThing");
+    bool tileThisObserved=false,hiddenStorageObserved=false;
+    if(rva && r.localPlayerPtr &&
+       AskYesNo("Capturar entrada natural de Tile::getTopMoveThing para ABI?")=='s') {
+        if(V33InstallOneShot(r.module.base+rva,rva)) {
+            std::cout << "[TOPMOVE ABI] Arraste um item do chao normalmente. "
+                         "Depois volte ao console. Nenhuma chamada interna feita pelo probe.\n";
+            WaitEnter("ENTER apos a acao... ");
+            V33Disarm();
+            if(InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0) {
+                const auto& c=g_v33Capture;
+                tileThisObserved=V33ClassFromSnap(r,c.ecxSnap)=="Tile";
+                hiddenStorageObserved=V35IsCallerStackRef(c,c.stack[1]) &&
+                    c.argSnap[0].valid>=4;
+                std::cout << "[TOPMOVE ENTRY] ECX=" << HexU32(c.ecx)
+                          << " TileRTTI=" << tileThisObserved
+                          << " hiddenStorage[ESP+4]=" << HexU32(c.stack[1])
+                          << " callerStack=" << hiddenStorageObserved << "\n";
+            }
+        }
+        V33Disarm();
+        if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
+    }
+    std::ostringstream o;
+    o << "{\"methodRva\":\"" << HexU32(rva)
+      << "\",\"callingConvention\":\"pending\","
+      << "\"status\":\"" << (rva?"abi_validation_required":"discovery_required") << "\","
+      << "\"this\":{\"semantic\":\"Tile\",\"location\":\"ecx\",\"status\":\""
+      << (tileThisObserved?"runtime_observed":"pending") << "\"},"
+      << "\"args\":[],\"return\":{\"expectedAbiType\":\"shared_object_ptr<Thing>\","
+      << "\"status\":\"pending\",\"hiddenStorage\":{\"expectedEntryLocation\":\"[esp+4]\","
+      << "\"expectedFrameLocation\":\"[ebp+8]\",\"status\":\""
+      << (hiddenStorageObserved?"runtime_observed":"pending")
+      << "\"},\"refCount\":{\"status\":\"pending\"},"
+      << "\"tileMembership\":\"pending\"},"
+      << "\"validationRequired\":[\"callee_cleanup\",\"returned_ThingPtr\","
+      << "\"same_tile_membership\",\"refcount_increment_and_release\"],"
+      << "\"validationRoute\":\"runtime_return_capture_or_build_matched_bridge_topmoveat\"}";
+    r.actionAbiRaw["getTopMoveThing"]=o.str();
+    std::cout << "[PIPE BASELINE] getTopMoveThing pendente: confirmar retorno, "
+                 "RET, Tile::things e refcount. Entrada sozinha nao promove ABI.\n";
 }
 
 DWORD WINAPI Worker(LPVOID) {
@@ -9553,7 +9663,7 @@ DWORD WINAPI Worker(LPVOID) {
               << "============================================================\n"
               << "Method: exact token\\0 -> immediate xref -> PUSH owner + PUSH method\n";
 
-    const std::vector<std::string> tokens = {
+    std::vector<std::string> tokens = {
         "autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel",
         "getTile","getCreatureById","getCreatureByName","getTopUseThing",
         "getPosition","getThings","getThing","getThingCount","getGround","getTopThing","getTopLookThing","getTopMoveThing","getTopCreature","isWalkable","isPathable",
@@ -9568,6 +9678,9 @@ DWORD WINAPI Worker(LPVOID) {
         "getContainer","getContainers","openContainer","closeContainer","getName","setName",
         "getFirstIndex","setFirstIndex","isUnlocked","setUnlocked","hasPages","setHasPages"
     };
+    for (const char* required : ramonia_baseline::requiredBinds)
+        if(std::find(tokens.begin(),tokens.end(),required)==tokens.end())
+            tokens.emplace_back(required);
     for (const auto& token : tokens) {
         BindResult br;
         br.name = token;
@@ -9624,9 +9737,8 @@ DWORD WINAPI Worker(LPVOID) {
         }
     }
 
-    const std::vector<std::string> gameTokens = {
-        "autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"
-    };
+    const std::vector<std::string> gameTokens(
+        ramonia_baseline::gameActions.begin(),ramonia_baseline::gameActions.end());
     r.gameOwnerRva = ChooseOwnerCluster(r.binds, gameTokens, 4);
     r.mapOwnerRva = ChooseOwnerCluster(r.binds, {"getTile","getCreatureById"}, 2);
 
@@ -9661,6 +9773,8 @@ DWORD WINAPI Worker(LPVOID) {
     if (r.binds["follow"].selectedOk) followRva = r.binds["follow"].selected.methodRva;
     r.gameLayout = InferGameLayout(r.module, attackRva, followRva);
     ApplyLoadedProfile(r, cached);
+    // Validate the imported Tile ABI before any discovery checkpoint can save it.
+    RunTopMoveAbiBaseline(r);
     RunUiMapLightStaticDiscoveryV13(r);
     r.gameLayout.inferred = r.gameLayout.localPlayer >= 0 && r.gameLayout.attackTarget >= 0 &&
                             r.gameLayout.followTarget >= 0 &&
@@ -9905,6 +10019,7 @@ DWORD WINAPI Worker(LPVOID) {
                   << "       e nao executa scan cego de heap como fallback.\n";
     }
 
+    RunTopMoveAbiBaseline(r);
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
     r.checkpoint = "complete";

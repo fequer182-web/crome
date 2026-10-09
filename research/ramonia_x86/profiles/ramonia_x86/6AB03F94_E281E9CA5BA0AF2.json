@@ -728,6 +728,47 @@
       "messageSayValue": 1,
       "defaultChannel": 0,
       "messageSayStatus": "otclient_family_game_talk_wrapper_crosschecked_pending_live"
+    },
+    "getTopMoveThing": {
+      "methodRva": "0x197AD0",
+      "ownerRva": "0x0",
+      "callingConvention": "x86_thiscall_sret",
+      "stackCleanupBytes": "0x4",
+      "this": {
+        "semantic": "Tile",
+        "location": "ecx"
+      },
+      "status": "runtime_confirmed",
+      "args": [],
+      "return": {
+        "abiType": "shared_object_ptr<Thing>",
+        "status": "runtime_confirmed",
+        "hiddenStorage": {
+          "entryLocation": "[esp+4]",
+          "frameLocation": "[ebp+8]"
+        },
+        "refCount": {
+          "offset": "0x4",
+          "status": "increment_and_release_runtime_confirmed",
+          "ownership": "release_returned_reference_once"
+        },
+        "tileMembership": "runtime_confirmed"
+      },
+      "evidence": {
+        "source": "CromePipeTest topmoveat runtime diagnostic and user uncovertile runs",
+        "tile": {
+          "x": 1220,
+          "y": 1280,
+          "z": 7
+        },
+        "topMoveSequence": [
+          2384,
+          20159,
+          2389
+        ],
+        "abiDiagnosticCommit": "360ecfb",
+        "scope": "exact_build_fingerprint_and_methodRva_only"
+      }
     }
   },
   "gameLayout": {
@@ -988,5 +1029,61 @@
         "status": "runtime_tile_exact_rtti_localplayer_two_sqm_gold2148_aba_canonical_v30"
       }
     }
+  },
+  "pipeBaseline": {
+    "id": "ramonia_pipe_current_v1",
+    "policy": "current_build_discovery_then_runtime_abi",
+    "requiredAbi": [
+      "autoWalk",
+      "attack",
+      "follow",
+      "look",
+      "move",
+      "use",
+      "useWith",
+      "talkChannel",
+      "getTopMoveThing"
+    ],
+    "tileAccessPolicy": "runtime_getTopMoveThing_same_tile_membership",
+    "uncoverPolicy": "one_blocker_then_reread",
+    "toolUsePolicy": "require_exposed_target_then_useWith",
+    "abiPromotion": "static_or_entry_only_evidence_is_not_confirmation",
+    "binds": {
+      "autoWalk": "discovered",
+      "attack": "discovered",
+      "follow": "discovered",
+      "look": "discovered",
+      "move": "discovered",
+      "use": "discovered",
+      "useWith": "discovered",
+      "talkChannel": "discovered",
+      "getTile": "discovered",
+      "getCreatureById": "discovered",
+      "getPosition": "discovered",
+      "getThings": "discovered",
+      "getThingCount": "discovered",
+      "getTopMoveThing": "discovered",
+      "isWalkable": "discovered",
+      "isPathable": "discovered",
+      "getInventoryItem": "discovered",
+      "getId": "discovered",
+      "getCount": "discovered",
+      "getContainers": "discovered",
+      "getItems": "discovered",
+      "getContainer": "discovered",
+      "getCapacity": "discovered",
+      "getName": "discovered"
+    },
+    "requiredFields": [
+      "tileThings",
+      "tileThingsElem",
+      "tileVtableRva",
+      "itemId",
+      "itemCount",
+      "inventoryArray",
+      "inventoryStride",
+      "containerItems",
+      "openContainersMap"
+    ]
   }
 }
