@@ -1014,6 +1014,7 @@ static int StatusStrength(const std::string& s){
     if(s.find("confirmed_runtime")!=std::string::npos)return 5;
     if(s.find("strong_candidate")!=std::string::npos)return 4;
     if(s.find("captured_runtime_partial")!=std::string::npos)return 3;
+    if(s=="captured_entry_return_pending")return 2;
     if(s.find("captured_runtime")!=std::string::npos)return 2;
     if(s.find("rva_not_observed")!=std::string::npos)return 1;
     return 0;

@@ -50,6 +50,22 @@ int main() {
         const auto legacy=ParseProfile(legacyPath);
         fs::remove(legacyPath);
         Check(!legacy.fnGameMove,"legacy hardcoded RVA accepted without new search");
+        auto tileProfile=Fixture();
+        auto tileDiscovery=ExtractNamedObject(tileProfile.raw,"pipeDiscovery");
+        auto tileFunctions=ExtractNamedObject(tileDiscovery,"functions");
+        ReplaceOrInsertRootObject(tileFunctions,"tileGetTopMoveThing",R"({"rva":"0x2000","status":"unique_bind_candidate","candidateCount":1})");
+        ReplaceOrInsertRootObject(tileDiscovery,"functions",tileFunctions);
+        ReplaceOrInsertRootObject(tileProfile.raw,"pipeDiscovery",tileDiscovery);
+        ReplaceOrInsertRootObject(tileProfile.raw,"abiCatalog",R"({"fingerprint":{"timestamp":"0x1234","sizeOfImage":"0x20000","textHashFNV1A64":"0x5678"},"functions":{"tileGetTopMoveThing":{"rva":"0x2000","status":"rva_not_observed_runtime","callable":false}}})");
+        AbiResult entry;entry.key="tileGetTopMoveThing";entry.name="Tile::getTopMoveThing";entry.rva=0x2000;entry.tested=true;entry.runtimeHit=true;entry.status="captured_entry_return_pending";
+        const auto promoted=crome::json::parse(BuildAbiCatalog(tileProfile,fp,{{entry.key,entry}}));
+        const auto* topMove=promoted.get("functions")->get(entry.key);
+        Check(topMove->get("status")->string()==entry.status,"observed entry lost to old no-hit status");
+        Check(!topMove->get("callable")->boolean()&&!topMove->get("contractComplete")->boolean(),"entry-only proof completed return contract");
+        const auto prior=tileProfile.raw.find("rva_not_observed_runtime");
+        tileProfile.raw.replace(prior,std::string("rva_not_observed_runtime").size(),"confirmed_runtime_return_contract");
+        const auto retained=crome::json::parse(BuildAbiCatalog(tileProfile,fp,{{entry.key,entry}}));
+        Check(retained.get("functions")->get(entry.key)->get("status")->string()=="confirmed_runtime_return_contract","entry capture downgraded full proof");
         std::cout<<"PASS: unique current-build discovery, exact fingerprint, passive catalog and stale-proof rejection\n";
         return 0;
     } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
