@@ -21,6 +21,7 @@
 #include <vector>
 #include "RamoniaPipeBaseline.hpp"
 #include "GuidedDiscovery.hpp"
+#include "../../../Crome/Developer/native_runtime/profiles/MiniJson.hpp"
 
 // ============================================================================
 // OTCLab Ramonia x86 Research Probe V39
@@ -157,6 +158,7 @@ struct ModuleView {
     uint32_t entryRva = 0;
     std::string path;
     std::vector<SectionInfo> sections;
+    std::map<std::string,std::vector<uintptr_t>> semanticStringIndex;
     IMAGE_DATA_DIRECTORY importDirectory{};
 
     const SectionInfo* text() const {
@@ -502,6 +504,8 @@ void PrintCapacityPairCodeUseV9(const ModuleView& m, int aOff, int bOff) {
 }
 
 std::vector<uintptr_t> FindStringAddresses(const ModuleView& m, const std::string& exact) {
+    const auto indexed=m.semanticStringIndex.find(exact);
+    if(indexed!=m.semanticStringIndex.end()) return indexed->second;
     std::vector<uintptr_t> out;
     std::vector<uint8_t> needle(exact.begin(), exact.end());
     needle.push_back(0);
@@ -511,6 +515,38 @@ std::vector<uintptr_t> FindStringAddresses(const ModuleView& m, const std::strin
         out.insert(out.end(), h.begin(), h.end());
     }
     return out;
+}
+
+void BuildSemanticStringIndex(ModuleView& module,const std::vector<std::string>& tokens) {
+    module.semanticStringIndex.clear();
+    for(const auto& token:tokens) module.semanticStringIndex[token]={};
+    guided_discovery::TokenIndex index(tokens);
+    std::array<uint8_t,4096> bytes{};
+    std::cout << "[BUSCA COMPARTILHADA] " << tokens.size()
+              << " nomes em uma passagem; nenhuma secao de recursos excluida.\n" << std::flush;
+    for(const auto& section:module.sections) {
+        if(!section.readable() || section.executable() || section.end<=section.start) continue;
+        index.gap();
+        std::cout << "[BUSCANDO STRINGS] " << section.name << " bytes=" << section.end-section.start << "\n" << std::flush;
+        uintptr_t progress=section.start;
+        size_t skipped=0;
+        for(uintptr_t address=section.start;address<section.end;) {
+            const size_t take=std::min<size_t>(section.end-address,4096u-(address&4095u));
+            SIZE_T got=0;
+            if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<LPCVOID>(address),bytes.data(),take,&got) && got==take)
+                index.feed(bytes.data(),take,address,[&](size_t id,uintptr_t at) {
+                    module.semanticStringIndex[tokens[id]].push_back(at);
+                });
+            else { index.gap(); skipped+=take; }
+            address+=take;
+            if(address-progress>=16u*1024u*1024u) {
+                std::cout << "[PROGRESSO STRINGS] " << section.name << " "
+                          << address-section.start << "/" << section.end-section.start << " bytes\n" << std::flush;
+                progress=address;
+            }
+        }
+        std::cout << "[SECAO CONCLUIDA] " << section.name << " bytes_nao_lidos=" << skipped << "\n" << std::flush;
+    }
 }
 
 struct RttiResult {
@@ -615,6 +651,21 @@ struct BindResult {
     BindCandidate selected{};
     bool selectedOk = false;
 };
+
+void PrintAllBindCandidates(const BindResult& bind) {
+    std::cout << "[CANDIDATOS] " << bind.name << " total=" << bind.candidates.size() << "\n";
+    for(size_t i=0;i<bind.candidates.size();++i) {
+        const auto& candidate=bind.candidates[i];
+        std::cout << "  #" << i+1 << " method=" << HexU32(candidate.methodRva)
+                  << " owner=" << HexU32(candidate.ownerRva) << " [" << candidate.ownerSection
+                  << "] score=" << candidate.score << " token=" << HexU32(candidate.tokenRva)
+                  << " xref=" << HexU32(candidate.xrefRva) << "\n";
+    }
+    if(bind.candidates.empty()) std::cout << "  [PENDENTE] nenhum candidato; ajuda de busca sera oferecida no guia.\n";
+    else if(guided_discovery::candidates(bind).size()>1)
+        std::cout << "  [DUVIDA] varios enderecos: testar por acao natural; score nao confirma ABI.\n";
+    std::cout << std::flush;
+}
 
 std::vector<BindCandidate> ResolveBindCandidates(const ModuleView& m, const std::string& token) {
     std::vector<BindCandidate> out;
@@ -2048,9 +2099,15 @@ ProfileCache ParseProfileFile(const std::string& path, const Report& r) {
 
     const std::string actions = FindJsonObject(json, "actions");
     const std::string guided = FindJsonObject(json, "guidedValidation");
-    for(const char* method:guided_discovery::methods) {
-        const auto object=FindJsonObject(guided,method);
-        if(!object.empty()) p.guidedEvidence[method]=object;
+    if(!guided.empty()) {
+        try {
+            const auto parsed=crome::json::Parser(guided).parse();
+            if(parsed.isObject()) for(const auto& entry:parsed.object()) {
+                if(!entry.second.isObject()) continue;
+                const auto object=FindJsonObject(guided,entry.first);
+                if(!object.empty()) p.guidedEvidence[entry.first]=object;
+            }
+        } catch(...) { /* Malformed optional evidence is never imported. */ }
     }
     for (const char* tok : ramonia_baseline::abiMethods) {
         const std::string obj = FindJsonObject(actions, tok);
@@ -4753,7 +4810,8 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab x86 Research Probe V40 - Ramonia Baseline\n"
+        << "        OTCLab x86 Research Probe V40 - Guided Discovery R2\n"
+        << "[BUILD REVISION] x86-guided-r2-batched-strings-all-candidates\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4773,7 +4831,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Ramonia Baseline");
+    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Guided Discovery R2");
 }
 
 
@@ -9710,17 +9768,26 @@ void RunGuidedDiscoveryValidation(Report& r) {
               << "Retorno/refcount e chamada ativa continuam pendentes ate haver prova propria.\n";
     // Imported observations are historical snapshots, never live pointers or
     // permission to execute an address. Reuse only an identical fresh bind set.
-    for(const char* method:guided_discovery::methods) {
-        const auto bind=r.binds.find(method);
-        const auto old=r.guidedEvidence.find(method);
-        if(old!=r.guidedEvidence.end() &&
-           (bind==r.binds.end() || JsonStringValue(old->second,"candidateSignature")!=GuidedCandidateSignature(bind->second)))
-            r.guidedEvidence.erase(old);
+    std::vector<std::string> methods(guided_discovery::methods.begin(),guided_discovery::methods.end());
+    for(const auto& entry:r.binds)
+        if(std::find(methods.begin(),methods.end(),entry.first)==methods.end()) methods.push_back(entry.first);
+    const auto priority=[&](const std::string& name) {
+        const auto bind=r.binds.find(name);
+        const size_t count=bind==r.binds.end()?0:guided_discovery::candidates(bind->second).size();
+        return count>1?0:(count==0?1:2);
+    };
+    std::stable_sort(methods.begin(),methods.end(),[&](const auto& a,const auto& b) { return priority(a)<priority(b); });
+    for(auto old=r.guidedEvidence.begin();old!=r.guidedEvidence.end();) {
+        const auto bind=r.binds.find(old->first);
+        if(bind==r.binds.end() || JsonStringValue(old->second,"candidateSignature")!=GuidedCandidateSignature(bind->second))
+            old=r.guidedEvidence.erase(old);
+        else ++old;
     }
     SaveCheckpoint(r,"guided_discovery_ready");
+    std::cout << "[FILA DE VALIDACAO] " << methods.size() << " metodos; candidatos ambiguos e ausentes incluidos.\n";
     if(AskYesNo("Iniciar testes guiados dos candidatos pendentes agora? [S/N]")!='s') return;
     WaitEnter("Entre no personagem e deixe o mundo carregado. ENTER para comecar... ");
-    for(const char* method:guided_discovery::methods) {
+    for(const auto& method:methods) {
         auto bind=r.binds.find(method);
         auto candidates=bind==r.binds.end()?std::vector<uint32_t>{}:guided_discovery::candidates(bind->second);
         std::cout << "\n[TESTE PENDENTE] " << method << " candidatos=" << candidates.size() << "\n";
@@ -9910,7 +9977,10 @@ DWORD WINAPI Worker(LPVOID) {
     for (const char* required : ramonia_baseline::requiredBinds)
         if(std::find(tokens.begin(),tokens.end(),required)==tokens.end())
             tokens.emplace_back(required);
+    BuildSemanticStringIndex(r.module,tokens);
+    size_t tokenProgress=0;
     for (const auto& token : tokens) {
+        std::cout << "[BUSCANDO METODO " << ++tokenProgress << "/" << tokens.size() << "] " << token << "\n" << std::flush;
         BindResult br;
         br.name = token;
         br.candidates = ResolveBindCandidates(r.module, token);
@@ -9952,6 +10022,7 @@ DWORD WINAPI Worker(LPVOID) {
             }),br.candidates.end());
         }
         r.binds[token] = br;
+        PrintAllBindCandidates(br);
     }
 
     if (r.binds["getTopUseThing"].candidates.empty()) {
@@ -9992,6 +10063,10 @@ DWORD WINAPI Worker(LPVOID) {
               << "Game owner RVA : " << HexU32(r.gameOwnerRva) << "\n"
               << "Map owner RVA  : " << HexU32(r.mapOwnerRva) << "\n";
 
+    uint32_t attackRva = 0, followRva = 0;
+    if (r.binds["attack"].selectedOk) attackRva = r.binds["attack"].selected.methodRva;
+    if (r.binds["follow"].selectedOk) followRva = r.binds["follow"].selected.methodRva;
+    r.gameLayout = InferGameLayout(r.module, attackRva, followRva);
     ApplyLoadedProfile(r, cached);
     RunGuidedDiscoveryValidation(r);
     std::cout << "\n[CONTINUANDO] Buscando hints de luz em blocos de memoria...\n" << std::flush;
@@ -10000,10 +10075,6 @@ DWORD WINAPI Worker(LPVOID) {
     for (size_t i=0; i<lightStrings.size() && i<24; ++i)
         std::cout << "  " << lightStrings[i] << "\n";
 
-    uint32_t attackRva = 0, followRva = 0;
-    if (r.binds["attack"].selectedOk) attackRva = r.binds["attack"].selected.methodRva;
-    if (r.binds["follow"].selectedOk) followRva = r.binds["follow"].selected.methodRva;
-    r.gameLayout = InferGameLayout(r.module, attackRva, followRva);
     // Validate the imported Tile ABI before any discovery checkpoint can save it.
     RunTopMoveAbiBaseline(r);
     RunUiMapLightStaticDiscoveryV13(r);

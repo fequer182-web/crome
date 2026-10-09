@@ -149,3 +149,20 @@ são registrados como `discovery_required` e continuam na lista de pendências.
 As buscas de hints ASCII agora leem blocos alinhados de até 4 KiB, preservando
 strings entre blocos. Isso elimina as consultas de memória por byte após
 `OWNER CLUSTERS`, inclusive em clientes com seções de recursos grandes.
+
+### Guided Discovery R2
+
+O console identifica a DLL como `Guided Discovery R2` e imprime
+`[BUILD REVISION] x86-guided-r2-batched-strings-all-candidates`.
+A busca semântica indexa todos os nomes em uma passagem pelas seções legíveis,
+incluindo `.rsrc`, com progresso a cada seção/16 MiB. Os resolvers de singleton e
+instance reutilizam esse índice, sem repetir a varredura da imagem por nome.
+Os padrões continuam sendo token exato + NUL, inclusive ocorrências sobrepostas;
+um intervalo ilegível interrompe a continuidade do padrão e é contabilizado.
+
+Cada método imprime todas as alternativas com método, owner, score, token e xref.
+A fila guiada inclui também os métodos fora do contrato básico, priorizando os
+ambíguos, depois os ausentes e então os candidatos únicos. Evidências desses
+métodos adicionais também são retomadas no profile. O score permanece uma pista,
+sem concluir a ABI. A revisão não implementa validação completa de retorno/refcount
+ou chamadas ativas; essas etapas continuam explicitamente pendentes.

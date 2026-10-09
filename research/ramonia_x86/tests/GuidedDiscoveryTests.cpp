@@ -8,6 +8,31 @@ void check(bool condition,const char* message) {
 
 int main() {
     try {
+        const std::vector<std::string> names{"getId","Id","getTopUseThing","absent"};
+        auto* memory=static_cast<uint8_t*>(VirtualAlloc(nullptr,16384,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
+        check(memory!=nullptr,"synthetic image allocation failed");
+        std::memset(memory,0xF0,16384);
+        std::memcpy(memory+4093,"getId",6); // A token crosses the scanner's page boundary.
+        std::memcpy(memory+8190,"getTopUseThing",15);
+        std::memcpy(memory+12000,"prefixgetId",12); // Original search also accepts a suffix.
+        ModuleView image;
+        image.base=reinterpret_cast<uintptr_t>(memory); image.sizeOfImage=16384;
+        SectionInfo resource; resource.name=".rsrc"; resource.start=image.base;
+        resource.end=image.base+16384; resource.characteristics=IMAGE_SCN_MEM_READ;
+        image.sections.push_back(resource);
+        std::map<std::string,std::vector<uintptr_t>> expected;
+        for(const auto& name:names) expected[name]=FindStringAddresses(image,name);
+        BuildSemanticStringIndex(image,names);
+        for(const auto& name:names) check(FindStringAddresses(image,name)==expected[name],"batch search changed candidates or excluded resources");
+        check(image.semanticStringIndex.at("getId").size()==2,"overlap/suffix token missing");
+        check(image.semanticStringIndex.count("absent") && image.semanticStringIndex.at("absent").empty(),"missing token not cached");
+        VirtualFree(memory,0,MEM_RELEASE);
+        guided_discovery::TokenIndex gapIndex({"getId"});
+        size_t matches=0;
+        gapIndex.feed(reinterpret_cast<const uint8_t*>("get"),3,100,[&](size_t,uintptr_t){++matches;});
+        gapIndex.gap();
+        gapIndex.feed(reinterpret_cast<const uint8_t*>("Id"),3,200,[&](size_t,uintptr_t){++matches;});
+        check(matches==0,"unreadable gap fabricated token");
         guided_discovery::AsciiHints hints("light");
         const std::string a="WorldLi",b="ght\0other",c="LightGap";
         hints.feed(reinterpret_cast<const uint8_t*>(a.data()),a.size());
@@ -52,12 +77,19 @@ int main() {
         check(GuidedSavedObservations(evidence)==snapshots,"nested snapshots lost on resume");
         check(GuidedSavedObservations("{\"observations\":[{\"nested\":{}").empty(),"truncated JSON accepted");
         r.guidedEvidence["move"]=evidence;
+        r.guidedEvidence["setOutfit"]=GuidedMethodJson("0x4000:0x0/;",{},"not_tested_pending_contract");
         const auto saved=SaveJson(r);
         check(!saved.empty(),"profile save failed");
         value=crome::json::Parser(ReadWholeFile(saved)).parse();
         check(value.get("semanticBinds")->get("move")->get("candidates")->array().size()==3,"saved candidates lost");
         const auto resumed=ParseProfileFile(saved,r);
         check(resumed.exactBuild && resumed.guidedEvidence.at("move")==evidence,"resume lost guided observations");
+        check(resumed.guidedEvidence.count("setOutfit"),"non-baseline method lost on resume");
+        std::ostringstream printed;
+        auto* previousOutput=std::cout.rdbuf(printed.rdbuf());
+        PrintAllBindCandidates(bind);
+        std::cout.rdbuf(previousOutput);
+        check(printed.str().find("#3")!=std::string::npos && printed.str().find("[DUVIDA]")!=std::string::npos,"candidate display hides alternatives/ambiguity");
         r.fp.textHash++;
         check(!ParseProfileFile(saved,r).exactBuild,"different build inherited captures");
         r.fp.textHash--;

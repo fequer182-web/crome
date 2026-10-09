@@ -4,10 +4,68 @@
 #include <cctype>
 #include <cstdint>
 #include <set>
+#include <queue>
 #include <string>
 #include <vector>
 
 namespace guided_discovery {
+// One pass for all exact token+NUL patterns, including overlapping suffixes.
+// Completed transitions keep the work per input byte independent of token count.
+class TokenIndex {
+    struct Node {
+        std::array<int,256> next;
+        int failure=0;
+        std::vector<size_t> outputs;
+        Node() { next.fill(-1); }
+    };
+    std::vector<Node> nodes{1};
+    int state=0;
+public:
+    std::vector<std::string> patterns;
+    explicit TokenIndex(const std::vector<std::string>& tokens):patterns(tokens) {
+        for(size_t id=0;id<patterns.size();++id) {
+            int node=0;
+            auto pattern=patterns[id]; pattern.push_back(0);
+            for(unsigned char byte:pattern) {
+                int next=nodes[node].next[byte];
+                if(next<0) {
+                    next=static_cast<int>(nodes.size());
+                    nodes[node].next[byte]=next;
+                    nodes.emplace_back();
+                }
+                node=next;
+            }
+            nodes[node].outputs.push_back(id);
+        }
+        std::queue<int> pending;
+        for(int byte=0;byte<256;++byte) {
+            const int next=nodes[0].next[byte];
+            if(next<0) nodes[0].next[byte]=0;
+            else pending.push(next);
+        }
+        while(!pending.empty()) {
+            const int node=pending.front(); pending.pop();
+            for(int byte=0;byte<256;++byte) {
+                const int next=nodes[node].next[byte];
+                const int fallback=nodes[nodes[node].failure].next[byte];
+                if(next<0) nodes[node].next[byte]=fallback;
+                else {
+                    nodes[next].failure=fallback;
+                    nodes[next].outputs.insert(nodes[next].outputs.end(),nodes[fallback].outputs.begin(),nodes[fallback].outputs.end());
+                    pending.push(next);
+                }
+            }
+        }
+    }
+    void gap() { state=0; }
+    template<class Match> void feed(const uint8_t* bytes,size_t size,uintptr_t address,Match match) {
+        for(size_t i=0;i<size;++i) {
+            state=nodes[state].next[bytes[i]];
+            for(size_t id:nodes[state].outputs) match(id,address+i-patterns[id].size());
+        }
+    }
+};
+
 inline constexpr std::array<const char*,26> methods{
     "look","talkChannel","talk","move","use","useWith","attack","follow","autoWalk",
     "getTile","getCreatureById","getPosition","getThings","getThingCount",
@@ -41,7 +99,17 @@ inline const char* instruction(const std::string& method) {
         return "Abra um backpack/container; na segunda amostra, abra OUTRO container.";
     if(method=="getInventoryItem" || method=="getCount")
         return "Mova/equipe um item no inventario; na segunda amostra, use OUTRO item/quantidade.";
-    return "Ande/clique no mapa pelo cliente; na segunda amostra, use OUTRO destino.";
+    if(method=="autoWalk" || method=="getTile" || method=="getPosition" || method=="isWalkable" || method=="isPathable")
+        return "Ande/clique no mapa pelo cliente; na segunda amostra, use OUTRO destino.";
+    if(method.find("Light")!=std::string::npos || method.find("Lights")!=std::string::npos)
+        return "Altere a opcao de luz pela interface normal do cliente; repita com outro estado.";
+    if(method.find("Outfit")!=std::string::npos)
+        return "Altere o outfit pela interface normal do cliente; repita com outro outfit.";
+    if(method.find("HealthPercent")!=std::string::npos)
+        return "Observe uma criatura com HP cheio e depois ferida; faca isso pelo cliente normalmente.";
+    if(method.find("Direction")!=std::string::npos)
+        return "Vire o personagem normalmente; na segunda amostra, use outra direcao.";
+    return "Use a interface normal que consulta/altera este campo. Se nao souber como aciona-lo, pule; o metodo permanece pendente.";
 }
 
 // Streaming ASCII hints preserve strings across chunks but never across an
