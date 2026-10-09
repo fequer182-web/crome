@@ -1,3 +1,4 @@
+#include "../../common/PipeDiscoveryCatalog.hpp"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdint>
@@ -153,7 +154,7 @@ static bool GetFingerprint(Fingerprint& fp) {
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_base);
     if(dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
     auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
-    if(nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    if(nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64 || nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
     fp.timestamp = nt->FileHeader.TimeDateStamp;
     fp.sizeOfImage = nt->OptionalHeader.SizeOfImage;
     fp.entryPoint = nt->OptionalHeader.AddressOfEntryPoint;
@@ -163,7 +164,8 @@ static bool GetFingerprint(Fingerprint& fp) {
         char name[9]{}; memcpy(name, sec[i].Name, 8);
         if(std::string(name)==".text"){
             fp.textRva = sec[i].VirtualAddress;
-            fp.textSize = sec[i].Misc.VirtualSize;
+            // Match BuildExplorer's mapped .text fingerprint definition.
+            fp.textSize = std::max(sec[i].Misc.VirtualSize,sec[i].SizeOfRawData);
             if(fp.textRva + fp.textSize <= fp.sizeOfImage)
                 fp.textHash = Fnv1a64(reinterpret_cast<const uint8_t*>(g_base + fp.textRva), fp.textSize);
             break;
@@ -213,6 +215,45 @@ struct Profile {
     uintptr_t fnMapGetTile=0, fnMapGetCreatureById=0, fnMapGetCreatureByName=0, fnContainerGetItem=0;
 };
 
+
+static bool DiscoveryFingerprintMatches(const Profile& p) {
+    const auto cat=ExtractNamedObject(p.raw,"pipeDiscovery");
+    const auto fp=ExtractNamedObject(cat,"fingerprint");
+    return FlatJsonString(cat,"schema")==pipe_discovery::schema &&
+        FlatJsonString(cat,"architecture")=="x64" &&
+        pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(fp,"timestamp")),
+            ParseNum(FlatJsonString(fp,"sizeOfImage")),ParseNum(FlatJsonString(fp,"textHashFNV1A64")),
+            p.timestamp,p.sizeOfImage,p.textHash);
+}
+static uintptr_t DiscoveredRva(const Profile& p,const std::string& key) {
+    if(!DiscoveryFingerprintMatches(p)) return 0;
+    const auto obj=ExtractNamedObject(ExtractNamedObject(ExtractNamedObject(p.raw,"pipeDiscovery"),"functions"),key);
+    if(FlatJsonString(obj,"status")!="unique_bind_candidate") return 0;
+    const auto countKey=obj.find("\"candidateCount\"");
+    if(countKey==std::string::npos) return 0;
+    const auto colon=obj.find(':',countKey);
+    if(colon==std::string::npos) return 0;
+    try {
+        std::size_t used=0;
+        if(std::stoull(obj.substr(colon+1),&used)!=1) return 0;
+        const auto tail=obj.find_first_not_of(" \t\r\n",colon+1+used);
+        if(tail==std::string::npos || (obj[tail]!=',' && obj[tail]!='}')) return 0;
+    } catch(...) { return 0; }
+    const auto rva=ParseNum(FlatJsonString(obj,"rva"));
+    return rva && rva<p.sizeOfImage ? static_cast<uintptr_t>(rva) : 0;
+}
+static std::string ForcePassive(std::string obj) {
+    for(const char* field:{"callable","contractComplete","activeCallValidated"}) {
+        const std::string key=std::string("\"")+field+"\"";
+        const auto at=obj.find(key);
+        if(at==std::string::npos) { obj.insert(obj.find('{')+1,key+":false,"); continue; }
+        auto value=obj.find(':',at+key.size())+1;
+        while(value<obj.size() && std::isspace(static_cast<unsigned char>(obj[value]))) ++value;
+        if(obj.compare(value,4,"true")==0) obj.replace(value,4,"false");
+    }
+    return obj;
+}
+
 static Profile ParseProfile(const fs::path& path) {
     Profile p; p.path=path.string(); p.raw=ReadText(path);
     std::string m=ExtractNamedObject(p.raw,"migratorState"); if(m.empty()) m=p.raw;
@@ -228,6 +269,21 @@ static Profile ParseProfile(const fs::path& path) {
     p.fnGameAutoWalk=N("fnGameAutoWalk");p.fnLocalPlayerAutoWalk=N("fnLocalPlayerAutoWalk");p.fnGameAttack=N("fnGameAttack");p.fnGameFollow=N("fnGameFollow");
     p.fnGameLook=N("fnGameLook");p.fnGameDetailedLook=N("fnGameDetailedLook");p.fnGameMove=N("fnGameMove");p.fnGameUse=N("fnGameUse");p.fnGameUseWith=N("fnGameUseWith");p.fnGameTalk=N("fnGameTalk");
     p.fnMapGetTile=N("fnMapGetTile");p.fnMapGetCreatureById=N("fnMapGetCreatureById");p.fnMapGetCreatureByName=N("fnMapGetCreatureByName");p.fnContainerGetItem=N("fnContainerGetItem");
+    // Fresh discovery is mandatory. Legacy/reference RVAs cannot authorize captures.
+    p.fnGameAutoWalk=DiscoveredRva(p,"gameAutoWalk");
+    p.fnLocalPlayerAutoWalk=DiscoveredRva(p,"localPlayerAutoWalk");
+    p.fnGameAttack=DiscoveredRva(p,"gameAttack");
+    p.fnGameFollow=DiscoveredRva(p,"gameFollow");
+    p.fnGameLook=DiscoveredRva(p,"gameLook");
+    p.fnGameDetailedLook=DiscoveredRva(p,"gameDetailedLook");
+    p.fnGameMove=DiscoveredRva(p,"gameMove");
+    p.fnGameUse=DiscoveredRva(p,"gameUse");
+    p.fnGameUseWith=DiscoveredRva(p,"gameUseWith");
+    p.fnGameTalk=DiscoveredRva(p,"gameTalk");
+    p.fnMapGetTile=DiscoveredRva(p,"mapGetTile");
+    p.fnMapGetCreatureById=DiscoveredRva(p,"mapGetCreatureById");
+    p.fnMapGetCreatureByName=DiscoveredRva(p,"mapGetCreatureByName");
+    p.fnContainerGetItem=DiscoveredRva(p,"containerGetItem");
     return p;
 }
 
@@ -569,7 +625,7 @@ static std::string ResultJson(const AbiResult& r){
      <<"        \"callSiteWindow\": \""<<EscapeJson(r.callSiteWindow)<<"\",\n"
      <<"        \"callerProloguePrefix\": \""<<EscapeJson(r.callerProloguePrefix)<<"\",\n"
      <<"        \"callerCandidateReady\": "<<(r.callerCandidateReady?"true":"false")<<",\n"
-     <<"        \"callable\": "<<(r.callable?"true":"false")<<",\n"
+     <<"        \"callable\": "<<"false"<<",\n"
      <<"        \"notes\": \""<<EscapeJson(r.notes)<<"\",\n"
      <<"        \"capturesA\": "<<CaptureJson(r.a)<<",\n"
      <<"        \"capturesB\": "<<CaptureJson(r.b)<<"\n"
@@ -784,6 +840,21 @@ static AbiResult TestGameAutoWalk(const Profile& p){
     if(!CaptureTwo(r.rva,"Clique em um destino A 4-8 SQMs distante; ENTER quando iniciar...\n","Clique em um destino B diferente; ENTER quando iniciar...\n",r.a,r.b,3)){r.status="rva_not_observed_runtime";return r;}r.runtimeHit=!r.a.empty()||!r.b.empty();auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});r.naturalThreadId=ConsistentThread(r.a,r.b);r.status=r.runtimeHit?"captured_runtime_raw_autowalk":"rva_not_observed_runtime";r.notes="Game::autoWalk carries a non-trivial direction vector; V1.3 records natural calls/thread and preserves argument snapshots for the dedicated vector-layout stage.";return r;
 }
 
+
+static AbiResult TestTileReturnEntry(const Profile& p,const char* key,const char* name) {
+    AbiResult r; r.key=key; r.name=name; r.rva=DiscoveredRva(p,key); r.tested=true;
+    if(!r.rva) { r.status="discovery_required"; return r; }
+    if(!CaptureTwo(r.rva,"Arraste um item do chao normalmente no tile A; depois ENTER...\n",
+                         "Arraste outro item no tile B; depois ENTER...\n",r.a,r.b,2)) {
+        r.status="rva_not_observed_runtime"; return r;
+    }
+    r.runtimeHit=!r.a.empty() || !r.b.empty();
+    r.naturalThreadId=ConsistentThread(r.a,r.b);
+    r.status="captured_entry_return_pending";
+    r.notes="Passive x64 entry snapshots only. This/hidden return lowering, returned ThingPtr, same-tile membership and ownership balance must be measured before ABI promotion. The x86 ECX/RET4 contract is never imported.";
+    return r;
+}
+
 static std::string ExistingFunctionObject(const std::string& raw,const std::string& key){std::string abi=ExtractNamedObject(raw,"abiCatalog");std::string f=ExtractNamedObject(abi,"functions");return ExtractNamedObject(f,key);}
 
 static int StatusStrength(const std::string& s){
@@ -796,16 +867,24 @@ static int StatusStrength(const std::string& s){
 }
 
 static std::string BuildAbiCatalog(const Profile& p,const Fingerprint& fp,const std::map<std::string,AbiResult>& results){
-    const std::vector<std::string> keys={"gameAutoWalk","localPlayerAutoWalk","gameAttack","gameFollow","gameLook","gameDetailedLook","gameMove","gameUse","gameUseWith","gameTalk","mapGetTile","mapGetCreatureById","mapGetCreatureByName","containerGetItem"};
+    std::vector<std::string> keys;
+    for(const auto& spec:pipe_discovery::methods) keys.emplace_back(spec.key);
     std::ostringstream j;j<<"{\n    \"schema\": \"otclab-abi-catalog-v4\",\n    \"schemaVersion\": 4,\n    \"builder\": \"OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE\",\n    \"policy\": \"guided_runtime_autocalibration_with_natural_caller_resolution\",\n    \"fingerprint\": {\"timestamp\":\""<<Hex(fp.timestamp)<<"\",\"sizeOfImage\":\""<<Hex(fp.sizeOfImage)<<"\",\"textHashFNV1A64\":\""<<Hex(fp.textHash)<<"\"},\n    \"functions\": {\n";
     bool first=true;
     for(auto& key:keys){
-        auto it=results.find(key);std::string existing=ExistingFunctionObject(p.raw,key),obj=existing;
+        auto it=results.find(key);std::string existing=ExistingFunctionObject(p.raw,key),obj;
+        const auto discovered=DiscoveredRva(p,key);
+        const auto priorFp=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"fingerprint");
+        const bool sameEvidenceBuild=pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(priorFp,"timestamp")),ParseNum(FlatJsonString(priorFp,"sizeOfImage")),ParseNum(FlatJsonString(priorFp,"textHashFNV1A64")),fp.timestamp,fp.sizeOfImage,fp.textHash);
+        if(!sameEvidenceBuild || !discovered || ParseNum(FlatJsonString(existing,"rva"))!=discovered) existing.clear();
+        if(!existing.empty()) obj=ForcePassive(existing);
         if(it!=results.end()&&it->second.tested){
             std::string fresh=ResultJson(it->second), oldStatus=FlatJsonString(existing,"status");
             if(existing.empty() || StatusStrength(it->second.status)>=StatusStrength(oldStatus)) obj=fresh;
         }
-        if(obj.empty())continue;if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<obj;
+        if(obj.empty()) { AbiResult pending; pending.key=key; pending.name=key; pending.rva=discovered; pending.status=discovered?"abi_validation_required":"discovery_required"; pending.notes="Discovered address is a candidate only. Complete ABI, return/ownership, thread and active call validation remain required."; obj=ResultJson(pending); }
+        obj=ForcePassive(obj);
+        if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<obj;
     }
     j<<"\n    },\n    \"lastEvidenceSession\": {\n";
     first=true;for(auto& [key,r]:results){if(!r.tested)continue;if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<ResultJson(r);}j<<"\n    },\n";
@@ -833,14 +912,13 @@ static DWORD WINAPI MainThread(LPVOID){
     Fingerprint fp{};if(!GetFingerprint(fp)){std::cout<<"[STOP] Falha no fingerprint.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
     std::cout<<"Timestamp : "<<Hex(fp.timestamp)<<"\nSizeImage : "<<Hex(fp.sizeOfImage)<<"\nTextHash  : "<<Hex(fp.textHash)<<"\n";
     auto paths=FindProfiles();struct Cand{fs::path path;Profile p;int score;};std::vector<Cand> cs;
-    for(auto& x:paths){Profile p=ParseProfile(x);if(!p.timestamp||!p.sizeOfImage)continue;int s=0;if(p.timestamp==fp.timestamp)s+=4;if(p.sizeOfImage==fp.sizeOfImage)s+=4;if(p.textHash&&p.textHash==fp.textHash)s+=8;if(s>=8){s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
-    if(cs.empty()){std::cout<<"[STOP] Nenhum BuildProfile JSON com timestamp+SizeImage desta build foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
+    for(auto& x:paths){Profile p=ParseProfile(x);if(!p.timestamp||!p.sizeOfImage)continue;if(!pipe_discovery::exactFingerprint(p.timestamp,p.sizeOfImage,p.textHash,fp.timestamp,fp.sizeOfImage,fp.textHash) || !DiscoveryFingerprintMatches(p)) continue;int s=16;{s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
+    if(cs.empty()){std::cout<<"[STOP] Nenhum profile com fingerprint exata e pipeDiscovery atual foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
     std::sort(cs.begin(),cs.end(),[](auto&a,auto&b){return a.score>b.score;});
     std::cout<<"\nProfiles compatíveis:\n";for(size_t i=0;i<cs.size();++i)std::cout<<"  #"<<i<<" score="<<cs[i].score<<" "<<cs[i].path.string()<<"\n";
     size_t pick=0;if(cs.size()>1){if(cs[0].score>cs[1].score){std::cout<<"[AUTO PROFILE] Selecionado #0 por conter evidencias ABI mais fortes/mais novas.\n";}else{pick=AskU32("Escolha profile",0);if(pick>=cs.size())pick=0;}}Profile p=cs[pick].p;
-    bool hashMatch=!p.textHash||p.textHash==fp.textHash;
     std::cout<<"\n[PROFILE] "<<p.path<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
-    if(!hashMatch){std::cout<<"[WARN] Timestamp+SizeImage batem, mas hash .text difere. Vou cruzar os prologos conhecidos antes de continuar.\n";ProfileCrossCheck(p);if(!AskYes("Continuar com este profile apos o cross-check?",false)){FreeLibraryAndExitThread(g_self,0);}} else ProfileCrossCheck(p);
+    ProfileCrossCheck(p); // Diagnostic only; discovery and fingerprint gates remain mandatory.
     std::map<std::string,AbiResult> results;
     if(p.fnGameAttack&&AskYes("Testar ABI Game::attack com evidencias do profile?",true))results["gameAttack"]=TestAttackFollow(p,true);
     if(p.fnGameFollow&&AskYes("Testar ABI Game::follow com evidencias do profile?",true))results["gameFollow"]=TestAttackFollow(p,false);
@@ -851,6 +929,10 @@ static DWORD WINAPI MainThread(LPVOID){
     if(p.fnGameTalk&&AskYes("Testar ABI Game::talk?",false))results["gameTalk"]=TestTalk(p);
     if(p.fnLocalPlayerAutoWalk&&AskYes("Testar ABI LocalPlayer::autoWalk por CLICK-TO-WALK?",true))results["localPlayerAutoWalk"]=TestLocalPlayerAutoWalk(p);
     if(p.fnGameAutoWalk&&AskYes("Capturar cadeia Game::autoWalk por CLICK-TO-WALK?",false))results["gameAutoWalk"]=TestGameAutoWalk(p);
+    if(DiscoveredRva(p,"tileGetTopMoveThing") && AskYes("Capturar entrada Tile::getTopMoveThing (retorno permanece pendente)?",true))
+        results["tileGetTopMoveThing"]=TestTileReturnEntry(p,"tileGetTopMoveThing","Tile::getTopMoveThing");
+    if(DiscoveredRva(p,"tileGetTopUseThing") && AskYes("Capturar entrada Tile::getTopUseThing (retorno permanece pendente)?",false))
+        results["tileGetTopUseThing"]=TestTileReturnEntry(p,"tileGetTopUseThing","Tile::getTopUseThing");
     for(auto& [k,r]:results)FinalizeCallerEvidence(r);
     std::cout<<"\n============================================================\nABI SESSION SUMMARY\n============================================================\n";
     for(auto& [k,r]:results){

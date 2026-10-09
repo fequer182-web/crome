@@ -1,5 +1,7 @@
 # OTCLab ABI Builder V1.3 X64 — AutoCalibrator / Caller Evidence
 
+O padrão do pipe exige o JSON recém-gerado pelo BuildExplorer atualizado, com `pipeDiscovery` e fingerprint exata. Profiles legados sem esse catálogo não autorizam captura. Todas as funções continuam passivas (`callable=false`). Veja [fluxo e pendências](../PIPE_DISCOVERY.md).
+
 A V1.3 continua **100% passiva**: não chama funções internas. O jogador só produz ações reais no cliente e o Builder coleta e combina as evidências automaticamente.
 
 ## O que a V1.3 adiciona

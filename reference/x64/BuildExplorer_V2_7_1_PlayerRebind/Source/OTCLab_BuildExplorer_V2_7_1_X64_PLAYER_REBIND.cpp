@@ -1,3 +1,4 @@
+#include "../../common/PipeDiscoveryCatalog.hpp"
 #include <windows.h>
 
 #include <algorithm>
@@ -34130,6 +34131,64 @@ std::vector<V49BindHit> V49CollectBinds(
     return out;
 }
 
+
+std::string V49PipeDiscoveryJson(const BuildInfo& build) {
+    std::ostringstream j;
+    j << "{\"schema\":\"" << pipe_discovery::schema
+      << "\",\"architecture\":\"x64\",\"policy\":\"discover_current_build_then_validate_abi\","
+      << "\"fingerprint\":{\"timestamp\":\"" << HexU64(build.timestamp)
+      << "\",\"sizeOfImage\":\"" << HexU64(build.sizeOfImage)
+      << "\",\"textHashFNV1A64\":\"" << HexU64(build.textHash)
+      << "\"},\"pipeReady\":false,\"functions\":{";
+    const uintptr_t game=g_v49DirectState.gameObjectBaseRva ? g_exeBase+g_v49DirectState.gameObjectBaseRva : 0;
+    const uintptr_t map=g_v49DirectState.mapObjectRva ? g_exeBase+g_v49DirectState.mapObjectRva : 0;
+    bool first=true;
+    for(const auto& spec:pipe_discovery::methods) {
+        const uintptr_t hint=(spec.owner==pipe_discovery::Owner::Game || spec.owner==pipe_discovery::Owner::LocalPlayer) ? game :
+            (spec.owner==pipe_discovery::Owner::Map ? map : 0);
+        std::set<uintptr_t> candidates;
+        // Search the loaded executable every export. Reference RVAs are never
+        // copied into this catalog, even when legacy migrator fields exist.
+        const auto hits=V49CollectBinds(spec.token,hint);
+        for(const auto& hit:hits) {
+            if(!hit.fn || hit.fn<g_exeBase || hit.fn-g_exeBase>=build.sizeOfImage) continue;
+            if(spec.owner!=pipe_discovery::Owner::LocalPlayer && hint && hit.object!=hint && !hit.sawObjectHint) continue;
+            if((spec.owner==pipe_discovery::Owner::Game || spec.owner==pipe_discovery::Owner::Map) && !hint) continue;
+            if(spec.owner==pipe_discovery::Owner::LocalPlayer) {
+                if(!game || hit.object==game || hit.sawObjectHint) continue;
+                bool alsoGame=false;
+                for(const auto& other:hits)
+                    if(other.fn==hit.fn && (other.object==game || other.sawObjectHint)) alsoGame=true;
+                if(alsoGame) continue;
+            }
+            candidates.insert(hit.fn-g_exeBase);
+        }
+        const auto rva=pipe_discovery::uniqueCandidate(candidates);
+        if(!first) j << ",";
+        first=false;
+        j << "\"" << spec.key << "\":{\"semanticName\":\"" << spec.semantic
+          << "\",\"rva\":\"" << HexU64(rva)
+          << "\",\"status\":\"" << (rva?"unique_bind_candidate":(candidates.empty()?"discovery_required":"ambiguous_bind"))
+          << "\",\"candidateCount\":" << candidates.size()
+          << ",\"candidates\":[";
+        bool firstCandidate=true;
+        for(const auto candidate:candidates) {
+            if(!firstCandidate) j << ",";
+            firstCandidate=false;
+            j << "\"" << HexU64(candidate) << "\"";
+        }
+        j << "],\"machineAbiValidated\":false,\"threadValidated\":false,"
+          << "\"returnValidated\":false,\"ownershipValidated\":false,"
+          << "\"requiresOwnedReturnValidation\":" << (spec.ownedReturn?"true":"false")
+          << ",\"callable\":false}";
+        std::cout << "[PIPE DISCOVERY] " << spec.semantic << " "
+                  << (rva?HexU64(rva):"pending") << " candidates=" << candidates.size()
+                  << " callable=NO\n";
+    }
+    j << "}}";
+    return j.str();
+}
+
 uintptr_t V49FirstFunctionForToken(
     const std::string& token,
     uintptr_t objectHint,
@@ -36284,6 +36343,8 @@ bool BMSaveCompleteProfile(
                 : "partial"
         )
         << "\",\n";
+
+    j << "  \"pipeDiscovery\": " << V49PipeDiscoveryJson(build) << ",\n";
 
     V39WriteMigratorState(
         j,
