@@ -13,7 +13,7 @@ if not exist Build mkdir Build
 echo ============================================================
 echo    BUILD OTCLab ABI Builder V1.3 X64 AUTOCALIBRATOR CALLER EVIDENCE DLL
 echo ============================================================
-"%CXX%" -std=c++20 -O2 -Wall -Wextra -shared -static-libgcc -static-libstdc++ ^
+"%CXX%" -std=c++20 -O2 -Wall -Wextra -shared -static -static-libgcc -static-libstdc++ ^
   Source\OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE.cpp ^
   -o Build\OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE.dll
 if errorlevel 1 (
@@ -34,3 +34,4 @@ echo - IDs nao precisam ser digitados nos testes Look/Move/Use/UseWith.
 echo - V1.3 preserva temporarios e grava automaticamente CALL site/caller natural no JSON.
 echo - callable permanece FALSE; esta versao continua 100%% passiva.
 pause
+

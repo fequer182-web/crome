@@ -17,6 +17,7 @@
 #include <iterator>
 #include <cctype>
 #include <filesystem>
+#include <streambuf>
 
 static_assert(sizeof(void*) == 8, "OTCLab ABI Builder V1.3 is x64-only");
 
@@ -25,6 +26,77 @@ namespace fs = std::filesystem;
 static HMODULE g_self = nullptr;
 static uintptr_t g_base = 0;
 static size_t g_imageSize = 0;
+static HANDLE g_startupLog = INVALID_HANDLE_VALUE;
+
+static void LogStage(const char* stage) {
+    if(g_startupLog==INVALID_HANDLE_VALUE) return;
+    SYSTEMTIME now{}; GetLocalTime(&now);
+    char line[512]{};
+    const int n=snprintf(line,sizeof(line),"[%02u:%02u:%02u] PID=%lu %s\r\n",
+        now.wHour,now.wMinute,now.wSecond,GetCurrentProcessId(),stage);
+    if(n>0){DWORD written=0;WriteFile(g_startupLog,line,static_cast<DWORD>(std::min(n,511)),&written,nullptr);FlushFileBuffers(g_startupLog);}
+}
+
+static void OpenStartupLog() {
+    wchar_t path[32768]{};
+    DWORD n=GetModuleFileNameW(g_self,path,32768);
+    if(!n||n>=32768) return;
+    wchar_t* slash=wcsrchr(path,L'\\'); if(!slash) return;
+    const wchar_t name[]=L"ABIBuilderStartup.log";
+    if(static_cast<size_t>(slash-path)+1+std::size(name)>32768) return;
+    memcpy(slash+1,name,sizeof(name));
+    g_startupLog=CreateFileW(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,
+        nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    LogStage("worker_entered; build=isolated_console_v1");
+}
+
+// Use owned Win32 console handles. freopen(stdout/stderr/stdin) also changes
+// the shared CRT streams used by the injected host and other loaded tools.
+class ConsoleOutputBuffer : public std::streambuf {
+    HANDLE handle_;
+protected:
+    std::streamsize xsputn(const char* s,std::streamsize n) override {
+        DWORD written=0;
+        if(n<=0) return 0;
+        if(g_startupLog!=INVALID_HANDLE_VALUE){DWORD logged=0;WriteFile(g_startupLog,s,static_cast<DWORD>(n),&logged,nullptr);}
+        return WriteFile(handle_,s,static_cast<DWORD>(n),&written,nullptr)?written:0;
+    }
+    int_type overflow(int_type ch) override {
+        if(traits_type::eq_int_type(ch,traits_type::eof())) return traits_type::not_eof(ch);
+        char c=traits_type::to_char_type(ch);
+        return xsputn(&c,1)==1?ch:traits_type::eof();
+    }
+public:
+    explicit ConsoleOutputBuffer(HANDLE handle):handle_(handle){}
+};
+
+class ConsoleInputBuffer : public std::streambuf {
+    HANDLE handle_; char bytes_[256]{};
+protected:
+    int_type underflow() override {
+        if(gptr()&&gptr()<egptr()) return traits_type::to_int_type(*gptr());
+        for(;;){
+            DWORD read=0;
+            if(!ReadFile(handle_,bytes_,sizeof(bytes_),&read,nullptr)||!read) return traits_type::eof();
+            // Match CRT text mode so ENTER preserves the guided default.
+            DWORD kept=0;for(DWORD i=0;i<read;++i)if(bytes_[i]!='\r')bytes_[kept++]=bytes_[i];
+            if(!kept)continue;
+            setg(bytes_,bytes_,bytes_+kept);
+            return traits_type::to_int_type(*gptr());
+        }
+    }
+public:
+    explicit ConsoleInputBuffer(HANDLE handle):handle_(handle){}
+};
+
+class ScopedConsoleStreams {
+    ConsoleInputBuffer input_; ConsoleOutputBuffer output_;
+    std::streambuf *oldIn_,*oldOut_,*oldErr_;
+public:
+    ScopedConsoleStreams(HANDLE input,HANDLE output):input_(input),output_(output),
+        oldIn_(std::cin.rdbuf(&input_)),oldOut_(std::cout.rdbuf(&output_)),oldErr_(std::cerr.rdbuf(&output_)){}
+    ~ScopedConsoleStreams(){std::cin.rdbuf(oldIn_);std::cout.rdbuf(oldOut_);std::cerr.rdbuf(oldErr_);}
+};
 
 static std::string Hex(uint64_t v) {
     std::ostringstream s; s << "0x" << std::uppercase << std::hex << v; return s.str();
@@ -906,19 +978,23 @@ static void ProfileCrossCheck(const Profile& p){
     struct E{const char* n;uintptr_t r;const std::string* s;};std::vector<E> v={{"attack",p.fnGameAttack,&p.sigGameAttack},{"follow",p.fnGameFollow,&p.sigGameFollow},{"look",p.fnGameLook,&p.sigGameLook},{"move",p.fnGameMove,&p.sigGameMove},{"use",p.fnGameUse,&p.sigGameUse},{"useWith",p.fnGameUseWith,&p.sigGameUseWith},{"autoWalk",p.fnGameAutoWalk,&p.sigGameAutoWalk},{"lpAutoWalk",p.fnLocalPlayerAutoWalk,&p.sigLocalPlayerAutoWalk}};int checked=0,ok=0;std::cout<<"[PROFILE CROSS-CHECK] function prologue prefixes:\n";for(auto&e:v){if(!e.r||e.s->empty())continue;++checked;bool m=MatchSignaturePrefix(e.r,*e.s);if(m)++ok;std::cout<<"  "<<e.n<<" @ "<<Hex(e.r)<<" : "<<(m?"MATCH":"DIFF")<<"\n";}std::cout<<"[PROFILE CROSS-CHECK] matched "<<ok<<"/"<<checked<<" known function prefixes.\n";
 }
 
-static DWORD WINAPI MainThread(LPVOID){
-    AllocConsole();FILE* f=nullptr;f=freopen("CONOUT$","w",stdout);f=freopen("CONOUT$","w",stderr);f=freopen("CONIN$","r",stdin);SetConsoleTitleA("OTCLab ABI Builder V1.3 X64");
+static void RunAbiSession(){
+    LogStage("session_start; no_breakpoint_installed");
     std::cout<<"============================================================\n       OTCLab ABI Builder V1.3 X64 - AUTOCALIBRATOR / CALLER EVIDENCE\n============================================================\nRecebe o BuildProfile pronto e reutiliza Game/Target/Item/Look/Position/RVAs como evidencias.\nO usuario gera somente a acao real no jogo; IDs e ponteiros sao lidos automaticamente quando possivel.\nNao chama funcoes internas nesta versao. INT3+VEH sao temporarios e reversiveis.\nEvidencia fraca nunca sobrescreve uma evidencia anterior mais forte.\nO jogador apenas executa a acao real; CALL site/caller sao descobertos automaticamente e gravados no JSON.\nV1.3 preserva snapshots e resolve automaticamente return RVA, CALL site e funcao caller natural via .pdata.\n============================================================\n";
-    Fingerprint fp{};if(!GetFingerprint(fp)){std::cout<<"[STOP] Falha no fingerprint.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
+    LogStage("fingerprint_begin");
+    Fingerprint fp{};if(!GetFingerprint(fp)){std::cout<<"[STOP] Falha no fingerprint.\n";Wait("ENTER...");return;}
     std::cout<<"Timestamp : "<<Hex(fp.timestamp)<<"\nSizeImage : "<<Hex(fp.sizeOfImage)<<"\nTextHash  : "<<Hex(fp.textHash)<<"\n";
-    auto paths=FindProfiles();struct Cand{fs::path path;Profile p;int score;};std::vector<Cand> cs;
-    for(auto& x:paths){Profile p=ParseProfile(x);if(!p.timestamp||!p.sizeOfImage)continue;if(!pipe_discovery::exactFingerprint(p.timestamp,p.sizeOfImage,p.textHash,fp.timestamp,fp.sizeOfImage,fp.textHash) || !DiscoveryFingerprintMatches(p)) continue;int s=16;{s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
-    if(cs.empty()){std::cout<<"[STOP] Nenhum profile com fingerprint exata e pipeDiscovery atual foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
+    LogStage("fingerprint_ok; profile_search_begin");
+    auto paths=FindProfiles();LogStage("profile_search_done");struct Cand{fs::path path;Profile p;int score;};std::vector<Cand> cs;
+    for(auto& x:paths){LogStage("profile_parse_begin");Profile p=ParseProfile(x);LogStage("profile_parse_done");if(!p.timestamp||!p.sizeOfImage)continue;if(!pipe_discovery::exactFingerprint(p.timestamp,p.sizeOfImage,p.textHash,fp.timestamp,fp.sizeOfImage,fp.textHash) || !DiscoveryFingerprintMatches(p)) continue;int s=16;{s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
+    if(cs.empty()){std::cout<<"[STOP] Nenhum profile com fingerprint exata e pipeDiscovery atual foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");return;}
     std::sort(cs.begin(),cs.end(),[](auto&a,auto&b){return a.score>b.score;});
     std::cout<<"\nProfiles compatíveis:\n";for(size_t i=0;i<cs.size();++i)std::cout<<"  #"<<i<<" score="<<cs[i].score<<" "<<cs[i].path.string()<<"\n";
     size_t pick=0;if(cs.size()>1){if(cs[0].score>cs[1].score){std::cout<<"[AUTO PROFILE] Selecionado #0 por conter evidencias ABI mais fortes/mais novas.\n";}else{pick=AskU32("Escolha profile",0);if(pick>=cs.size())pick=0;}}Profile p=cs[pick].p;
     std::cout<<"\n[PROFILE] "<<p.path<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
+    LogStage("profile_selected; prologue_cross_check_begin");
     ProfileCrossCheck(p); // Diagnostic only; discovery and fingerprint gates remain mandatory.
+    LogStage("initialization_complete; waiting_for_user; no_breakpoint_installed");
     std::map<std::string,AbiResult> results;
     if(p.fnGameAttack&&AskYes("Testar ABI Game::attack com evidencias do profile?",true))results["gameAttack"]=TestAttackFollow(p,true);
     if(p.fnGameFollow&&AskYes("Testar ABI Game::follow com evidencias do profile?",true))results["gameFollow"]=TestAttackFollow(p,false);
@@ -946,7 +1022,41 @@ static DWORD WINAPI MainThread(LPVOID){
     }
     if(SaveProfile(p,fp,results))std::cout<<"\n[SAVE][OK] ABI catalog gravado no MESMO JSON:\n"<<p.path<<"\nBackup preservado: "<<p.path<<".pre_abi.bak.json\n";else std::cout<<"\n[SAVE][FAIL] Nao consegui atualizar JSON.\n";
     std::cout<<"\nIMPORTANTE: V1.3 resolve automaticamente CALL site e funcao caller natural a partir do return address de cada acao real. callerCandidateReady exige ABI + thread + mesmo CALL site observado nos dois estimulos. callable continua FALSE; nenhuma chamada interna ativa e executada nesta versao.\n";
-    Wait("ENTER para descarregar ABI Builder...\n");FreeLibraryAndExitThread(g_self,0);return 0;
+    Wait("ENTER para descarregar ABI Builder...\n");
+}
+
+static DWORD WINAPI MainThread(LPVOID){
+    OpenStartupLog();
+    HANDLE input=INVALID_HANDLE_VALUE,output=INVALID_HANDLE_VALUE;
+    bool ownsConsole=false;
+    try {
+        LogStage("console_attach_begin");
+        ownsConsole=AllocConsole()!=FALSE;
+        output=CreateFileW(L"CONOUT$",GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        input=CreateFileW(L"CONIN$",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        if(input==INVALID_HANDLE_VALUE||output==INVALID_HANDLE_VALUE){
+            LogStage("console_open_failed; session_aborted_without_hooks");
+        }else{
+            ScopedConsoleStreams streams(input,output);
+            LogStage("console_ready; shared_CRT_stdio_unchanged");
+            if(ownsConsole)SetConsoleTitleA("OTCLab ABI Builder V1.3 X64 - Startup Diagnostic");
+            RunAbiSession();
+        }
+    }catch(const std::exception& e){LogStage("session_exception");LogStage(e.what());}
+    catch(...){LogStage("session_unknown_cpp_exception");}
+    // Do not unload code while a capture is still armed.
+    if(InterlockedCompareExchange(&g_bp.installed,0,0)){
+        LogStage("capture_still_installed; DLL_retained_to_avoid_unsafe_unload");
+        return 0;
+    }
+    if(input!=INVALID_HANDLE_VALUE)CloseHandle(input);
+    if(output!=INVALID_HANDLE_VALUE)CloseHandle(output);
+    if(ownsConsole)FreeConsole();
+    LogStage("session_finished; unloading");
+    if(g_startupLog!=INVALID_HANDLE_VALUE){CloseHandle(g_startupLog);g_startupLog=INVALID_HANDLE_VALUE;}
+    FreeLibraryAndExitThread(g_self,0);
+    return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){g_self=h;DisableThreadLibraryCalls(h);HANDLE t=CreateThread(nullptr,0,MainThread,nullptr,0,nullptr);if(t)CloseHandle(t);}return TRUE;}
+

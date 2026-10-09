@@ -24,15 +24,26 @@ Tudo é gravado no `abiCatalog` schema v4 do mesmo JSON.
 
 ## Uso
 
-1. Copie para `profiles\` o JSON mais novo salvo pela V1.2. Isso é recomendado porque ele já contém as evidências que você acabou de coletar.
+1. Copie para `profiles\` o JSON mais novo salvo pelo BuildExplorer atualizado, contendo `pipeDiscovery` e a fingerprint exata do cliente.
 2. Rode `build.bat`.
 3. Injete `Build\OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE.dll`.
 4. Faça as ações pedidas normalmente.
 5. No resumo, procure linhas como `caller site -> 0x... validated=YES`.
 6. Envie o console completo e o JSON atualizado.
 
-Se você não copiar o JSON atualizado, os profiles de referência continuam permitindo uma nova calibração, mas você perde a vantagem de carregar as evidências V1.2 já salvas.
+Profiles antigos sem o catálogo de descoberta atual são recusados. Evidências ABI anteriores só são preservadas com a mesma fingerprint e o mesmo RVA redescoberto.
+
+## Diagnóstico de fechamento ao injetar
+
+A DLL grava `ABIBuilderStartup.log` ao lado dela assim que a thread de trabalho inicia. O arquivo inclui etapas da inicialização e uma cópia do console. A ausência do arquivo pode significar falha antes dessa thread ou falta de permissão de escrita; não prova uma causa específica.
+
+O console usa handles próprios do Windows, sem `freopen` e sem alterar `stdin`, `stdout`, `stderr` ou os handles padrão do cliente. Seus buffers C++ são restaurados antes de descarregar. O build também incorpora a dependência de threads do compilador, evitando carregar `libwinpthread-1.dll` do cliente ou do injector.
+
+Para testar, abra uma sessão nova do Olders, sem Crome/BuildExplorer/outras probes carregadas, e injete somente esta ABIBuilder. Primeiro confirme que o console chega à pergunta inicial. Se fechar, envie as últimas linhas do log. Compilação e testes locais não confirmam a resolução de um crash no cliente real.
+
+Os testes `tests/StartupIoTests.cpp` verificam leitura/escrita guiada, preservação dos streams do host, restauração dos buffers inclusive após exceção e ausência de breakpoint na inicialização. As funções permanecem `callable=false`.
 
 ## Próximo estágio
 
 Depois de CALL site/caller estáveis, o estágio seguinte pode aprender **como o caller constrói cada argumento antes do CALL**, ainda passivamente, e persistir essas fontes no JSON para automatizar migrações entre builds.
+
