@@ -27,6 +27,7 @@
 #include "core/readers/ProfileBackedPlayerReader.hpp"
 #include "core/profile/Capabilities.hpp"
 #include "modules/support/RamoniaSpearPickup.hpp"
+#include "modules/cavebot/RamoniaToolTileCycle.hpp"
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -127,6 +128,7 @@ struct RamoniaRuneConfigUi {
 };
 
 struct RamoniaCaveNodeUi {
+    std::uint32_t targetItemId{};
     std::string type;
     std::uint32_t x{};
     std::uint32_t y{};
@@ -196,6 +198,7 @@ static std::atomic<bool> g_ramoniaWorkerRun{true};
 static std::atomic<bool> g_ramoniaBridgeReady{false};
 static std::atomic<bool> g_ramoniaWalkReady{false};
 static std::atomic<bool> g_ramoniaSpearReady{false};
+static std::atomic<bool> g_ramoniaToolTileReady{false};
 static std::atomic<int> g_ramoniaBridgeVersion{0};
 static std::atomic<DWORD> g_ramoniaPid{0};
 static std::mutex g_ramoniaMutex;
@@ -1466,41 +1469,34 @@ static void RunRamoniaCaveCycle(
     }
 
     if (isToolUseNode) {
-        if (!node.itemId || node.itemId>0xFFFFu) {
-            SetRamoniaCaveStatus(
-                "Cavebot: " + node.type + " Item ID invalido");
+        if (!g_ramoniaToolTileReady.load()) {
+            SetRamoniaCaveStatus("Cavebot: rope/shovel aguardando bridge atualizada");
             return;
         }
-
-        nlohmann::json actionResponse;
-        const bool used=
-            RamoniaPipeRequest(
-                pid,
-                {{"cmd","USE_WITH_TILE_AT"},
-                 {"toolItemId",node.itemId},
-                 {"x",node.x},
-                 {"y",node.y},
-                 {"z",node.z}},
-                actionResponse) &&
-            actionResponse.value("ok",false);
-
-        if (used) {
+        const auto result=crome::RunRamoniaToolTileCycle(
+            node.itemId,node.targetItemId,node.x,node.y,node.z,
+            [&](const nlohmann::json& command,nlohmann::json& response) {
+                return RamoniaPipeRequest(pid,command,response);
+            });
+        if (result.moved) {
             SetRamoniaCaveStatus(
-                "Cavebot: " + node.type +
-                " OK #" + std::to_string(state.index));
+                "Cavebot: " + node.type + " retirou bloqueador " +
+                std::to_string(result.blockerId) + " #" +
+                std::to_string(state.index));
+            state.nextActionMs=static_cast<std::uint64_t>(GetTickCount64())+
+                std::max<std::uint32_t>(500u,cfg.retryDelayMs);
+        } else if (result.used) {
+            SetRamoniaCaveStatus(
+                "Cavebot: " + node.type + " OK #" +
+                std::to_string(state.index));
             AdvanceRamoniaCaveNode(cfg,state);
         } else {
-            const auto error=
-                actionResponse.is_object()
-                    ? actionResponse.value(
-                        "error",
-                        actionResponse.value(
-                            "result",
-                            std::string("usewith_failed")))
-                    : std::string("pipe_failed");
             SetRamoniaCaveStatus(
-                "Cavebot: " + node.type + " " + error);
-            state.nextActionMs=nowMs+650;
+                result.error=="target_item_id_required"
+                    ? "Cavebot: configure Alvo no chao no waypoint " + node.type
+                    : "Cavebot: " + node.type + " " + result.error);
+            state.nextActionMs=static_cast<std::uint64_t>(GetTickCount64())+
+                std::max<std::uint32_t>(650u,cfg.retryDelayMs);
         }
         return;
     }
@@ -1575,6 +1571,7 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeReady.store(false);
             g_ramoniaWalkReady.store(false);
             g_ramoniaSpearReady.store(false);
+            g_ramoniaToolTileReady.store(false);
             g_ramoniaBridgeVersion.store(0);
             nextFoodAttemptMs = 0;
             nextSpearAttemptMs = 0;
@@ -1611,6 +1608,7 @@ static void RamoniaTargetWorker() {
             g_ramoniaBridgeReady.store(false);
             g_ramoniaWalkReady.store(false);
             g_ramoniaSpearReady.store(false);
+            g_ramoniaToolTileReady.store(false);
             g_ramoniaBridgeVersion.store(
                 hello.is_object() ? hello.value("bridgeVersion",0) : 0);
             nextFoodAttemptMs = 0;
@@ -1642,6 +1640,7 @@ static void RamoniaTargetWorker() {
         g_ramoniaBridgeReady.store(true);
         g_ramoniaBridgeVersion.store(bridgeVersion);
         g_ramoniaSpearReady.store(hello.value("spearPickupReady",false));
+        g_ramoniaToolTileReady.store(hello.value("toolTileUncoverReady",false));
         g_ramoniaWalkReady.store(
             bridgeVersion>=33 && hello.value("walkReady",false));
 
@@ -3320,8 +3319,12 @@ static void DrawRune(const Theme& t) {
     CardEnd();
 }
 
-static bool ParseWaypointLine(const std::string& line, int& type, int& x, int& y, int& z, int& item, int& delay, std::string& text) {
+static bool ParseWaypointLine(const std::string& line, int& type, int& x, int& y, int& z, int& item, int& delay, std::string& text, int* targetId=nullptr) {
     x=y=z=item=0; delay=1000; text.clear();
+    if (targetId) *targetId=0;
+    int groundTarget{};
+    if (std::sscanf(line.c_str(),"Rope %d @ %d, %d, %d target %d",&item,&x,&y,&z,&groundTarget)==5) { type=3; if(targetId) *targetId=groundTarget; return true; }
+    if (std::sscanf(line.c_str(),"Shovel %d @ %d, %d, %d target %d",&item,&x,&y,&z,&groundTarget)==5) { type=4; if(targetId) *targetId=groundTarget; return true; }
     if (std::sscanf(line.c_str(),"Walk %d, %d, %d",&x,&y,&z)==3) { type=0; return true; }
     if (std::sscanf(line.c_str(),"Stand %d, %d, %d",&x,&y,&z)==3) { type=1; return true; }
     if (std::sscanf(line.c_str(),"Use %d @ %d, %d, %d",&item,&x,&y,&z)==4) { type=2; return true; }
@@ -3335,11 +3338,12 @@ static bool ParseWaypointLine(const std::string& line, int& type, int& x, int& y
     return false;
 }
 
-static std::string BuildWaypointLine(int type,int x,int y,int z,int item,int delay,const char* text) {
+static std::string BuildWaypointLine(int type,int x,int y,int z,int item,int delay,const char* text,int targetId=0) {
     const char* names[]={"Walk","Stand","Use","Rope","Shovel","Ladder","Hole","Say","Wait"};
     char b[224]{};
     if(type==7) std::snprintf(b,sizeof(b),"Say %s",text?text:"");
     else if(type==8) std::snprintf(b,sizeof(b),"Wait %d ms",delay);
+    else if((type==3 || type==4) && targetId>0) std::snprintf(b,sizeof(b),"%s %d @ %d, %d, %d target %d",names[type],item,x,y,z,targetId);
     else if(type>=2 && type<=6) std::snprintf(b,sizeof(b),"%s %d @ %d, %d, %d",names[type],item,x,y,z);
     else std::snprintf(b,sizeof(b),"%s %d, %d, %d",names[type],x,y,z);
     return b;
@@ -3352,6 +3356,7 @@ static void DrawCavebot(const Theme& t) {
     static std::vector<std::string> wps;
     static RamoniaPositionUi recordLast{};
     static char monsters[160]="";
+    static int editTargetId=0,addTargetId=0;
     static int editType=0,editItemId=0,editDelay=1000,editX=0,editY=0,editZ=0;
     static char editText[96]="";
     static int addType=0,addItemId=0,addDelay=1000,addX=0,addY=0,addZ=0;
@@ -3373,8 +3378,8 @@ static void DrawCavebot(const Theme& t) {
                     if(type=="walk") line=BuildWaypointLine(0,x,y,z,0,0,"");
                     else if(type=="stand") line=BuildWaypointLine(1,x,y,z,0,0,"");
                     else if(type=="use") line=BuildWaypointLine(2,x,y,z,item,0,"");
-                    else if(type=="rope") line=BuildWaypointLine(3,x,y,z,item,0,"");
-                    else if(type=="shovel") line=BuildWaypointLine(4,x,y,z,item,0,"");
+                    else if(type=="rope") line=BuildWaypointLine(3,x,y,z,item,0,"",n.value("target_item_id",0));
+                    else if(type=="shovel") line=BuildWaypointLine(4,x,y,z,item,0,"",n.value("target_item_id",0));
                     else if(type=="ladder") line=BuildWaypointLine(5,x,y,z,item,0,"");
                     else if(type=="use_with_ground") line=BuildWaypointLine(6,x,y,z,item,0,"");
                     else if(type=="say") { const auto s=n.value("text",std::string()); line=BuildWaypointLine(7,0,0,0,0,0,s.c_str()); }
@@ -3503,7 +3508,7 @@ static void DrawCavebot(const Theme& t) {
     if(ImGui::Button("Edit",ImVec2(40,18)) &&
        selected>=0 && selected<(int)wps.size()){
         std::string txt;
-        if(ParseWaypointLine(wps[selected],editType,editX,editY,editZ,editItemId,editDelay,txt)){
+        if(ParseWaypointLine(wps[selected],editType,editX,editY,editZ,editItemId,editDelay,txt,&editTargetId)){
             std::snprintf(editText,sizeof(editText),"%s",txt.c_str());
             ImGui::OpenPopup("Edit waypoint");
         }
@@ -3563,9 +3568,10 @@ static void DrawCavebot(const Theme& t) {
         ImGui::SetNextItemWidth(150);ImGui::Combo("Type",&addType,addTypes,IM_ARRAYSIZE(addTypes));
         SmallInt("X",&addX,90);ImGui::SameLine();SmallInt("Y",&addY,90);ImGui::SameLine();SmallInt("Z",&addZ,60);
         if(addType>=2&&addType<=6){if(addItemId==0){if(addType==3)addItemId=CatalogFirst("rope",3003);else if(addType==4)addItemId=CatalogFirst("shovel",3457);else if(addType==5)addItemId=CatalogFirst("ladder",0);}SmallInt("Item ID",&addItemId,110);}
+        if(addType==3 || addType==4) SmallInt("Alvo no chao",&addTargetId,110);
         if(addType==7){ImGui::SetNextItemWidth(260);ImGui::InputText("Text",addText,sizeof(addText));}
         if(addType==8)SmallInt("Delay ms",&addDelay,110);
-        if(ImGui::Button("Add node",ImVec2(100,22))){wps.push_back(BuildWaypointLine(addType,addX,addY,addZ,addItemId,addDelay,addText));ImGui::CloseCurrentPopup();}
+        if(ImGui::Button("Add node",ImVec2(100,22))){wps.push_back(BuildWaypointLine(addType,addX,addY,addZ,addItemId,addDelay,addText,addTargetId));ImGui::CloseCurrentPopup();}
         ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(80,22)))ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -3574,9 +3580,10 @@ static void DrawCavebot(const Theme& t) {
         ImGui::SetNextItemWidth(150);ImGui::Combo("Type",&editType,addTypes,IM_ARRAYSIZE(addTypes));
         SmallInt("X",&editX,90);ImGui::SameLine();SmallInt("Y",&editY,90);ImGui::SameLine();SmallInt("Z",&editZ,60);
         if(editType>=2&&editType<=6)SmallInt("Item ID",&editItemId,110);
+        if(editType==3 || editType==4) SmallInt("Alvo no chao",&editTargetId,110);
         if(editType==7){ImGui::SetNextItemWidth(260);ImGui::InputText("Text",editText,sizeof(editText));}
         if(editType==8)SmallInt("Delay ms",&editDelay,110);
-        if(ImGui::Button("Salvar",ImVec2(100,22))&&selected>=0&&selected<(int)wps.size()){wps[selected]=BuildWaypointLine(editType,editX,editY,editZ,editItemId,editDelay,editText);ImGui::CloseCurrentPopup();}
+        if(ImGui::Button("Salvar",ImVec2(100,22))&&selected>=0&&selected<(int)wps.size()){wps[selected]=BuildWaypointLine(editType,editX,editY,editZ,editItemId,editDelay,editText,editTargetId);ImGui::CloseCurrentPopup();}
         ImGui::SameLine();if(ImGui::Button("Cancelar",ImVec2(80,22)))ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -3690,6 +3697,11 @@ static void DrawCavebot(const Theme& t) {
             rcfg["waypoints"].push_back({
                 {"type","rope"},{"item_id",item},
                 {"x",x},{"y",y},{"z",z}});
+            int targetItemId=0;
+            std::sscanf(line.c_str(),"Rope %d @ %d, %d, %d target %d",
+                        &item,&x,&y,&z,&targetItemId);
+            node.targetItemId=static_cast<std::uint32_t>(std::max(0,targetItemId));
+            rcfg["waypoints"].back()["target_item_id"]=node.targetItemId;
             node.type="rope";
             node.itemId=static_cast<std::uint32_t>(std::max(0,item));
             node.x=static_cast<std::uint32_t>(std::max(0,x));
@@ -3702,6 +3714,11 @@ static void DrawCavebot(const Theme& t) {
             rcfg["waypoints"].push_back({
                 {"type","shovel"},{"item_id",item},
                 {"x",x},{"y",y},{"z",z}});
+            int targetItemId=0;
+            std::sscanf(line.c_str(),"Shovel %d @ %d, %d, %d target %d",
+                        &item,&x,&y,&z,&targetItemId);
+            node.targetItemId=static_cast<std::uint32_t>(std::max(0,targetItemId));
+            rcfg["waypoints"].back()["target_item_id"]=node.targetItemId;
             node.type="shovel";
             node.itemId=static_cast<std::uint32_t>(std::max(0,item));
             node.x=static_cast<std::uint32_t>(std::max(0,x));

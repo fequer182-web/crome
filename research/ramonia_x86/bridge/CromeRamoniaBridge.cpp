@@ -59,7 +59,8 @@ enum PendingActionKind : LONG {
     PendingMoveTileToGround = 9,
     PendingTopMoveRead = 10,
     PendingUncoverTile = 11,
-    PendingPickupTopMove = 12
+    PendingPickupTopMove = 12,
+    PendingUseWithExposedTile = 13
 };
 
 volatile LONG g_lastActionCode{};
@@ -4389,6 +4390,58 @@ bool executePickupTopMoveOnGameThread() {
     return true;
 }
 
+
+std::uint32_t g_pendingExposedUseX{},g_pendingExposedUseY{};
+std::uint8_t g_pendingExposedUseZ{};
+
+bool executeUseWithExposedTileOnGameThread() {
+    InterlockedExchange(&g_lastActionCode,0);
+    auto fail=[](LONG code) {
+        InterlockedExchange(&g_lastActionCode,code);
+        return false;
+    };
+    if (!g_profile || !g_buildMatched) return fail(5);
+    const auto& p=*g_profile;
+    const auto tile=g_pendingUseWithTargetTile;
+    const auto target=g_pendingUseWithTargetItem;
+    if (!p.itemContractReady || !p.tileThingsRuntimeConfirmed ||
+        p.getTopMoveThingMethodRva!=0x197AD0u ||
+        !exactObjectVtable(tile,p.tileVtableRva))
+        return fail(60);
+    std::vector<std::uintptr_t> things;
+    bool containsPlayer=false;
+    if (!readStableTileThings(tile,things,containsPlayer) ||
+        std::find(things.begin(),things.end(),target)==things.end() ||
+        !exactObjectVtable(target,p.itemVtableRva))
+        return fail(61);
+    std::uint16_t targetId{};
+    std::uint32_t ix{},iy{},px{},py{};
+    std::uint8_t iz{},pz{};
+    if (!safeRead(target+p.itemIdOffset,targetId) ||
+        targetId!=g_pendingUseWithTargetItemId ||
+        !safeRead(target+p.posX,ix) || !safeRead(target+p.posY,iy) ||
+        !safeRead(target+p.posZ,iz) ||
+        ix!=g_pendingExposedUseX || iy!=g_pendingExposedUseY ||
+        iz!=g_pendingExposedUseZ)
+        return fail(61);
+    if (!localPlayerPosition(px,py,pz) || pz!=iz ||
+        std::max(px>ix ? px-ix : ix-px,py>iy ? py-iy : iy-py)>1u)
+        return fail(63);
+    const auto address=g_base+p.getTopMoveThingMethodRva;
+    if (!isExecutableAddress(address)) return fail(60);
+    UncoverThingRef returned;
+    const auto topMove=reinterpret_cast<TileGetTopMoveThingFn>(address);
+    topMove(reinterpret_cast<void*>(tile),&returned.thing);
+    if (!returned.thing || !returned.releasable() ||
+        !readStableTileThings(tile,things,containsPlayer) ||
+        std::find(things.begin(),things.end(),returned.thing)==things.end() ||
+        !exactObjectVtable(returned.thing,p.itemVtableRva))
+        return fail(61);
+    if (returned.thing!=target) return fail(62);
+    // Keep the returned reference alive during the unchanged useWith backend.
+    return executeUseWithTileOnGameThread();
+}
+
 LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         auto* msg = reinterpret_cast<MSG*>(lParam);
@@ -4415,6 +4468,8 @@ LRESULT CALLBACK gameThreadGetMessageHook(int code, WPARAM wParam, LPARAM lParam
                     executeAutoWalkOnGameThread();
                 else if (kind == PendingUseWithTile)
                     executeUseWithTileOnGameThread();
+                else if (kind == PendingUseWithExposedTile)
+                    executeUseWithExposedTileOnGameThread();
                 else if (kind == PendingMoveTileToInventory)
                     executeMoveTileToInventoryOnGameThread();
                 else if (kind == PendingMoveTileToGround)
@@ -4617,6 +4672,10 @@ std::string actionCodeText(LONG code) {
         case 45: return "tile_pickup_item_out_of_range";
         case 46: return "tile_ground_move_contract_not_ready";
         case 47: return "tile_ground_destination_invalid";
+        case 60: return "usewith_exposure_contract_not_ready";
+        case 61: return "usewith_exposure_target_invalid";
+        case 62: return "item_covered";
+        case 63: return "usewith_target_out_of_range";
         default: return "unknown_action_result";
     }
 }
@@ -5665,7 +5724,8 @@ std::string useContainerItemWithTileResponse(
     std::uint32_t x,
     std::uint32_t y,
     std::uint8_t z,
-    std::uint16_t targetItemId) {
+    std::uint16_t targetItemId,
+    bool requireExposed=false) {
 
     if (!g_profile || !g_buildMatched)
         return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"build_not_validated"})";
@@ -5676,6 +5736,9 @@ std::string useContainerItemWithTileResponse(
         !g_profile->itemContractReady ||
         !g_profile->tileThingsRuntimeConfirmed)
         return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"usewith_tile_contract_not_ready"})";
+
+    if (requireExposed && !targetItemId)
+        return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"target_item_id_required"})";
 
     // Tool actions have the same just-arrived problem as direct Use.
     // Always refresh once before resolving the ground/tile target.
@@ -5733,7 +5796,11 @@ std::string useContainerItemWithTileResponse(
     g_pendingUseWithTargetItem=targetItem;
     g_pendingUseWithTargetItemId=target->id;
 
-    InterlockedExchange(&g_pendingActionKind,PendingUseWithTile);
+    g_pendingExposedUseX=x;
+    g_pendingExposedUseY=y;
+    g_pendingExposedUseZ=z;
+    InterlockedExchange(&g_pendingActionKind,
+        requireExposed ? PendingUseWithExposedTile : PendingUseWithTile);
 
     DWORD win32{};
     const bool dispatched=dispatchPendingActionToGameThread(win32);
@@ -5751,6 +5818,9 @@ std::string useContainerItemWithTileResponse(
     g_pendingUseWithTargetHolder=0;
     g_pendingUseWithTargetItem=0;
     g_pendingUseWithTargetItemId=0;
+    g_pendingExposedUseX=0;
+    g_pendingExposedUseY=0;
+    g_pendingExposedUseZ=0;
 
     if (!dispatched) {
         std::ostringstream o;
@@ -5762,6 +5832,7 @@ std::string useContainerItemWithTileResponse(
     std::ostringstream o;
     o << "{\"ok\":" << (code==1?"true":"false")
       << ",\"cmd\":\"USE_WITH_TILE_AT\""
+      << ",\"exposureRequired\":" << (requireExposed ? "true" : "false")
       << ",\"result\":\"" << actionCodeText(code) << "\""
       << ",\"toolItemId\":" << toolItemId
       << ",\"sourceContainerId\":" << sourceContainerId
@@ -5951,6 +6022,21 @@ std::string handleRequest(const std::string& request) {
           << "\"status\":\"" << jsonEscape(g_status) << "\","
           << "\"profileReady\":" << (g_profile.has_value() ? "true" : "false")
           << ",\"buildMatched\":" << (g_buildMatched ? "true" : "false")
+          << ",\"toolTileUncoverReady\":"
+          << ((g_buildMatched && g_profile &&
+               g_profile->getTopMoveThingMethodRva==0x197AD0u &&
+               g_profile->itemContractReady &&
+               g_profile->tileThingsRuntimeConfirmed &&
+               g_profile->moveRuntimeConfirmed &&
+               g_profile->moveItemSharedRefConfirmed &&
+               g_profile->movePositionRefConfirmed &&
+               g_profile->moveCountConfirmed &&
+               g_profile->moveMethodRva &&
+               g_profile->containerContractReady &&
+               g_profile->useWithRuntimeConfirmed &&
+               g_profile->useWithItemSharedRefConfirmed &&
+               g_profile->useWithThingSharedRefConfirmed &&
+               g_profile->useWithMethodRva) ? "true" : "false")
           << ",\"spearPickupReady\":"
           << ((g_buildMatched && g_profile &&
                g_profile->getTopMoveThingMethodRva==0x197AD0u &&
@@ -6024,7 +6110,10 @@ std::string handleRequest(const std::string& request) {
         const auto targetItemId=
             uint32FieldAllowZeroFromRequest(request,"targetItemId");
 
-        if (!toolItemId || *toolItemId>0xFFFFu ||
+        const auto requireExposed=
+            uint32FieldAllowZeroFromRequest(request,"requireExposed");
+
+        if ((requireExposed && *requireExposed>1u) || !toolItemId || *toolItemId>0xFFFFu ||
             !x || !y || !z || *z>0xFFu ||
             (targetItemId && *targetItemId>0xFFFFu))
             return R"({"ok":false,"cmd":"USE_WITH_TILE_AT","error":"invalid_arguments"})";
@@ -6032,7 +6121,8 @@ std::string handleRequest(const std::string& request) {
         return useContainerItemWithTileResponse(
             static_cast<std::uint16_t>(*toolItemId),
             *x,*y,static_cast<std::uint8_t>(*z),
-            static_cast<std::uint16_t>(targetItemId ? *targetItemId : 0u));
+            static_cast<std::uint16_t>(targetItemId ? *targetItemId : 0u),
+            requireExposed && *requireExposed==1u);
     }
 
     if (cmd == "AUTO_WALK_TO") {
