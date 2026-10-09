@@ -51,6 +51,14 @@ O assistente testa primeiro o candidato `Game::look` redescoberto para a build a
 
 `tests/LookSelectionTests.cpp` cobre seleção normal, fallback separado, identidade do catálogo/cache e rejeição de captura parcial ou descoberta de outra build.
 
+## Seleção de ações por build: Look e Talk
+
+O catálogo compartilhado `common/PipeDiscoveryCatalog.hpp` define as famílias sem RVAs: Look normal/detalhado e Talk de canal/normal. O BuildExplorer exporta essa política em `pipeDiscovery.actionSelection`, junto dos candidatos buscados no executável atual. A ABIBuilder usa o mesmo seletor para as duas famílias; perfis atuais anteriores a esse campo adicional continuam aceitos.
+
+O teste de chat pede duas frases no mesmo canal Default. Testa primeiro `Game::talkChannel`, quando redescoberto de forma única, e depois `Game::talk` somente se o primeiro não tiver chamadas observadas. Capturas parciais permanecem pendentes. O catálogo salva a chave e RVA da função observada; evidências de TalkChannel não validam Talk, nem o contrário. Capturar texto não confirma os parâmetros de canal/modo, ownership ou chamada ativa.
+
+Strings curtas temporárias são verificadas nos bytes capturados na entrada, evitando depender da pilha do caller após o usuário pressionar ENTER. `tests/TalkSelectionTests.cpp` cobre esse caso, os dois caminhos de seleção, rejeição de descoberta ambígua/outra build, threads diferentes e preservação de `callable=false`.
+
 ## Próximo estágio
 
 Depois de CALL site/caller estáveis, o estágio seguinte pode aprender **como o caller constrói cada argumento antes do CALL**, ainda passivamente, e persistir essas fontes no JSON para automatizar migrações entre builds.

@@ -291,7 +291,7 @@ struct Profile {
     uintptr_t inventoryBaseOffset=0, inventorySlotStride=0, gameContainersOffset=0;
     std::string sigGameAutoWalk, sigLocalPlayerAutoWalk, sigGameAttack, sigGameFollow, sigGameLook, sigGameMove, sigGameUse, sigGameUseWith;
     uintptr_t fnGameAutoWalk=0, fnLocalPlayerAutoWalk=0, fnGameAttack=0, fnGameFollow=0;
-    uintptr_t fnGameLook=0, fnGameDetailedLook=0, fnGameMove=0, fnGameUse=0, fnGameUseWith=0, fnGameTalk=0;
+    uintptr_t fnGameLook=0, fnGameDetailedLook=0, fnGameMove=0, fnGameUse=0, fnGameUseWith=0, fnGameTalk=0, fnGameTalkChannel=0;
     uintptr_t fnMapGetTile=0, fnMapGetCreatureById=0, fnMapGetCreatureByName=0, fnContainerGetItem=0;
 };
 
@@ -360,6 +360,7 @@ static Profile ParseProfile(const fs::path& path) {
     p.fnGameUse=DiscoveredRva(p,"gameUse");
     p.fnGameUseWith=DiscoveredRva(p,"gameUseWith");
     p.fnGameTalk=DiscoveredRva(p,"gameTalk");
+    p.fnGameTalkChannel=DiscoveredRva(p,"gameTalkChannel");
     p.fnMapGetTile=DiscoveredRva(p,"mapGetTile");
     p.fnMapGetCreatureById=DiscoveredRva(p,"mapGetCreatureById");
     p.fnMapGetCreatureByName=DiscoveredRva(p,"mapGetCreatureByName");
@@ -615,7 +616,16 @@ static std::set<std::string> MatchScalarPair(const std::vector<Capture>& a,uint3
 static bool StartsWithAt(uintptr_t p,const std::string& s){ if(!p||s.empty()||!Readable(p,s.size()))return false; return memcmp(reinterpret_cast<const void*>(p),s.data(),s.size())==0; }
 static std::set<std::string> MatchString(const std::vector<Capture>& caps,const std::string& phrase){
     std::set<std::string> out;
-    for(auto& c:caps)for(auto& lv:Locations(c)){ if(StartsWithAt(lv.v,phrase))out.insert(lv.loc+"->char*");uintptr_t d=0;if(lv.v&&SafeRead(lv.v,d)&&StartsWithAt(d,phrase))out.insert("*("+lv.loc+")->char*"); }
+    for(auto& c:caps)for(auto& lv:Locations(c)){
+        const auto* snap=SnapForReg(c,lv.loc);
+        // Short strings can live in the caller's temporary stack wrapper.
+        // Match their bytes at entry, before ENTER allows that frame to vanish.
+        if(snap&&snap->validBytes>=phrase.size()){
+            if(!phrase.empty()&&memcmp(snap->bytes,phrase.data(),phrase.size())==0)out.insert(lv.loc+"->char*");
+        }else if(StartsWithAt(lv.v,phrase))out.insert(lv.loc+"->char*");
+        uintptr_t d=0;const bool hasPointer=snap?SnapRead(*snap,0,d):(lv.v&&SafeRead(lv.v,d));
+        if(hasPointer&&StartsWithAt(d,phrase))out.insert("*("+lv.loc+")->char*");
+    }
     return out;
 }
 
@@ -772,27 +782,38 @@ static std::map<std::string,uint32_t> ItemPaths(const std::vector<Capture>& caps
     return out;
 }
 
-struct LookEntry { std::string key,name;uintptr_t rva=0; };
-static std::vector<LookEntry> LookEntries(const Profile& p){
-    std::vector<LookEntry> entries;
-    for(const auto& entry:{LookEntry{"gameLook","Game::look",p.fnGameLook},LookEntry{"gameDetailedLook","Game::detailedLook",p.fnGameDetailedLook}}){
-        if(entry.rva&&DiscoveredRva(p,entry.key)==entry.rva)entries.push_back(entry);
+struct ActionEntry { std::string key,name;uintptr_t rva=0; };
+using LookEntry=ActionEntry;
+static std::vector<ActionEntry> ActionEntries(const Profile& p,const std::string& family){
+    std::vector<ActionEntry> entries;
+    for(const auto& group:pipe_discovery::actionFamilies){
+        if(family!=group.key)continue;
+        for(const auto* key:group.functionKeys){
+            const auto rva=DiscoveredRva(p,key);if(!rva)continue;
+            for(const auto& method:pipe_discovery::methods)
+                if(std::string(key)==method.key){entries.push_back({key,method.semantic,rva});break;}
+        }
     }
     return entries;
 }
-using LookCaptureFn=bool(*)(uintptr_t,const std::string&,const std::string&,std::vector<Capture>&,std::vector<Capture>&,int);
-static bool CaptureLookSamples(const Profile& p,LookEntry& selected,std::vector<Capture>& a,std::vector<Capture>& b,LookCaptureFn capture=CaptureTwo){
-    for(const auto& entry:LookEntries(p)){
+static std::vector<LookEntry> LookEntries(const Profile& p){return ActionEntries(p,"look");}
+using ActionCaptureFn=bool(*)(uintptr_t,const std::string&,const std::string&,std::vector<Capture>&,std::vector<Capture>&,int);
+using LookCaptureFn=ActionCaptureFn;
+static bool CaptureActionSamples(const Profile& p,const std::string& family,const std::string& promptA,const std::string& promptB,ActionEntry& selected,std::vector<Capture>& a,std::vector<Capture>& b,ActionCaptureFn capture=CaptureTwo){
+    for(const auto& entry:ActionEntries(p,family)){
         selected=entry;a.clear();b.clear();
-        std::cout<<"[LOOK ASSIST] Candidato descoberto: "<<entry.name<<" @ "<<Hex(entry.rva)<<"\n";
-        if(capture(entry.rva,"De LOOK em um ITEM A qualquer e pressione ENTER...\n","De LOOK em um ITEM B DIFERENTE e pressione ENTER...\n",a,b,2)&&!a.empty()&&!b.empty())return true;
+        std::cout<<"[ACTION DISCOVERY] "<<family<<": candidato da build atual "<<entry.name<<" @ "<<Hex(entry.rva)<<"\n";
+        if(capture(entry.rva,promptA,promptB,a,b,2)&&!a.empty()&&!b.empty())return true;
         if(!a.empty()||!b.empty()){
-            std::cout<<"[LOOK ASSIST][PENDING] Captura parcial; repita esta funcao. Amostras de funcoes diferentes nao serao combinadas.\n";
+            std::cout<<"[ACTION DISCOVERY][PENDING] Captura parcial; repita esta funcao. Amostras de funcoes diferentes nao serao combinadas.\n";
             return false;
         }
-        std::cout<<"[LOOK ASSIST] Sem chamadas observadas nesta funcao. Proximo candidato sera testado separadamente, se existir.\n";
+        std::cout<<"[ACTION DISCOVERY] Sem chamadas observadas nesta funcao. Proximo candidato sera testado separadamente, se existir.\n";
     }
     return false;
+}
+static bool CaptureLookSamples(const Profile& p,LookEntry& selected,std::vector<Capture>& a,std::vector<Capture>& b,LookCaptureFn capture=CaptureTwo){
+    return CaptureActionSamples(p,"look","De LOOK em um ITEM A qualquer e pressione ENTER...\n","De LOOK em um ITEM B DIFERENTE e pressione ENTER...\n",selected,a,b,capture);
 }
 static bool CaptureLookRaw(const Profile& p,const std::string& prompt,std::vector<Capture>& caps){
     const uintptr_t rva=g_lookOracle.ready?g_lookOracle.rva:0;
@@ -928,9 +949,21 @@ static AbiResult TestUseWith(const Profile& p){
     auto src=Intersect(MatchPointer(r.a,sa.ptr),MatchPointer(r.b,sb.ptr));auto trg=Intersect(MatchPointer(r.a,ta.ptr),MatchPointer(r.b,tb.ptr));auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));std::string srcPath=src.count("*(RDX+0x0)")?"*(RDX+0x0)":(src.size()==1?*src.begin():"");std::string trgPath=trg.count("*(R8+0x0)")?"*(R8+0x0)":(trg.size()==1?*trg.begin():"");if(!srcPath.empty())r.mappings.push_back({"source ItemPtr pointee",srcPath});if(!trgPath.empty())r.mappings.push_back({"target ThingPtr pointee",trgPath});if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});r.naturalThreadId=ConsistentThread(r.a,r.b);r.machine=!srcPath.empty()&&ga.count("RCX");r.callerCandidateReady=r.machine&&r.naturalThreadId;r.status=r.machine?(!trgPath.empty()?"confirmed_runtime_arguments":"confirmed_runtime_primary_argument"):"captured_runtime_partial";r.notes="V1.3 snapshots temporary shared_ptr wrappers at breakpoint time. Reference prototype expects RDX=ItemPtr&, R8=ThingPtr&; runtime pointees are required before promotion.";return r;
 }
 
-static AbiResult TestTalk(const Profile& p){
-    AbiResult r;r.key="gameTalk";r.name="Game::talk";r.rva=p.fnGameTalk;r.tested=true;if(!r.rva){r.status="missing_rva";r.notes="Este profile nao possui Game::talk RVA.";return r;}
-    std::string a="ABI_TEST_ALPHA",b="ABI_TEST_BETA";if(!CaptureTwo(r.rva,"No jogo fale exatamente: "+a+" ; depois ENTER...\n","No jogo fale exatamente: "+b+" ; depois ENTER...\n",r.a,r.b,2)){r.status="rva_not_observed_runtime";return r;}r.runtimeHit=!r.a.empty()||!r.b.empty();auto m=Intersect(MatchString(r.a,a),MatchString(r.b,b));auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));if(m.size()==1)r.mappings.push_back({"text/string argument",*m.begin()});if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});r.naturalThreadId=ConsistentThread(r.a,r.b);r.machine=m.size()==1&&ga.count("RCX");r.callerCandidateReady=r.machine&&r.naturalThreadId;r.status=r.machine?"confirmed_runtime_text_argument":"captured_runtime_ambiguous";r.notes="Two different phrases used as evidence. Talk mode/channel arguments may still be pending.";return r;
+static AbiResult TestTalk(const Profile& p,ActionCaptureFn capture=CaptureTwo){
+    AbiResult r;r.key="gameTalk";r.name="Game::talk";r.tested=true;
+    if(ActionEntries(p,"talk").empty()){r.status="discovery_required";r.notes="No unique Talk-family method discovered for this build.";return r;}
+    std::cout<<"\n[TALK] Selecione o canal Default e envie as duas frases pelo chat normal. Mantenha o mesmo canal e modo nas duas amostras.\n";
+    const std::string a="ABI_TEST_ALPHA",b="ABI_TEST_BETA";ActionEntry selected;
+    const bool captured=CaptureActionSamples(p,"talk","No jogo fale exatamente: "+a+" ; depois ENTER...\n","No jogo fale exatamente: "+b+" ; depois ENTER...\n",selected,r.a,r.b,capture);
+    r.key=selected.key;r.name=selected.name;r.rva=selected.rva;r.runtimeHit=!r.a.empty()||!r.b.empty();
+    if(!captured){r.status=r.runtimeHit?"captured_runtime_partial":"rva_not_observed_runtime";r.notes="Talk methods captured separately; no complete natural pair observed.";return r;}
+    const auto m=Intersect(MatchString(r.a,a),MatchString(r.b,b));const auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));
+    if(m.size()==1)r.mappings.push_back({"text/string argument",*m.begin()});
+    if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});
+    r.naturalThreadId=ConsistentThread(r.a,r.b);r.machine=m.size()==1&&ga.count("RCX")&&r.naturalThreadId;
+    r.callerCandidateReady=r.machine;r.status=r.machine?"confirmed_runtime_text_argument":"captured_runtime_ambiguous";
+    r.notes="Two distinct phrases matched on the observed method only. Talk mode/channel arguments and active-call validation remain pending; no ABI borrowed from the other Talk method.";
+    return r;
 }
 
 struct PosObs { std::string path; uint32_t x=0,y=0,z=0; int score=0; };
@@ -1050,7 +1083,7 @@ static void RunAbiSession(){
     if(p.fnGameMove&&AskYes("Testar ABI Game::move com Look Assistant?",true))results["gameMove"]=TestMove(p);
     if(p.fnGameUse&&AskYes("Testar ABI Game::use com Look Assistant?",true))results["gameUse"]=TestUse(p);
     if(p.fnGameUseWith&&AskYes("Testar ABI Game::useWith com Look Assistant?",true))results["gameUseWith"]=TestUseWith(p);
-    if(p.fnGameTalk&&AskYes("Testar ABI Game::talk?",false))results["gameTalk"]=TestTalk(p);
+    if(!ActionEntries(p,"talk").empty()&&AskYes("Testar ABI do chat normal (Talk/TalkChannel descobertos)?",false)){auto r=TestTalk(p);results[r.key]=r;}
     if(p.fnLocalPlayerAutoWalk&&AskYes("Testar ABI LocalPlayer::autoWalk por CLICK-TO-WALK?",true))results["localPlayerAutoWalk"]=TestLocalPlayerAutoWalk(p);
     if(p.fnGameAutoWalk&&AskYes("Capturar cadeia Game::autoWalk por CLICK-TO-WALK?",false))results["gameAutoWalk"]=TestGameAutoWalk(p);
     if(DiscoveredRva(p,"tileGetTopMoveThing") && AskYes("Capturar entrada Tile::getTopMoveThing (retorno permanece pendente)?",true))

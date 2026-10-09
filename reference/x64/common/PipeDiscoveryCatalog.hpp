@@ -38,6 +38,14 @@ inline constexpr std::array<Method,29> methods{{
     {"containerGetCapacity","Container::getCapacity","getCapacity",Owner::Instance,false}
 }};
 inline constexpr const char* schema="crome-pipe-discovery-x64-v1";
+// Semantic alternatives must be selected by the requested natural action,
+// never by a reference RVA or by borrowing another method's ABI.
+struct ActionFamily { const char* key;std::array<const char*,2> functionKeys; };
+inline constexpr std::array<ActionFamily,2> actionFamilies{{
+    {"look",{"gameLook","gameDetailedLook"}},
+    {"talk",{"gameTalkChannel","gameTalk"}}
+}};
+inline constexpr const char* actionSelectionJson=R"({"schema":"crome-action-selection-v1","policy":"current_build_discovery_then_two_natural_samples_per_method","look":{"candidates":["gameLook","gameDetailedLook"],"status":"runtime_selection_required"},"talk":{"candidates":["gameTalkChannel","gameTalk"],"status":"runtime_selection_required"},"mixSamplesAcrossMethods":false,"borrowAbiAcrossMethods":false,"callable":false})";
 inline std::uintptr_t uniqueCandidate(const std::set<std::uintptr_t>& candidates) {
     return candidates.size()==1 ? *candidates.begin() : 0;
 }

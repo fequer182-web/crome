@@ -14,6 +14,8 @@ Estas alterações ficam na pasta reference e usam o BuildExplorer x64 e o ABIBu
 
 ## Regras do padrão
 
+Look e Talk usam famílias sem RVAs no catálogo compartilhado. O Builder exporta `pipeDiscovery.actionSelection`: Look normal/detalhado e Talk de canal/normal. A ABI escolhe somente entre candidatos únicos da fingerprint atual, observando duas chamadas naturais da mesma função. Se não houver hits, testa a alternativa separadamente; captura parcial não é misturada. A evidência salva mantém a identidade da função observada e nunca habilita automaticamente uma ação. Isso também vale em outras builds, sem transportar os endereços do Olders.
+
 O catálogo compartilhado common/PipeDiscoveryCatalog.hpp lista 29 métodos de Game, Map, Tile, LocalPlayer, Item, Thing e Container. O Builder busca semantic binds na imagem carregada, usa owners redescobertos pelo resolver V4.9 e só registra um RVA selecionado se os candidatos convergirem em um endereço único. Os endereços legados do migratorState não são copiados para pipeDiscovery.
 
 Funções ausentes, sem owner ou ambíguas permanecem pendentes. Uma busca por token é um candidato; ainda pode corresponder a um wrapper e exige validação de ABI.

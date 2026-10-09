@@ -34139,7 +34139,8 @@ std::string V49PipeDiscoveryJson(const BuildInfo& build) {
       << "\"fingerprint\":{\"timestamp\":\"" << HexU64(build.timestamp)
       << "\",\"sizeOfImage\":\"" << HexU64(build.sizeOfImage)
       << "\",\"textHashFNV1A64\":\"" << HexU64(build.textHash)
-      << "\"},\"pipeReady\":false,\"functions\":{";
+      << "\"},\"pipeReady\":false,\"actionSelection\":"
+      << pipe_discovery::actionSelectionJson << ",\"functions\":{";
     const uintptr_t game=g_v49DirectState.gameObjectBaseRva ? g_exeBase+g_v49DirectState.gameObjectBaseRva : 0;
     const uintptr_t map=g_v49DirectState.mapObjectRva ? g_exeBase+g_v49DirectState.mapObjectRva : 0;
     bool first=true;
