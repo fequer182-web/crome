@@ -18,10 +18,18 @@
 #include <cctype>
 #include <filesystem>
 #include <streambuf>
+#include <stdexcept>
 
 static_assert(sizeof(void*) == 8, "OTCLab ABI Builder V1.3 is x64-only");
 
 namespace fs = std::filesystem;
+
+// Keep filesystem paths in their native UTF-16 representation on Windows.
+// UTF-8 is only for display, never passed back to filesystem constructors.
+static std::string DisplayPath(const fs::path& path){
+    const auto utf8=path.u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()),utf8.size());
+}
 
 static HMODULE g_self = nullptr;
 static uintptr_t g_base = 0;
@@ -47,7 +55,7 @@ static void OpenStartupLog() {
     memcpy(slash+1,name,sizeof(name));
     g_startupLog=CreateFileW(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,
         nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-    LogStage("worker_entered; build=isolated_console_v1");
+    LogStage("worker_entered; build=isolated_console_unicode_v2");
 }
 
 // Use owned Win32 console handles. freopen(stdout/stderr/stdin) also changes
@@ -271,7 +279,7 @@ static bool IsExecutable(uintptr_t a) {
 }
 
 struct Profile {
-    std::string path;
+    fs::path path;
     std::string raw;
     uint32_t timestamp=0, sizeOfImage=0;
     uint64_t textHash=0;
@@ -327,7 +335,7 @@ static std::string ForcePassive(std::string obj) {
 }
 
 static Profile ParseProfile(const fs::path& path) {
-    Profile p; p.path=path.string(); p.raw=ReadText(path);
+    Profile p; p.path=path; p.raw=ReadText(path);
     std::string m=ExtractNamedObject(p.raw,"migratorState"); if(m.empty()) m=p.raw;
     auto N=[&](const char* k)->uintptr_t{return static_cast<uintptr_t>(ParseNum(FlatJsonString(m,k)));};
     p.timestamp=static_cast<uint32_t>(N("timestamp")); p.sizeOfImage=static_cast<uint32_t>(N("sizeOfImage")); p.textHash=ParseNum(FlatJsonString(m,"textHashFNV1A64"));
@@ -366,27 +374,36 @@ static int ProfileEvidenceScore(const Profile& p){
     score+=std::min(16,count("strong_candidate")*2);
     score+=std::min(12,count("\"callerCandidateReady\": true")*3);
     score+=std::min(12,count("\"callerSiteValidated\": true")*3);
-    std::string low=p.path;std::transform(low.begin(),low.end(),low.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+    std::string low=DisplayPath(p.path);std::transform(low.begin(),low.end(),low.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
     if(low.find("profiles")!=std::string::npos)score+=2;return score;
 }
 
 static fs::path DllDir() {
-    char buf[MAX_PATH*4]{}; GetModuleFileNameA(g_self,buf,sizeof(buf)); return fs::path(buf).parent_path();
+    wchar_t buf[32768]{};const DWORD n=GetModuleFileNameW(g_self,buf,32768);
+    if(!n||n>=32768)throw std::runtime_error("Cannot resolve ABI DLL directory");
+    return fs::path(buf).parent_path();
 }
 
-static std::vector<fs::path> FindProfiles() {
-    std::set<std::string> seen; std::vector<fs::path> out;
-    std::vector<fs::path> dirs={DllDir(),DllDir()/"profiles",DllDir().parent_path(),DllDir().parent_path()/"profiles",fs::current_path()};
-    for(auto& d:dirs){
+static std::vector<fs::path> FindProfilesInDirectories(const std::vector<fs::path>& dirs) {
+    std::set<fs::path> seen; std::vector<fs::path> out;
+    for(const auto& d:dirs){
         std::error_code ec; if(!fs::exists(d,ec)||!fs::is_directory(d,ec)) continue;
         for(auto& e:fs::directory_iterator(d,ec)){
-            if(ec) break; if(!e.is_regular_file()) continue;
-            auto ext=e.path().extension().string(); std::transform(ext.begin(),ext.end(),ext.begin(),::tolower);
-            if(ext!=".json") continue;
-            std::string s=e.path().string(); if(seen.insert(s).second) out.push_back(e.path());
+            if(ec) break; if(!e.is_regular_file(ec)||ec) continue;
+            auto ext=e.path().extension().native();
+            std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return c>=L'A'&&c<=L'Z'?c-L'A'+L'a':c;});
+            if(ext!=L".json") continue;
+            if(seen.insert(e.path()).second) out.push_back(e.path());
         }
     }
     return out;
+}
+
+static std::vector<fs::path> FindProfiles() {
+    const auto dir=DllDir();std::error_code ec;
+    std::vector<fs::path> dirs={dir,dir/L"profiles",dir.parent_path(),dir.parent_path()/L"profiles"};
+    auto current=fs::current_path(ec);if(!ec)dirs.push_back(current);
+    return FindProfilesInDirectories(dirs);
 }
 
 static bool AskYes(const std::string& q, bool def=false) {
@@ -966,7 +983,7 @@ static std::string BuildAbiCatalog(const Profile& p,const Fingerprint& fp,const 
 
 static bool SaveProfile(Profile& p,const Fingerprint& fp,const std::map<std::string,AbiResult>& results){
     std::string raw=ReadText(p.path);if(raw.empty())return false;
-    fs::path bak=fs::path(p.path);bak += ".pre_abi.bak.json";std::error_code ec;if(!fs::exists(bak,ec))WriteText(bak,raw);
+    fs::path bak=p.path;bak += L".pre_abi.bak.json";std::error_code ec;if(!fs::exists(bak,ec))WriteText(bak,raw);
     std::string cat=BuildAbiCatalog(p,fp,results);if(!ReplaceOrInsertRootObject(raw,"abiCatalog",cat))return false;
     if(!WriteText(p.path,raw))return false;p.raw=raw;return true;
 }
@@ -989,9 +1006,9 @@ static void RunAbiSession(){
     for(auto& x:paths){LogStage("profile_parse_begin");Profile p=ParseProfile(x);LogStage("profile_parse_done");if(!p.timestamp||!p.sizeOfImage)continue;if(!pipe_discovery::exactFingerprint(p.timestamp,p.sizeOfImage,p.textHash,fp.timestamp,fp.sizeOfImage,fp.textHash) || !DiscoveryFingerprintMatches(p)) continue;int s=16;{s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
     if(cs.empty()){std::cout<<"[STOP] Nenhum profile com fingerprint exata e pipeDiscovery atual foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");return;}
     std::sort(cs.begin(),cs.end(),[](auto&a,auto&b){return a.score>b.score;});
-    std::cout<<"\nProfiles compatíveis:\n";for(size_t i=0;i<cs.size();++i)std::cout<<"  #"<<i<<" score="<<cs[i].score<<" "<<cs[i].path.string()<<"\n";
+    std::cout<<"\nProfiles compatíveis:\n";for(size_t i=0;i<cs.size();++i)std::cout<<"  #"<<i<<" score="<<cs[i].score<<" "<<DisplayPath(cs[i].path)<<"\n";
     size_t pick=0;if(cs.size()>1){if(cs[0].score>cs[1].score){std::cout<<"[AUTO PROFILE] Selecionado #0 por conter evidencias ABI mais fortes/mais novas.\n";}else{pick=AskU32("Escolha profile",0);if(pick>=cs.size())pick=0;}}Profile p=cs[pick].p;
-    std::cout<<"\n[PROFILE] "<<p.path<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
+    std::cout<<"\n[PROFILE] "<<DisplayPath(p.path)<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
     LogStage("profile_selected; prologue_cross_check_begin");
     ProfileCrossCheck(p); // Diagnostic only; discovery and fingerprint gates remain mandatory.
     LogStage("initialization_complete; waiting_for_user; no_breakpoint_installed");
@@ -1020,7 +1037,7 @@ static void RunAbiSession(){
             std::cout<<" samples="<<r.callerSamples<<" validated="<<(r.callerSiteValidated?"YES":"NO")<<"\n";
         }else std::cout<<"    caller site -> unresolved\n";
     }
-    if(SaveProfile(p,fp,results))std::cout<<"\n[SAVE][OK] ABI catalog gravado no MESMO JSON:\n"<<p.path<<"\nBackup preservado: "<<p.path<<".pre_abi.bak.json\n";else std::cout<<"\n[SAVE][FAIL] Nao consegui atualizar JSON.\n";
+    if(SaveProfile(p,fp,results))std::cout<<"\n[SAVE][OK] ABI catalog gravado no MESMO JSON:\n"<<DisplayPath(p.path)<<"\nBackup preservado: "<<DisplayPath(p.path)<<".pre_abi.bak.json\n";else std::cout<<"\n[SAVE][FAIL] Nao consegui atualizar JSON.\n";
     std::cout<<"\nIMPORTANTE: V1.3 resolve automaticamente CALL site e funcao caller natural a partir do return address de cada acao real. callerCandidateReady exige ABI + thread + mesmo CALL site observado nos dois estimulos. callable continua FALSE; nenhuma chamada interna ativa e executada nesta versao.\n";
     Wait("ENTER para descarregar ABI Builder...\n");
 }
@@ -1038,6 +1055,7 @@ static DWORD WINAPI MainThread(LPVOID){
             LogStage("console_open_failed; session_aborted_without_hooks");
         }else{
             ScopedConsoleStreams streams(input,output);
+            if(ownsConsole){SetConsoleCP(CP_UTF8);SetConsoleOutputCP(CP_UTF8);}
             LogStage("console_ready; shared_CRT_stdio_unchanged");
             if(ownsConsole)SetConsoleTitleA("OTCLab ABI Builder V1.3 X64 - Startup Diagnostic");
             RunAbiSession();
@@ -1059,4 +1077,3 @@ static DWORD WINAPI MainThread(LPVOID){
 }
 
 BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){g_self=h;DisableThreadLibraryCalls(h);HANDLE t=CreateThread(nullptr,0,MainThread,nullptr,0,nullptr);if(t)CloseHandle(t);}return TRUE;}
-

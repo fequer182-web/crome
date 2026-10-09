@@ -43,7 +43,8 @@ Para testar, abra uma sessão nova do Olders, sem Crome/BuildExplorer/outras pro
 
 Os testes `tests/StartupIoTests.cpp` verificam leitura/escrita guiada, preservação dos streams do host, restauração dos buffers inclusive após exceção e ausência de breakpoint na inicialização. As funções permanecem `callable=false`.
 
+Os caminhos de DLL e profiles permanecem em UTF-16 nativo do Windows durante busca, leitura, gravação e backup. A apresentação no console usa UTF-8. `tests/UnicodeProfileTests.cpp` cobre pastas como `Área de Trabalho` e nomes de arquivo com acentos, sem depender da configuração de locale do cliente.
+
 ## Próximo estágio
 
 Depois de CALL site/caller estáveis, o estágio seguinte pode aprender **como o caller constrói cada argumento antes do CALL**, ainda passivamente, e persistir essas fontes no JSON para automatizar migrações entre builds.
-
