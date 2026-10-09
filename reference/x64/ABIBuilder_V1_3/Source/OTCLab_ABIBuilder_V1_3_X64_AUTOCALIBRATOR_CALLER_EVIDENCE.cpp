@@ -772,17 +772,45 @@ static std::map<std::string,uint32_t> ItemPaths(const std::vector<Capture>& caps
     return out;
 }
 
+struct LookEntry { std::string key,name;uintptr_t rva=0; };
+static std::vector<LookEntry> LookEntries(const Profile& p){
+    std::vector<LookEntry> entries;
+    for(const auto& entry:{LookEntry{"gameLook","Game::look",p.fnGameLook},LookEntry{"gameDetailedLook","Game::detailedLook",p.fnGameDetailedLook}}){
+        if(entry.rva&&DiscoveredRva(p,entry.key)==entry.rva)entries.push_back(entry);
+    }
+    return entries;
+}
+using LookCaptureFn=bool(*)(uintptr_t,const std::string&,const std::string&,std::vector<Capture>&,std::vector<Capture>&,int);
+static bool CaptureLookSamples(const Profile& p,LookEntry& selected,std::vector<Capture>& a,std::vector<Capture>& b,LookCaptureFn capture=CaptureTwo){
+    for(const auto& entry:LookEntries(p)){
+        selected=entry;a.clear();b.clear();
+        std::cout<<"[LOOK ASSIST] Candidato descoberto: "<<entry.name<<" @ "<<Hex(entry.rva)<<"\n";
+        if(capture(entry.rva,"De LOOK em um ITEM A qualquer e pressione ENTER...\n","De LOOK em um ITEM B DIFERENTE e pressione ENTER...\n",a,b,2)&&!a.empty()&&!b.empty())return true;
+        if(!a.empty()||!b.empty()){
+            std::cout<<"[LOOK ASSIST][PENDING] Captura parcial; repita esta funcao. Amostras de funcoes diferentes nao serao combinadas.\n";
+            return false;
+        }
+        std::cout<<"[LOOK ASSIST] Sem chamadas observadas nesta funcao. Proximo candidato sera testado separadamente, se existir.\n";
+    }
+    return false;
+}
 static bool CaptureLookRaw(const Profile& p,const std::string& prompt,std::vector<Capture>& caps){
-    uintptr_t rva=p.fnGameDetailedLook?p.fnGameDetailedLook:p.fnGameLook; if(!rva)return false;
+    const uintptr_t rva=g_lookOracle.ready?g_lookOracle.rva:0;
+    const auto entries=LookEntries(p);
+    if(!rva||std::none_of(entries.begin(),entries.end(),[&](const LookEntry& e){return e.rva==rva;}))return false;
     uintptr_t addr=g_base+rva; if(!InstallBP(addr))return false; ClearCaps(); Wait(prompt); Sleep(100); caps=Snapshot(); UninstallBP(); return !caps.empty();
 }
 
-static bool EstablishLookOracle(const Profile& p,AbiResult* result=nullptr){
+static bool EstablishLookOracle(const Profile& p,AbiResult* result=nullptr,LookCaptureFn capture=CaptureTwo){
     if(g_lookOracle.ready)return true;
-    uintptr_t rva=p.fnGameDetailedLook?p.fnGameDetailedLook:p.fnGameLook; if(!rva||!p.itemIdOffset||!p.itemVtableRva){std::cout<<"[LOOK ASSIST] Profile sem Look/Item layout suficiente.\n";return false;}
+    if(LookEntries(p).empty()||!p.itemIdOffset||!p.itemVtableRva){std::cout<<"[LOOK ASSIST] Profile sem Look descoberto/Item layout suficiente.\n";return false;}
     std::cout<<"\n============================================================\nLOOK ASSISTANT - AUTO ID / THING ORACLE\n============================================================\n";
     std::cout<<"Voce NAO precisa saber nenhum ID. Use o LOOK normal do cliente em dois ITENS diferentes.\n";
-    std::vector<Capture>a,b; if(!CaptureTwo(rva,"De LOOK em um ITEM A qualquer e pressione ENTER...\n","De LOOK em um ITEM B DIFERENTE e pressione ENTER...\n",a,b,2))return false;
+    std::vector<Capture>a,b;LookEntry selected;
+    const bool captured=CaptureLookSamples(p,selected,a,b,capture);
+    const uintptr_t rva=selected.rva;
+    if(result){result->key=selected.key;result->name=selected.name;result->rva=rva;result->a=a;result->b=b;result->runtimeHit=!a.empty()||!b.empty();}
+    if(!captured){if(result){result->status=result->runtimeHit?"captured_runtime_partial":"rva_not_observed_runtime";result->notes="Look candidates captured separately; no complete pair of natural calls observed.";}return false;}
     auto pa=ItemPaths(a,p),pb=ItemPaths(b,p); std::vector<AbiCandidate> cand;
     for(auto& [path,idA]:pa){ auto it=pb.find(path); if(it==pb.end()||!idA||!it->second||idA==it->second)continue; AbiCandidate c; c.path=path; c.score=70+PathPreference(path,"thing"); c.evidence={"valid Item vtable in sample A","valid Item vtable in sample B","item ID changed across samples"}; if(path=="*(RDX+0x0)"||path=="*(RDX)")c.score+=80; else if(path=="RDX")c.score+=20; if(path.rfind("STACK+",0)==0||path.rfind("*(STACK+",0)==0)c.score-=40; cand.push_back(c); }
     std::sort(cand.begin(),cand.end(),[](auto&a,auto&b){return a.score>b.score;});
@@ -790,9 +818,10 @@ static bool EstablishLookOracle(const Profile& p,AbiResult* result=nullptr){
     auto best=cand.front(); uint32_t ida=pa[best.path],idb=pb[best.path];
     bool strong=cand.size()==1 || best.score>=cand[1].score+15;
     std::cout<<"[LOOK ASSIST] Melhor caminho: "<<best.path<<" score="<<best.score<<" IDs observados="<<ida<<" / "<<idb<<"\n";
-    if(!strong){std::cout<<"[LOOK ASSIST][WARN] Ha concorrencia de evidencias; usando melhor candidato apenas como STRONG CANDIDATE.\n";}
-    g_lookOracle={true,rva,best.path,ida,idb,best.score};
+    if(!strong){std::cout<<"[LOOK ASSIST][PENDING] Caminho de Item ambiguo; assistente nao sera utilizado.\n";}
     if(result){result->a=a;result->b=b;result->runtimeHit=true;result->mappings.push_back({"Thing*/Item* argument",best.path});result->candidates=cand;result->machine=strong;result->status=strong?"confirmed_runtime_primary_argument":"strong_candidate_runtime_primary_argument";result->notes="Look oracle learned without user-supplied IDs; two different runtime Item IDs observed.";result->naturalThreadId=ConsistentThread(a,b);result->callerCandidateReady=strong;}
+    if(!strong)return false;
+    g_lookOracle={true,rva,best.path,ida,idb,best.score};
     return true;
 }
 
@@ -850,7 +879,9 @@ static AbiResult TestAttackFollow(const Profile& p,bool attack){
 }
 
 static AbiResult TestLook(const Profile& p){
-    AbiResult r;r.key=p.fnGameDetailedLook?"gameDetailedLook":"gameLook";r.name="Game::look/detailedLook";r.rva=p.fnGameDetailedLook?p.fnGameDetailedLook:p.fnGameLook;r.tested=true;if(!r.rva){r.status="missing_rva";return r;}
+    AbiResult r;r.key="gameLook";r.name="Game::look";r.tested=true;
+    const auto entries=LookEntries(p);if(entries.empty()){r.status="missing_rva";return r;}
+    r.key=entries.front().key;r.name=entries.front().name;r.rva=entries.front().rva;
     EstablishLookOracle(p,&r); return r;
 }
 

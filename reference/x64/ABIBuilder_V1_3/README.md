@@ -45,6 +45,12 @@ Os testes `tests/StartupIoTests.cpp` verificam leitura/escrita guiada, preserva�
 
 Os caminhos de DLL e profiles permanecem em UTF-16 nativo do Windows durante busca, leitura, gravação e backup. A apresentação no console usa UTF-8. `tests/UnicodeProfileTests.cpp` cobre pastas como `Área de Trabalho` e nomes de arquivo com acentos, sem depender da configuração de locale do cliente.
 
+## Look normal e detailedLook
+
+O assistente testa primeiro o candidato `Game::look` redescoberto para a build atual, pois o estímulo pedido é o Look normal. Se não observar nenhuma chamada, testa `Game::detailedLook` separadamente, quando também descoberto. Uma captura parcial não é combinada com outra função. A chave do catálogo e o RVA reutilizado por Move/Use/UseWith são os da função realmente capturada. Um caminho de Item ambíguo mantém o assistente pendente; `callable` permanece falso.
+
+`tests/LookSelectionTests.cpp` cobre seleção normal, fallback separado, identidade do catálogo/cache e rejeição de captura parcial ou descoberta de outra build.
+
 ## Próximo estágio
 
 Depois de CALL site/caller estáveis, o estágio seguinte pode aprender **como o caller constrói cada argumento antes do CALL**, ainda passivamente, e persistir essas fontes no JSON para automatizar migrações entre builds.
