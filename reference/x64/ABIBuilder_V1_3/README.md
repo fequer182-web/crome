@@ -59,6 +59,16 @@ O teste de chat pede duas frases no mesmo canal Default. Testa primeiro `Game::t
 
 Strings curtas temporárias são verificadas nos bytes capturados na entrada, evitando depender da pilha do caller após o usuário pressionar ENTER. `tests/TalkSelectionTests.cpp` cobre esse caso, os dois caminhos de seleção, rejeição de descoberta ambígua/outra build, threads diferentes e preservação de `callable=false`.
 
+## Correspondências fortes e candidatos próximos
+
+O JSON mantém `evidenceCandidates` completo e `candidateReview`, com ranking, diferença de pontuação e indicação de empate/próximos. Pontuação é uma heurística de comparação, nunca prova da ABI. Candidatos próximos pedem um novo estímulo que varie apenas um argumento; todas as alternativas continuam registradas.
+
+Cada snapshot inclui os bytes medidos em `bytesHex`. `frozenCandidateReplay` compara caminhos de registradores/wrappers nos próprios snapshots, sem consultar endereços antigos do processo; ausência de bytes fica explícita. O limite de oito capturas persistidas por estímulo é declarado em `captureStorage`, inclusive quando houve truncamento. `captureScope` identifica a origem histórica e não autoriza reutilizar ponteiros em chamadas.
+
+`validationProgress` separa evidências medidas de contrato completo, retorno, ownership, dispatch e teste ativo ainda pendentes. Ao retomar a mesma fingerprint e mesmo RVA redescoberto, o console revisa os candidatos salvos. `lastEvidenceSession` agora conserva as últimas observações de cada função pulada, mesmo inconclusivas, enquanto `functions` preserva a melhor evidência. Mudança de fingerprint/RVA invalida a observação correspondente. Os testes `CandidateEvidenceTests.cpp` verificam esses casos.
+
+Esta revisão de dados históricos não executa chamadas ativas e não substitui os validadores de retorno/refcount ou a etapa de chamada ativa, que ainda precisam ser implementados antes da liberação para o Crome.
+
 ## Próximo estágio
 
 Depois de CALL site/caller estáveis, o estágio seguinte pode aprender **como o caller constrói cada argumento antes do CALL**, ainda passivamente, e persistir essas fontes no JSON para automatizar migrações entre builds.

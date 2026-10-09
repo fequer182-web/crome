@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <streambuf>
 #include <stdexcept>
+#include "../../../../Crome/Developer/native_runtime/profiles/MiniJson.hpp"
 
 static_assert(sizeof(void*) == 8, "OTCLab ABI Builder V1.3 is x64-only");
 
@@ -666,7 +667,11 @@ static void FinalizeCallerEvidence(AbiResult& r){
 }
 
 static std::string SnapJson(const MemSnap& m){
-    uintptr_t q0=0,q1=0;SnapRead(m,0,q0);SnapRead(m,8,q1);std::ostringstream j;j<<"{\"base\":\""<<Hex(m.base)<<"\",\"validBytes\":"<<m.validBytes<<",\"q0\":\""<<Hex(q0)<<"\",\"q1\":\""<<Hex(q1)<<"\"}";return j.str();
+    uintptr_t q0=0,q1=0;SnapRead(m,0,q0);SnapRead(m,8,q1);std::ostringstream j;
+    const auto bytes=std::min<uint32_t>(m.validBytes,ARG_SNAP_BYTES);
+    j<<"{\"base\":\""<<Hex(m.base)<<"\",\"validBytes\":"<<bytes<<",\"q0\":\""<<Hex(q0)<<"\",\"q1\":\""<<Hex(q1)<<"\",\"bytesHex\":\"";
+    for(uint32_t i=0;i<bytes;++i)j<<std::hex<<std::setw(2)<<std::setfill('0')<<static_cast<unsigned>(m.bytes[i]);
+    j<<"\"}";return j.str();
 }
 static std::string CaptureJson(const std::vector<Capture>& v){
     std::ostringstream j;j<<"[";size_t n=std::min<size_t>(v.size(),8);
@@ -695,6 +700,40 @@ static std::string CandidateJson(const std::vector<AbiCandidate>& v){
     j<<"]"; return j.str();
 }
 
+static std::string CandidateReviewJson(const std::vector<AbiCandidate>& candidates){
+    std::vector<AbiCandidate> ranked=candidates;
+    std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b){return a.score==b.score?a.path<b.path:a.score>b.score;});
+    constexpr int closeGap=15;
+    const auto gap=ranked.size()>1?static_cast<int64_t>(ranked[0].score)-ranked[1].score:0;
+    const bool close=ranked.size()>1&&gap<closeGap;
+    std::ostringstream j;j<<"{\"policy\":\"score_is_ranking_only_not_abi_proof\",\"candidateCount\":"<<ranked.size()
+        <<",\"closeScoreThreshold\":"<<closeGap<<",\"bestRunnerUpGap\":"<<gap
+        <<",\"needsDisambiguation\":"<<(close?"true":"false")<<",\"status\":\""
+        <<(ranked.empty()?"no_ranked_candidates":(close?"close_candidates_need_new_stimulus":"ranked_candidates_need_contract_validation"))<<"\",\"ranked\":[";
+    for(size_t i=0;i<ranked.size();++i){if(i)j<<",";const auto delta=static_cast<int64_t>(ranked[0].score)-ranked[i].score;
+        j<<"{\"path\":\""<<EscapeJson(ranked[i].path)<<"\",\"score\":"<<ranked[i].score<<",\"rank\":"<<i+1
+            <<",\"deltaFromBest\":"<<delta<<",\"closeToBest\":"<<(delta<closeGap?"true":"false")<<"}";}
+    j<<"],\"nextStimulus\":\""<<(close?"Change one semantic argument at a time and collect a third natural sample; keep all alternative paths.":"Validate the typed argument contract, return/ownership and active call; ranking alone cannot enable the function.")<<"\"}";
+    return j.str();
+}
+
+static std::string ValidationProgressJson(const AbiResult& r){
+    bool ownedReturn=false;for(const auto& method:pipe_discovery::methods)if(r.key==method.key)ownedReturn=method.ownedReturn;
+    std::ostringstream j;
+    j<<"{\"schema\":\"crome-abi-validation-progress-v1\",\"argumentEvidenceMeasured\":"<<(r.machine?"true":"false")
+        <<",\"naturalThreadEvidenceMeasured\":"<<(r.naturalThreadId&&!r.a.empty()&&!r.b.empty()?"true":"false")
+        <<",\"callerEvidenceMeasured\":"<<(r.callerSiteValidated?"true":"false")
+        <<",\"typedArgumentsComplete\":false,\"returnContractValidated\":false,\"ownershipValidated\":false,\"activeCallValidated\":false"
+        <<",\"requiresOwnedReturn\":"<<(ownedReturn?"true":"false")
+        <<",\"contractComplete\":false,\"remainingChecks\":[\"typed_argument_contract\",\"return_or_void_contract\"";
+    if(ownedReturn)j<<",\"returned_object_membership\",\"reference_increment_and_release\"";
+    if(!r.naturalThreadId||r.a.empty()||r.b.empty())j<<",\"natural_thread_evidence\"";
+    if(!r.callerSiteValidated)j<<",\"natural_caller_evidence\"";
+    j<<",\"game_thread_dispatch\",\"active_call_result\"],\"savedPointersAreHistorical\":true,\"refreshObjectsBeforeActiveTest\":true}";
+    return j.str();
+}
+
+static std::string FrozenCandidateReplayJson(const AbiResult& r);
 static std::string ResultJson(const AbiResult& r){
     std::ostringstream j;
     j<<"{\n"
@@ -709,6 +748,13 @@ static std::string ResultJson(const AbiResult& r){
     for(size_t i=0;i<r.mappings.size();++i){if(i)j<<",";j<<"{\"semantic\":\""<<EscapeJson(r.mappings[i].first)<<"\",\"path\":\""<<EscapeJson(r.mappings[i].second)<<"\"}";}
     j<<"],\n"
      <<"        \"evidenceCandidates\": "<<CandidateJson(r.candidates)<<",\n"
+     <<"        \"contractComplete\": false,\n"
+     <<"        \"activeCallValidated\": false,\n"
+     <<"        \"candidateReview\": "<<CandidateReviewJson(r.candidates)<<",\n"
+     <<"        \"frozenCandidateReplay\": "<<FrozenCandidateReplayJson(r)<<",\n"
+     <<"        \"validationProgress\": "<<ValidationProgressJson(r)<<",\n"
+     <<"        \"captureScope\": {\"processId\":"<<GetCurrentProcessId()<<",\"moduleBase\":\""<<Hex(g_base)<<"\",\"purpose\":\"historical_evidence_not_live_call_arguments\"},\n"
+     <<"        \"captureStorage\": {\"storedA\":"<<std::min<size_t>(r.a.size(),8)<<",\"storedB\":"<<std::min<size_t>(r.b.size(),8)<<",\"limitPerStimulus\":8,\"truncated\":"<<(r.a.size()>8||r.b.size()>8?"true":"false")<<"},\n"
      <<"        \"machineAbiValidated\": "<<(r.machine?"true":"false")<<",\n"
      <<"        \"naturalThreadObserved\": "<<(r.naturalThreadId?"true":"false")<<",\n"
      <<"        \"naturalThreadId\": "<<r.naturalThreadId<<",\n"
@@ -736,6 +782,68 @@ static uintptr_t RawLocation(const Capture& c,const std::string& loc){
     if(loc=="RCX")return c.rcx; if(loc=="RDX")return c.rdx; if(loc=="R8")return c.r8; if(loc=="R9")return c.r9;
     if(loc.rfind("STACK+0x",0)==0){ try{ unsigned off=std::stoul(loc.substr(8),nullptr,16); if(off>=8 && off<=STACK_QWORDS*8 && off%8==0) return c.stack[off/8-1]; }catch(...){} }
     return 0;
+}
+
+static bool FrozenPointerPath(const Capture& c,const std::string& path,uintptr_t& out){
+    out=0;
+    if(path.rfind("*(",0)==0&&path.size()>3&&path.back()==')'){
+        auto reg=path.substr(2,path.size()-3);uint32_t offset=0;
+        const auto plus=reg.find("+0x");
+        if(plus!=std::string::npos){
+            try{size_t used=0;const auto value=std::stoull(reg.substr(plus+1),&used,0);
+                if(used!=reg.size()-plus-1||value>ARG_SNAP_BYTES)return false;offset=static_cast<uint32_t>(value);
+            }catch(...){return false;}
+            reg.resize(plus);
+        }
+        const auto* snap=SnapForReg(c,reg);
+        return snap&&SnapRead(*snap,offset,out);
+    }
+    if(path.rfind("STACK+0x",0)==0){
+        try{size_t used=0;const auto offset=std::stoull(path.substr(6),&used,0);
+            if(used!=path.size()-6||offset<8||offset>STACK_QWORDS*8||offset%8)return false;
+        }catch(...){return false;}
+        out=RawLocation(c,path);return true;
+    }
+    if(path=="RCX"||path=="RDX"||path=="R8"||path=="R9"){out=RawLocation(c,path);return true;}
+    return false;
+}
+
+static std::string FrozenCandidateReplayJson(const AbiResult& r){
+    std::ostringstream j;j<<"{\"policy\":\"compare_recorded_values_without_dereferencing_old_addresses\",\"activeValidation\":false,\"paths\":[";
+    for(size_t i=0;i<r.candidates.size();++i){
+        if(i)j<<",";const auto& path=r.candidates[i].path;size_t recorded=0,missing=0;
+        j<<"{\"path\":\""<<EscapeJson(path)<<"\",\"sampleValues\":[";bool first=true;
+        for(const auto* captures:{&r.a,&r.b})for(const auto& c:*captures){
+            if(!first)j<<",";first=false;uintptr_t value=0;
+            if(FrozenPointerPath(c,path,value)){++recorded;j<<"\""<<Hex(value)<<"\"";}else{++missing;j<<"null";}
+        }
+        j<<"],\"recordedValues\":"<<recorded<<",\"missingValues\":"<<missing<<"}";
+    }
+    j<<"]}";return j.str();
+}
+
+static void ShowSavedCandidateReview(const Profile& p){
+    const auto previousFp=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"fingerprint");
+    if(!DiscoveryFingerprintMatches(p)||!pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(previousFp,"timestamp")),ParseNum(FlatJsonString(previousFp,"sizeOfImage")),ParseNum(FlatJsonString(previousFp,"textHashFNV1A64")),p.timestamp,p.sizeOfImage,p.textHash))return;
+    try{
+        const auto root=crome::json::parse(p.raw);const auto* abi=root.get("abiCatalog");
+        const auto* observations=abi?abi->get("lastEvidenceSession"):nullptr;
+        if(!observations||!observations->isObject())return;
+        for(const auto& [key,obj]:observations->object()){
+            const auto* rva=obj.get("rva");const auto current=DiscoveredRva(p,key);
+            if(!current||!rva||!rva->isString()||ParseNum(rva->string())!=current)continue;
+            const auto* candidates=obj.get("evidenceCandidates");if(!candidates||!candidates->isArray()||candidates->array().empty())continue;
+            std::vector<AbiCandidate> alternatives;
+            for(const auto& candidate:candidates->array()){
+                const auto* path=candidate.get("path");const auto* score=candidate.get("score");
+                if(!path||!path->isString()||!score||!score->isNumber()||score->number()<-1000000||score->number()>1000000)continue;
+                alternatives.push_back({path->string(),static_cast<int>(score->number()),{}});
+            }
+            const auto review=crome::json::parse(CandidateReviewJson(alternatives));
+            std::cout<<"[RESUME ABI] "<<key<<": alternativas salvas="<<alternatives.size()
+                <<" proximas="<<(review.get("needsDisambiguation")->boolean()?"SIM; variar um argumento e coletar nova amostra":"NAO; concluir contrato e chamada ativa")<<"\n";
+        }
+    }catch(const std::exception& e){std::cout<<"[RESUME ABI] Revisao diagnostica indisponivel: "<<e.what()<<"\n";}
 }
 
 static bool EvalPointerPath(const Capture& c,const std::string& path,uintptr_t& out){
@@ -1041,7 +1149,23 @@ static std::string BuildAbiCatalog(const Profile& p,const Fingerprint& fp,const 
         if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<obj;
     }
     j<<"\n    },\n    \"lastEvidenceSession\": {\n";
-    first=true;for(auto& [key,r]:results){if(!r.tested)continue;if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<ResultJson(r);}j<<"\n    },\n";
+    // Retain the latest inconclusive observations as well as the strongest
+    // contract. Skipping a test must not erase its alternative candidates.
+    first=true;
+    const auto previousSession=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"lastEvidenceSession");
+    const auto previousFp=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"fingerprint");
+    const bool sameSessionBuild=pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(previousFp,"timestamp")),ParseNum(FlatJsonString(previousFp,"sizeOfImage")),ParseNum(FlatJsonString(previousFp,"textHashFNV1A64")),fp.timestamp,fp.sizeOfImage,fp.textHash);
+    for(const auto& key:keys){
+        std::string observation;const auto it=results.find(key);
+        if(it!=results.end()&&it->second.tested)observation=ResultJson(it->second);
+        else if(sameSessionBuild){
+            auto prior=ExtractNamedObject(previousSession,key);const auto current=DiscoveredRva(p,key);
+            if(current&&ParseNum(FlatJsonString(prior,"rva"))==current)observation=ForcePassive(prior);
+        }
+        if(observation.empty())continue;
+        if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<observation;
+    }
+    j<<"\n    },\n";
     j<<"    \"evidencePolicy\": {\"neverDowngradeStrongerExistingEvidence\":true,\"userRole\":\"generate_runtime_transition_only\",\"profileFactsAreReused\":true},\n";
     j<<"    \"callabilityPolicy\": {\"requiresMachineAbiValidated\":true,\"requiresNaturalThreadEvidence\":true,\"requiresCallerSiteValidated\":true,\"requiresActiveCallValidation\":true}\n  }";return j.str();
 }
@@ -1076,6 +1200,7 @@ static void RunAbiSession(){
     std::cout<<"\n[PROFILE] "<<DisplayPath(p.path)<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
     LogStage("profile_selected; prologue_cross_check_begin");
     ProfileCrossCheck(p); // Diagnostic only; discovery and fingerprint gates remain mandatory.
+    ShowSavedCandidateReview(p);
     LogStage("initialization_complete; waiting_for_user; no_breakpoint_installed");
     std::map<std::string,AbiResult> results;
     if(p.fnGameAttack&&AskYes("Testar ABI Game::attack com evidencias do profile?",true))results["gameAttack"]=TestAttackFollow(p,true);
