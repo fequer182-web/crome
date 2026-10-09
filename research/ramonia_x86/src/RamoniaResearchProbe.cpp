@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 #include "RamoniaPipeBaseline.hpp"
+#include "GuidedDiscovery.hpp"
 
 // ============================================================================
 // OTCLab Ramonia x86 Research Probe V39
@@ -577,31 +578,24 @@ RttiResult ResolveRttiClass(const ModuleView& m, const std::string& cls) {
 }
 
 std::vector<std::string> FindAsciiStringsContaining(const ModuleView& m, const std::string& needle) {
-    std::vector<std::string> out;
-    const std::string want = Lower(needle);
+    guided_discovery::AsciiHints hints(needle);
+    std::array<uint8_t,4096> bytes{};
     for (const auto& sec : m.sections) {
         if (!sec.readable() || sec.executable() || sec.end <= sec.start) continue;
         uintptr_t cur = sec.start;
-        std::string acc;
         while (cur < sec.end) {
-            char c = 0;
-            if (!SafeRead(cur, c)) { ++cur; acc.clear(); continue; }
-            const unsigned char uc = static_cast<unsigned char>(c);
-            const bool printable = (uc >= 0x20 && uc <= 0x7E);
-            if (printable) {
-                if (acc.size() < 256) acc.push_back(c);
-            } else {
-                if (acc.size() >= 4 && Lower(acc).find(want) != std::string::npos) out.push_back(acc);
-                acc.clear();
-            }
-            ++cur;
+            // Align chunks to page boundaries so an unreadable page does not
+            // discard readable bytes from the adjacent page.
+            const size_t take=std::min<size_t>(sec.end-cur,4096u-(cur&4095u));
+            SIZE_T got=0;
+            if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<LPCVOID>(cur),bytes.data(),take,&got)
+               && got==take) hints.feed(bytes.data(),take);
+            else hints.gap();
+            cur+=take;
         }
-        if (acc.size() >= 4 && Lower(acc).find(want) != std::string::npos) out.push_back(acc);
+        hints.finish();
     }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-    if (out.size() > 64) out.resize(64);
-    return out;
+    return hints.result();
 }
 
 struct BindCandidate {
@@ -1838,6 +1832,7 @@ struct Report {
     std::vector<std::string> profileSources;
     std::map<std::string,ActionAbiV34> actionAbi;
     std::map<std::string,std::string> actionAbiRaw;
+    std::map<std::string,std::string> guidedEvidence;
 };
 
 std::string ProbeDirectory() {
@@ -1868,6 +1863,7 @@ struct ProfileCache {
     CreatureLayout creatureLayout;
     WorldLightLayout worldLight;
     std::map<std::string,std::string> actionAbiRaw;
+    std::map<std::string,std::string> guidedEvidence;
     std::vector<std::string> sources;
 };
 
@@ -2051,6 +2047,11 @@ ProfileCache ParseProfileFile(const std::string& path, const Report& r) {
     p.mapOwnerRva = HexU32Value(JsonStringValue(owners, "mapRva"));
 
     const std::string actions = FindJsonObject(json, "actions");
+    const std::string guided = FindJsonObject(json, "guidedValidation");
+    for(const char* method:guided_discovery::methods) {
+        const auto object=FindJsonObject(guided,method);
+        if(!object.empty()) p.guidedEvidence[method]=object;
+    }
     for (const char* tok : ramonia_baseline::abiMethods) {
         const std::string obj = FindJsonObject(actions, tok);
         if (!obj.empty()) p.actionAbiRaw[tok] = obj;
@@ -2290,6 +2291,8 @@ void MergeProfile(ProfileCache& dst, const ProfileCache& src) {
     for (const auto& kv : src.actionAbiRaw) {
         if (!dst.actionAbiRaw.count(kv.first)) dst.actionAbiRaw[kv.first] = kv.second;
     }
+    for(const auto& kv:src.guidedEvidence)
+        if(!dst.guidedEvidence.count(kv.first)) dst.guidedEvidence[kv.first]=kv.second;
 }
 
 ProfileCache LoadProfileForBuild(const Report& r) {
@@ -2407,6 +2410,7 @@ void ApplyLoadedProfile(Report& r, const ProfileCache& p) {
         if (kv.second.offset >= 0 && EvidenceScore(kv.second.status) > 0) r.selectedFields[kv.first] = kv.second;
     }
     r.actionAbiRaw = p.actionAbiRaw;
+    r.guidedEvidence = p.guidedEvidence;
 }
 
 bool QuickCheckPosition(uintptr_t lp, const RuntimePositionValidation& p,
@@ -4514,7 +4518,7 @@ std::string SaveJson(const Report& r) {
 
     o << "{\n";
     o << "  \"schema\": \"otclab-ramonia-x86-research-v40\",\n";
-    o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
+    o << "  \"mode\": \"discovery_and_natural_call_capture_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
     o << "  \"persistence\": {\"profileVersion\": 40, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
@@ -4556,7 +4560,18 @@ std::string SaveJson(const Report& r) {
         } else {
             o << "\"methodRva\": \"0x0\", \"ownerRva\": \"0x0\", \"status\": \"not_found\"";
         }
-        o << "}" << (++bi<r.binds.size()?",":"") << "\n";
+        o << ",\"candidates\":[";
+        for(size_t i=0;i<kv.second.candidates.size();++i) {
+            const auto& c=kv.second.candidates[i];
+            if(i) o << ",";
+            o << "{\"methodRva\":\"" << HexU32(c.methodRva)
+              << "\",\"ownerRva\":\"" << HexU32(c.ownerRva)
+              << "\",\"ownerSection\":\"" << JsonEscape(c.ownerSection)
+              << "\",\"tokenRva\":\"" << HexU32(c.tokenRva)
+              << "\",\"xrefRva\":\"" << HexU32(c.xrefRva)
+              << "\",\"score\":" << c.score << "}";
+        }
+        o << "]}" << (++bi<r.binds.size()?",":"") << "\n";
     }
     o << "  },\n";
 
@@ -4564,6 +4579,13 @@ std::string SaveJson(const Report& r) {
       << "\", \"mapRva\": \"" << HexU32(r.mapOwnerRva) << "\"},\n";
 
     o << "  \"pipeBaseline\": " << CurrentPipeBaselineJson(r) << ",\n";
+    o << "  \"guidedValidation\": {";
+    size_t gi=0;
+    for(const auto& kv:r.guidedEvidence) {
+        if(gi++) o << ",";
+        o << "\"" << JsonEscape(kv.first) << "\":" << kv.second;
+    }
+    o << "},\n";
 
     o << "  \"actions\": {\n";
     const std::vector<std::string> actionOrder(
@@ -9585,6 +9607,217 @@ void RunTopMoveAbiBaseline(Report& r) {
                  "RET, Tile::things e refcount. Entrada sozinha nao promove ABI.\n";
 }
 
+std::vector<std::string> GuidedSavedObservations(const std::string& json) {
+    std::vector<std::string> objects;
+    const auto key=json.find("\"observations\"");
+    if(key==std::string::npos) return objects;
+    const auto start=json.find('[',key);
+    if(start==std::string::npos) return objects;
+    size_t objectStart=0;
+    int depth=0;
+    bool quoted=false,escaped=false;
+    for(size_t i=start+1;i<json.size();++i) {
+        const char c=json[i];
+        if(quoted) {
+            if(escaped) escaped=false;
+            else if(c=='\\') escaped=true;
+            else if(c=='"') quoted=false;
+            continue;
+        }
+        if(c=='"') { quoted=true; continue; }
+        if(c=='{' && depth++==0) objectStart=i;
+        else if(c=='}') {
+            if(depth<=0) return {};
+            if(--depth==0) objects.push_back(json.substr(objectStart,i-objectStart+1));
+        } else if(c==']' && depth==0) return objects;
+    }
+    return {}; // Reject truncated snapshots instead of retaining partial JSON.
+}
+
+std::string GuidedCandidateSignature(const BindResult& bind) {
+    auto addresses=guided_discovery::candidates(bind);
+    std::sort(addresses.begin(),addresses.end());
+    std::ostringstream o;
+    for(uint32_t address:addresses) {
+        o << HexU32(address) << ":";
+        std::set<uint32_t> owners;
+        if(bind.selectedOk && bind.selected.methodRva==address) owners.insert(bind.selected.ownerRva);
+        for(const auto& candidate:bind.candidates)
+            if(candidate.methodRva==address) owners.insert(candidate.ownerRva);
+        for(uint32_t owner:owners) o << HexU32(owner) << "/";
+        o << ";";
+    }
+    return o.str();
+}
+
+std::string GuidedSnapshotJson(const V33MemSnap& snap) {
+    std::ostringstream o;
+    const size_t valid=std::min<size_t>(snap.valid,sizeof(snap.bytes));
+    o << "{\"address\":\"" << HexU32(snap.address) << "\",\"validBytes\":" << valid << ",\"bytesHex\":\"";
+    for(size_t i=0;i<valid;++i)
+        o << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(snap.bytes[i]);
+    o << "\"}";
+    return o.str();
+}
+
+std::string GuidedCaptureJson(const Report& r,const V33Capture& c) {
+    std::ostringstream o;
+    o << "{\"pid\":" << GetCurrentProcessId() << ",\"moduleBase\":\"" << HexU64(r.module.base)
+      << "\",\"threadId\":" << c.threadId << ",\"methodRva\":\"" << HexU32(c.methodRva)
+      << "\",\"registers\":{\"eax\":\"" << HexU32(c.eax) << "\",\"ecx\":\"" << HexU32(c.ecx)
+      << "\",\"edx\":\"" << HexU32(c.edx) << "\",\"esp\":\"" << HexU32(c.esp)
+      << "\",\"ebp\":\"" << HexU32(c.ebp) << "\"},\"stack\":[";
+    for(size_t i=0;i<8;++i) { if(i) o << ","; o << "\"" << HexU32(c.stack[i]) << "\""; }
+    o << "],\"thisSnapshot\":" << GuidedSnapshotJson(c.ecxSnap) << ",\"arguments\":[";
+    for(size_t i=0;i<6;++i) {
+        if(i) o << ",";
+        o << "{\"direct\":" << GuidedSnapshotJson(c.argSnap[i])
+          << ",\"nested0\":" << GuidedSnapshotJson(c.argNested0[i])
+          << ",\"nested1\":" << GuidedSnapshotJson(c.argNested1[i]) << "}";
+    }
+    o << "],\"thisClassObserved\":\"" << JsonEscape(V33ClassFromSnap(r,c.ecxSnap))
+      << "\",\"thisMatchesGame\":"
+      << ((r.gameOwnerRva && c.ecx==r.module.base+r.gameOwnerRva)?"true":"false")
+      << ",\"callerRva\":\"" << HexU32(r.module.inModule(c.stack[0])?r.module.rva(c.stack[0]):0)
+      << "\",\"savedPointersAreHistorical\":true}";
+    return o.str();
+}
+
+std::string GuidedMethodJson(const std::string& signature,const std::vector<std::string>& observations,
+                            const std::string& status) {
+    std::ostringstream o;
+    o << "{\"candidateSignature\":\"" << JsonEscape(signature) << "\",\"status\":\"" << status
+      << "\",\"callable\":false,\"contractComplete\":false,\"activeCallValidated\":false,"
+      << "\"pending\":[\"typed_argument_comparison\",\"return_and_stack_cleanup\","
+      << "\"ownership_if_applicable\",\"game_thread_dispatch\",\"active_call\"],\"observations\":[";
+    for(size_t i=0;i<observations.size();++i) { if(i) o << ","; o << observations[i]; }
+    o << "]}";
+    return o.str();
+}
+
+bool GuidedExecutableRva(const ModuleView& module,uint32_t rva) {
+    if(!rva || rva>=module.sizeOfImage) return false;
+    const uintptr_t address=module.base+rva;
+    for(const auto& section:module.sections)
+        if(section.executable() && address>=section.start && address<section.end) return true;
+    return false;
+}
+
+void RunGuidedDiscoveryValidation(Report& r) {
+    std::cout << "\n[VALIDACAO GUIADA X86]\n"
+              << "A descoberta terminou. Agora voce ajuda a observar os candidatos pelo jogo.\n"
+              << "LocalPlayer nao e requisito para estas capturas.\n"
+              << "Retorno/refcount e chamada ativa continuam pendentes ate haver prova propria.\n";
+    // Imported observations are historical snapshots, never live pointers or
+    // permission to execute an address. Reuse only an identical fresh bind set.
+    for(const char* method:guided_discovery::methods) {
+        const auto bind=r.binds.find(method);
+        const auto old=r.guidedEvidence.find(method);
+        if(old!=r.guidedEvidence.end() &&
+           (bind==r.binds.end() || JsonStringValue(old->second,"candidateSignature")!=GuidedCandidateSignature(bind->second)))
+            r.guidedEvidence.erase(old);
+    }
+    SaveCheckpoint(r,"guided_discovery_ready");
+    if(AskYesNo("Iniciar testes guiados dos candidatos pendentes agora? [S/N]")!='s') return;
+    WaitEnter("Entre no personagem e deixe o mundo carregado. ENTER para comecar... ");
+    for(const char* method:guided_discovery::methods) {
+        auto bind=r.binds.find(method);
+        auto candidates=bind==r.binds.end()?std::vector<uint32_t>{}:guided_discovery::candidates(bind->second);
+        std::cout << "\n[TESTE PENDENTE] " << method << " candidatos=" << candidates.size() << "\n";
+        if(candidates.empty()) {
+            std::cout << "[BUSCA PENDENTE] Nenhum endereco para observar. A acao de referencia e: "
+                      << guided_discovery::instruction(method) << "\n"
+                      << "Sera salvo como discovery_required; nenhuma ABI herdada.\n";
+            if(AskYesNo("Voce encontrou uma entrada de funcao desta build no debugger para observar? [S/N]")=='s') {
+                std::cout << "RVA da ENTRADA da funcao (ex.: 0x1234; nao endereco absoluto): " << std::flush;
+                std::string text;
+                std::getline(std::cin,text);
+                size_t consumed=0;
+                uint32_t rva=0;
+                try {
+                    const auto value=std::stoul(text,&consumed,0);
+                    if(consumed==text.size() && value<=0xFFFFFFFFul) rva=static_cast<uint32_t>(value);
+                } catch(...) {}
+                if(GuidedExecutableRva(r.module,rva)) {
+                    auto& supplied=r.binds[method];
+                    supplied.name=method;
+                    BindCandidate candidate;
+                    candidate.methodRva=rva;
+                    candidate.ownerSection="user_supplied_unvalidated";
+                    supplied.candidates.push_back(candidate);
+                    bind=r.binds.find(method);
+                    candidates=guided_discovery::candidates(supplied);
+                    std::cout << "[CANDIDATO DO USUARIO] Sera observado sem promover o bind/ABI.\n";
+                } else std::cout << "[REJEITADO] RVA invalido ou fora de secao executavel.\n";
+            }
+            if(candidates.empty()) {
+                r.guidedEvidence[method]=GuidedMethodJson("",{},"discovery_required");
+                SaveCheckpoint(r,std::string("guided_missing_")+method);
+                continue;
+            }
+        }
+        const std::string signature=GuidedCandidateSignature(bind->second);
+        const bool prior=r.guidedEvidence.count(method)!=0;
+        if(prior) std::cout << "Ha evidencias salvas desta build; ainda nao equivalem a ABI completa.\n";
+        if(AskYesNo(std::string(prior?"Repetir/complementar":"Testar")+" "+method+" pelo jogo? [S/N]")!='s') {
+            if(!prior) r.guidedEvidence[method]=GuidedMethodJson(signature,{},"not_tested_pending_contract");
+            SaveCheckpoint(r,std::string("guided_skipped_")+method);
+            continue;
+        }
+        std::vector<std::string> observations;
+        // Retain earlier frozen evidence when complementing an exact bind set.
+        if(prior) {
+            const auto json=r.guidedEvidence.at(method);
+            observations=GuidedSavedObservations(json);
+        }
+        bool hit=std::any_of(observations.begin(),observations.end(),[](const std::string& object) {
+            return object.find("\"threadId\"")!=std::string::npos;
+        });
+        for(uint32_t candidate:candidates) {
+            if(!GuidedExecutableRva(r.module,candidate)) {
+                std::cout << "[REJEITADO] " << HexU32(candidate) << " fora de secao executavel.\n";
+                observations.push_back("{\"methodRva\":\""+HexU32(candidate)+"\",\"status\":\"non_executable\"}");
+                continue;
+            }
+            if(AskYesNo("Observar candidato "+HexU32(candidate)+"? [S/N]")!='s') continue;
+            for(int sample=0;sample<2;++sample) {
+                V33Disarm();
+                uint8_t entryByte=0;
+                if(!V33ReadProcessSafe(r.module.base+candidate,&entryByte,1) || entryByte==0xCC ||
+                   !V33InstallOneShot(r.module.base+candidate,candidate)) {
+                    observations.push_back("{\"methodRva\":\""+HexU32(candidate)+"\",\"status\":\"breakpoint_unavailable\"}");
+                    break;
+                }
+                std::cout << "[AMOSTRA " << (sample==0?"A":"B") << "] "
+                          << guided_discovery::instruction(method) << "\n";
+                WaitEnter("Faca a acao no jogo e depois ENTER aqui... ");
+                V33Disarm();
+                const bool observed=InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0;
+                if(observed) {
+                    hit=true;
+                    observations.push_back(GuidedCaptureJson(r,g_v33Capture));
+                    std::cout << "[CAPTURADO] " << method << " " << HexU32(candidate)
+                              << " thread=" << g_v33Capture.threadId
+                              << " thisRTTI=" << V33ClassFromSnap(r,g_v33Capture.ecxSnap) << "\n";
+                } else {
+                    observations.push_back("{\"methodRva\":\""+HexU32(candidate)+"\",\"status\":\"no_hit\"}");
+                    std::cout << "[NAO OBSERVADO] A acao nao atingiu este candidato.\n";
+                }
+                r.guidedEvidence[method]=GuidedMethodJson(signature,observations,"entry_observations_pending_contract");
+                SaveCheckpoint(r,std::string("guided_")+method);
+                if(sample==0 && AskYesNo("Fazer segunda amostra com objeto/valor diferente? [S/N]")!='s') break;
+            }
+        }
+        r.guidedEvidence[method]=GuidedMethodJson(signature,observations,
+            hit?"entry_observations_pending_contract":"inconclusive_pending_contract");
+        SaveCheckpoint(r,std::string("guided_")+method);
+    }
+    V33Disarm();
+    if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
+    std::cout << "\n[GUIA SALVO] Candidatos, capturas e pendencias salvos por fingerprint.\n"
+              << "Proxima etapa: layouts/objetos. Entrada observada nao libera chamadas no Crome.\n";
+}
+
 DWORD WINAPI Worker(LPVOID) {
     OpenConsole();
     PrintHeader();
@@ -9759,6 +9992,9 @@ DWORD WINAPI Worker(LPVOID) {
               << "Game owner RVA : " << HexU32(r.gameOwnerRva) << "\n"
               << "Map owner RVA  : " << HexU32(r.mapOwnerRva) << "\n";
 
+    ApplyLoadedProfile(r, cached);
+    RunGuidedDiscoveryValidation(r);
+    std::cout << "\n[CONTINUANDO] Buscando hints de luz em blocos de memoria...\n" << std::flush;
     const auto lightStrings = FindAsciiStringsContaining(r.module, "light");
     std::cout << "\n[LIGHT SEMANTIC HINTS] strings containing 'light'=" << lightStrings.size() << "\n";
     for (size_t i=0; i<lightStrings.size() && i<24; ++i)
@@ -9768,7 +10004,6 @@ DWORD WINAPI Worker(LPVOID) {
     if (r.binds["attack"].selectedOk) attackRva = r.binds["attack"].selected.methodRva;
     if (r.binds["follow"].selectedOk) followRva = r.binds["follow"].selected.methodRva;
     r.gameLayout = InferGameLayout(r.module, attackRva, followRva);
-    ApplyLoadedProfile(r, cached);
     // Validate the imported Tile ABI before any discovery checkpoint can save it.
     RunTopMoveAbiBaseline(r);
     RunUiMapLightStaticDiscoveryV13(r);
@@ -10007,7 +10242,9 @@ DWORD WINAPI Worker(LPVOID) {
         RunTileGroundDiscoveryV30(r);
         RunGameActionAbiProbeV32(r);
         RunAutoWalkDeepAbiProbeV40(r);
-        RunGameActionRuntimeCaptureV33(r);
+        // Entry observations were already collected independently of LocalPlayer
+        // in the guided phase. Do not silently promote a new build using the
+        // legacy single-sample classifier's family-specific ABI assumptions.
         RunOpenContainerDiscoveryV24Multi(r);
         RunWorldAmbientLightDiscovery(r);
     } else {
