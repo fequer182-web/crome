@@ -2477,6 +2477,21 @@ static void RefreshNativeRuntime() {
         g_nativeRuntimeLoaded = false; g_nativeRuntimeStatus = "Olders not running";
         g_nativeAttemptPid = 0; g_nativeAttemptedForPid = false; return;
     }
+    // Discovery-only profiles must never start the legacy injected runtime.
+    // In particular, a process name or matching module size is not permission
+    // to execute the Olders action wrappers.
+    const auto* profile=g_session ? g_session->profile() : nullptr;
+    const auto* session=g_session ? &g_session->status() : nullptr;
+    if (!profile || !profile->nativeActionsReady ||
+        profile->build.architecture!="x64" || !session ||
+        session->pid!=pid || !session->profileMatched ||
+        !session->localPlayerResolved || !session->localPlayerVtableOk) {
+        g_nativeRuntimeLoaded=false;
+        g_nativeRuntimeStatus="Olders: somente leitura; runtime aguarda validacao";
+        g_nativeAttemptPid=pid;
+        g_nativeAttemptedForPid=false;
+        return;
+    }
     if (pid != g_nativeAttemptPid) { g_nativeAttemptPid = pid; g_nativeAttemptedForPid = false; }
     if (IsModuleLoaded(pid, L"CromeRuntime.dll")) {
         g_nativeRuntimeLoaded = true; g_nativeRuntimeStatus = "CONNECTED"; return;
@@ -4286,6 +4301,8 @@ static void DrawFooter(const Theme& t) {
 
 static void DrawRuntimeGuard(const Theme& t) {
     if (g_ramoniaPid.load()) return;
+    const auto* profile=g_session ? g_session->profile() : nullptr;
+    if (!profile || !profile->nativeActionsReady) return;
     const auto* sessionStatus = g_session ? &g_session->status() : nullptr;
     const bool nonOldersProfile = sessionStatus && sessionStatus->profileMatched && sessionStatus->exe.find("Olders") == std::string::npos && sessionStatus->exe.find("olders") == std::string::npos;
     if (nonOldersProfile) return; // permite validar builds como Classico em modo leitura sem exigir o runtime Olders.
