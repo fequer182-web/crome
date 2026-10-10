@@ -13,6 +13,7 @@
 #include "../runtime/OldersBaseline.hpp"
 #include "../runtime/OldersPipe.hpp"
 #include "../runtime/LegacyWindowsPath.hpp"
+#include "../runtime/LockedLogBuffer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -302,8 +303,9 @@ DWORD WINAPI worker(LPVOID) {
     wchar_t modulePath[32768]{};GetModuleFileNameW(g_module,modulePath,32768);
     const auto baseDirWide=std::filesystem::path(modulePath).parent_path();
     std::ofstream runtimeLog(baseDirWide/L"CromeRuntime.log",std::ios::app);
+    crome::LockedLogBuffer lockedLog(runtimeLog.rdbuf());
     auto* priorOut=std::cout.rdbuf(); auto* priorError=std::cerr.rdbuf();
-    if(runtimeLog){std::cout.rdbuf(runtimeLog.rdbuf());std::cerr.rdbuf(runtimeLog.rdbuf());}
+    if(runtimeLog){std::cout.rdbuf(&lockedLog);std::cerr.rdbuf(&lockedLog);}
 
     std::cout << "\n============================================================\n"
               << "       CROME SDK V21.6 - FOLLOW BLOCKER / SAFE CHASE / HEALING / WALKER\n"

@@ -6,6 +6,7 @@
 
 #include "IActions.hpp"
 #include "OldersAttackOwnership.hpp"
+#include "PendingItemPayload.hpp"
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Snapshots.hpp"
 
@@ -485,12 +486,8 @@ public:
                       << " nao encontrado em equipment nem containers abertos.\n";
             return false;
         }
-        pendingGroundIds_ = groundIds;
-        pendingGroundRange_ = maxRange;
-        const bool ok = requestItemAction(PendingItemAction::UseWithNearestGround,
-                                          item.id, found, nullptr);
-        if (!ok) pendingGroundIds_.clear();
-        return ok;
+        return requestItemAction(PendingItemAction::UseWithNearestGround,
+                                 item.id, found, nullptr, groundIds, maxRange);
     }
 
     // Diagnostic used by V15 hotkey F2. Map::getTile itself executes only on
@@ -1347,24 +1344,25 @@ private:
     bool requestItemAction(PendingItemAction action,
                            std::uint32_t requestedItemId,
                            const FoundItem& found,
-                           const Position* target = nullptr) {
-        if (InterlockedCompareExchange(&itemActionPending_, 1, 0) != 0) {
-            std::cout << "\n[ITEM ACTION] Ja existe uma requisicao pendente.\n";
-            return false;
-        }
+                           const Position* target = nullptr,
+                           std::vector<std::uint16_t> groundIds = {},
+                           int groundRange = 0) {
+        return tryPublishItemRequest(itemActionPending_, [&] {
+            pendingGroundIds_ = std::move(groundIds);
+            pendingGroundRange_ = std::clamp(groundRange, 0, 15);
+            pendingItemAction_ = action;
+            pendingRequestedItemId_ = requestedItemId;
+            pendingFoundItem_ = found;
+            if (target) setPendingTarget(*target);
 
-        pendingItemAction_ = action;
-        pendingRequestedItemId_ = requestedItemId;
-        pendingFoundItem_ = found;
-        if (target) setPendingTarget(*target);
-
-        if (!PostMessage(gameWindow_, kItemActionMessage, 0, 0)) {
-            pendingItemAction_ = PendingItemAction::None;
-            InterlockedExchange(&itemActionPending_, 0);
-            std::cout << "\n[ITEM ACTION] PostMessage falhou. error=" << GetLastError() << "\n";
-            return false;
-        }
-        return true;
+            if (!PostMessage(gameWindow_, kItemActionMessage, 0, 0)) {
+                pendingItemAction_ = PendingItemAction::None;
+                pendingGroundIds_.clear();
+                std::cout << "\n[ITEM ACTION] PostMessage falhou. error=" << GetLastError() << "\n";
+                return false;
+            }
+            return true;
+        });
     }
 
     bool executePendingWalk() {
@@ -1521,6 +1519,13 @@ private:
 
         if (pendingItemAction_ == PendingItemAction::UseWithNearestGround) {
             if (!profile_.actions.useWith || !mapRuntimeReady()) return false;
+            FoundItem refreshed{};
+            if (!findUsableItemById(pendingRequestedItemId_, refreshed)) {
+                std::cout << "[FISH] ABORT: rod no longer available.\n" << std::flush;
+                return false;
+            }
+            pendingFoundItem_ = refreshed;
+            source.thing = refreshed.ptr;
             NativePosition targetPos{};
             std::uintptr_t tile{}, groundThing{};
             std::uint16_t targetId{};
