@@ -12,6 +12,7 @@
 #include "../sdk/Conditions.hpp"
 #include "../runtime/OldersBaseline.hpp"
 #include "../runtime/OldersPipe.hpp"
+#include "../runtime/LegacyWindowsPath.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -487,7 +488,7 @@ DWORD WINAPI worker(LPVOID) {
 
         auto safeWriteTime = [](const std::string& path) {
             std::error_code ec;
-            auto t = std::filesystem::last_write_time(path, ec);
+            auto t = std::filesystem::last_write_time(crome::legacyWindowsPath(path), ec);
             return ec ? std::filesystem::file_time_type::min() : t;
         };
         auto routeMtime = safeWriteTime(routePath);
@@ -535,7 +536,7 @@ DWORD WINAPI worker(LPVOID) {
             if (t >= nextInspectPoll) {
                 nextInspectPoll = t + 150;
                 try {
-                    if (std::filesystem::exists(inspectRequestPath)) {
+                    if (std::filesystem::exists(crome::legacyWindowsPath(inspectRequestPath))) {
                         const auto rootReq = crome::json::parse(crome::readRouteText(inspectRequestPath));
                         if (rootReq.isObject()) {
                             const auto seq = static_cast<std::uint64_t>(crome::jsonU32(rootReq.get("seq"), 0));
