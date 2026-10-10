@@ -9,6 +9,7 @@
 #include "PendingItemPayload.hpp"
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Snapshots.hpp"
+#include "../bot/ChangeGold.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -426,6 +427,11 @@ public:
         return requestItemAction(PendingItemAction::Use, item.id, found);
     }
 
+    bool changeGold(const std::vector<std::uint16_t>& ids) {
+        if(ids.empty() || !dispatcherReady() || !validateRuntime(false) || !profile_.actions.use)return false;
+        return requestItemAction(PendingItemAction::ChangeGold,0,FoundItem{},nullptr,ids);
+    }
+
     // Creature/self path validated in V13.
     bool useWith(const Item& item, Position target) override {
         if (!validateRuntime(false) || !profile_.actions.useWith) {
@@ -616,6 +622,7 @@ private:
         UseWithNearestGround,
         InspectTile,
         UseGroundObject,
+        ChangeGold,
     };
 
     using LocalPlayerAutoWalkFn = bool(__fastcall*)(void*, NativePosition*, bool);
@@ -1098,7 +1105,7 @@ private:
         return ok;
     }
 
-    bool findInventoryItemById(std::uint32_t wantedId, FoundItem& out) const {
+    bool findInventoryItemById(std::uint32_t wantedId, FoundItem& out, std::uint16_t expectedCount=0) const {
         out = {};
         if (!wantedId || wantedId > 0xFFFFu || !profile_.inventory.base || !profile_.inventory.slotStride)
             return false;
@@ -1111,6 +1118,7 @@ private:
             const auto itemPtr = readPtr(slotAddr);
             if (!itemPtr || !isReadableRange(itemPtr, profile_.container.itemSubtype + sizeof(std::uint16_t))) continue;
             if (readU16(itemPtr + profile_.container.itemId) != static_cast<std::uint16_t>(wantedId)) continue;
+            if (!coinStackMatches(readU16(itemPtr + profile_.container.itemSubtype),expectedCount)) continue;
             out.ptr = itemPtr;
             out.index = static_cast<std::uint32_t>(i);
             out.subtype = readU16(itemPtr + profile_.container.itemSubtype);
@@ -1120,12 +1128,12 @@ private:
         return false;
     }
 
-    bool findUsableItemById(std::uint32_t wantedId, FoundItem& out) const {
-        if (findInventoryItemById(wantedId, out)) return true;
-        return findOpenContainerItemById(wantedId, out);
+    bool findUsableItemById(std::uint32_t wantedId, FoundItem& out, std::uint16_t expectedCount=0) const {
+        if (findInventoryItemById(wantedId, out, expectedCount)) return true;
+        return findOpenContainerItemById(wantedId, out, expectedCount);
     }
 
-    bool findOpenContainerItemById(std::uint32_t wantedId, FoundItem& out) const {
+    bool findOpenContainerItemById(std::uint32_t wantedId, FoundItem& out, std::uint16_t expectedCount=0) const {
         out = {};
         if (!wantedId || wantedId > 0xFFFFu) return false;
 
@@ -1195,6 +1203,7 @@ private:
 
                 const auto id = readU16(itemPtr + c.itemId);
                 if (id != static_cast<std::uint16_t>(wantedId)) continue;
+                if (!coinStackMatches(readU16(itemPtr + c.itemSubtype),expectedCount)) continue;
 
                 out.ptr = itemPtr;
                 out.containerId = containerId;
@@ -1412,6 +1421,22 @@ private:
 
         if (pendingItemAction_ == PendingItemAction::InspectTile)
             return dumpTileGameThread(pendingTargetPosition_);
+
+        if (pendingItemAction_ == PendingItemAction::ChangeGold) {
+            if (!profile_.actions.use || manualInteractionActive()) return false;
+            for (const auto id : pendingGroundIds_) {
+                FoundItem coin{};
+                if (!findUsableItemById(id,coin,100)) continue;
+                ThingHandle handle{}; handle.thing=coin.ptr;
+                handle.representation=reinterpret_cast<std::uintptr_t>(&handle.thing);
+                std::cout << "[CHANGE GOLD] use id=" << id << " count=100\n" << std::flush;
+                const auto fn=reinterpret_cast<GameUseFn>(base_+*profile_.actions.use);
+                fn(reinterpret_cast<void*>(game),&handle);
+                std::cout << "[CHANGE GOLD] Game::use returned; waiting for server update.\n" << std::flush;
+                return true;
+            }
+            return false;
+        }
 
         if (pendingItemAction_ == PendingItemAction::UseGroundObject) {
             if (!profile_.actions.use) return false;

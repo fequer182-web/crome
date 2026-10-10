@@ -77,3 +77,25 @@ Pathable IDs ainda nao altera o pathfinding do cliente nesta implementacao.
 target_positioning_tests verifica todos os quadrantes da diagonal, anel de
 distancia/afastamento, alvo em movimento, andar diferente, None e compatibilidade
 de configuracao. Build/testes locais nao substituem a validacao no Olders.
+
+## Change Gold e organizacao do Cavebot
+
+Change Gold em Tools envia change_gold pelo tools.json/Pipe; os IDs fonte ficam
+em Cavebot > IDs > Change Gold IDs (walker_ids.json, chave changeGold). Cadastrar
+os Client IDs de gold e platinum, sem crystal. A lista inicia vazia e o modulo
+desligado; o perfil/bundle preserva a lista e a opcao.
+
+O runtime Olders procura uma pilha de exatamente 100 no inventario ou containers
+abertos, ignorando pilhas menores mesmo quando aparecem antes da pilha cheia.
+A busca e o Game::use existente executam no game thread; uma pilha por tentativa,
+com nova leitura na proxima, intervalo de 1 segundo e dispatcher de itens comum.
+Game::use da baseline empresta o handle (nao consome como Game::attack).
+O servidor decide o resultado da conversao; retorno normal nao comprova sucesso.
+Containers fechados nao sao abertos e moedas nao sao empilhadas automaticamente.
+Esta implementacao e Olders x64; o checkbox fica desabilitado no Ramonia.
+
+No Cavebot, IDs e salvar/carregar perfil ficam juntos no topo; Target, HP, Range
+e Mode ficam alinhados em duas colunas. Should Attack Me indica a descoberta
+pendente. change_gold_tests verifica configuracao, IDs invalidos/duplicados,
+intervalo, pilhas cheias e compatibilidade dos outros usos de item.
+Build local confirmado; disposicao visual e conversao real dependem do cliente.

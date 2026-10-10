@@ -2632,7 +2632,7 @@ static void EnsureWalkerIdCatalog() {
     g_walkerIds.loaded = true;
     try { std::ifstream f(WalkerIdsPath()); if (f) f >> g_walkerIds.data; } catch(...) {}
     if (!g_walkerIds.data.is_object()) g_walkerIds.data = nlohmann::json::object();
-    const char* keys[] = {"ladder","rope","shovel","pick","minePick","machete","pathable","nonPathable","openHoles","clearBeforeUse","counter","depot","food","rock","corpseBag","fishingRod","fishingWater"};
+    const char* keys[] = {"ladder","rope","shovel","pick","minePick","machete","pathable","nonPathable","openHoles","clearBeforeUse","counter","depot","food","rock","corpseBag","fishingRod","fishingWater","changeGold"};
     for (auto k: keys) if (!g_walkerIds.data.contains(k) || !g_walkerIds.data[k].is_array()) g_walkerIds.data[k] = nlohmann::json::array();
 }
 static void SaveWalkerIdCatalog() {
@@ -3517,14 +3517,15 @@ static void DrawCavebot(const Theme& t) {
     CardBegin("cave","Cavebot",CardIcon::Pin,
               ImVec4(0.12f,0.62f,1.0f,1),caveCardHeight,t);
     if(!caveRuntimeReady) ImGui::BeginDisabled();
-    ImGui::Checkbox("Enabled",&enabled);
+    ImGui::Checkbox("Cavebot ON",&enabled);
     if(!caveRuntimeReady) ImGui::EndDisabled();
-    ImGui::SameLine(); ImGui::TextColored(t.blue,"Waypoints");
-    ImGui::SameLine(210); if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("Walker IDs");
-    ImGui::SameLine(255); ImGui::TextColored(recording?t.green:t.muted,recording?"REC ON":"REC OFF");
+    ImGui::SameLine(); if(ImGui::SmallButton("IDs")) ImGui::OpenPopup("Walker IDs");
+    ImGui::SameLine(); if(ImGui::SmallButton("Salvar profile")) { std::filesystem::path p; if(PickProfilePath(true,p)) SaveCromeProfileBundle(p); }
+    ImGui::SameLine(); if(ImGui::SmallButton("Carregar profile")) { std::filesystem::path p; if(PickProfilePath(false,p) && LoadCromeProfileBundle(p)) g_walkerIds.loaded=false; }
+    ImGui::TextColored(t.blue,"Waypoints"); ImGui::SameLine(); ImGui::TextColored(recording?t.green:t.muted,recording?"REC ON":"REC OFF");
     if(!g_nativeRuntimeLoaded){
         if(!caveRuntimeReady) enabled=false;
-        ImGui::SameLine(315);
+        ImGui::SameLine();
         if(g_ramoniaBridgeReady.load()) ImGui::TextColored(t.green,"RAMONIA READY");
         else ImGui::TextColored(ImVec4(1.0f,0.55f,0.25f,1),"WAITING RUNTIME");
         if(!targetRuntimeReady) targeting=false;
@@ -3597,11 +3598,13 @@ static void DrawCavebot(const Theme& t) {
             {"Ladder IDs","ladder"},{"Rope IDs","rope"},{"Shovel IDs","shovel"},{"Pick IDs","pick"},{"Mine Pick IDs","minePick"},
             {"Machete IDs","machete"},{"Open Holes IDs","openHoles"},{"Pathable IDs","pathable"},{"Non Pathable IDs","nonPathable"},
             {"Clear Before Use","clearBeforeUse"},{"Counter IDs","counter"},{"Depot IDs","depot"},{"Food IDs","food"},{"Rock IDs","rock"},
-            {"Corpse Bag IDs","corpseBag"},{"Fishing Rod IDs","fishingRod"},{"Fishing Water IDs","fishingWater"}
+            {"Corpse Bag IDs","corpseBag"},{"Fishing Rod IDs","fishingRod"},{"Fishing Water IDs","fishingWater"},
+            {"Change Gold IDs","changeGold"}
         };
         static std::unordered_map<std::string,std::array<char,512>> buffers; static bool loaded=false;
         if(!loaded){for(auto&r:rows){auto csv=CatalogCsv(r.key);auto&b=buffers[r.key];std::snprintf(b.data(),b.size(),"%s",csv.c_str());}loaded=true;}
         ImGui::TextDisabled("Catalogo global. Edite manualmente os IDs separados por virgula.");
+        ImGui::TextDisabled("Change Gold: IDs de gold e platinum; nao incluir crystal.");
         ImGui::Separator();
         if(ImGui::BeginTable("idtable",2,ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg)){
             ImGui::TableSetupColumn("Categoria",0,0.8f);ImGui::TableSetupColumn("IDs",0,2.2f);
@@ -3639,14 +3642,18 @@ static void DrawCavebot(const Theme& t) {
     }
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Profile:"); ImGui::SameLine(); ImGui::TextDisabled("Cavebot / Loot / Tools");
-    ImGui::SameLine(); if(ImGui::SmallButton("Save Profile...")) { std::filesystem::path p; if(PickProfilePath(true,p)) SaveCromeProfileBundle(p); }
-    ImGui::SameLine(); if(ImGui::SmallButton("Load Profile...")) { std::filesystem::path p; if(PickProfilePath(false,p) && LoadCromeProfileBundle(p)) g_walkerIds.loaded=false; }
     if(!targetRuntimeReady) ImGui::BeginDisabled();
-    ImGui::Checkbox("Ativar Target",&targeting);ImGui::SameLine(140);ImGui::TextUnformatted("HP Range:");ImGui::SameLine();SmallInt("##hpmin",&hpMin,44);ImGui::SameLine();ImGui::TextUnformatted("-");ImGui::SameLine();SmallInt("##hpmax",&hpMax,44);
+    if(ImGui::BeginTable("target_controls",2,ImGuiTableFlags_SizingStretchSame)){
+        ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox("Ativar Target",&targeting);
+        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted("HP:"); ImGui::SameLine(); SmallInt("##hpmin",&hpMin,44); ImGui::SameLine(); ImGui::TextUnformatted("-"); ImGui::SameLine(); SmallInt("##hpmax",&hpMax,44);
+        ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::Checkbox("Attack Any (*)",&attackAny);
+        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted("Range:"); ImGui::SameLine(); SmallInt("##range",&range,44);
+        ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::BeginDisabled(); ImGui::Checkbox("Should Attack Me",&shouldAttack); ImGui::EndDisabled();
+        if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Pendente: descobrir o foco real do monstro.");
+        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted("Mode:"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1); ImGui::Combo("##targetmode",&mode,modes,IM_ARRAYSIZE(modes));
+        ImGui::EndTable();
+    }
     ImGui::TextUnformatted("Alvos:");ImGui::SameLine();ImGui::SetNextItemWidth(-1);ImGui::InputText("##monsters",monsters,sizeof(monsters));
-    ImGui::Checkbox("Attack Any (*)",&attackAny);ImGui::SameLine(285);ImGui::TextUnformatted("Range:");ImGui::SameLine();SmallInt("##range",&range,44);
-    ImGui::Checkbox("Should Attack Me",&shouldAttack);ImGui::SameLine(160);ImGui::TextUnformatted("Mode:");ImGui::SameLine();ImGui::SetNextItemWidth(120);ImGui::Combo("##targetmode",&mode,modes,IM_ARRAYSIZE(modes));
     keep=mode!=1;
     const int modeDistance=mode==3?2:(mode==4||mode==7)?3:mode==5?4:1;
     if(g_nativeRuntimeLoaded) ImGui::TextDisabled(mode==1?"None: ataca sem seguir.":"Reposiciona durante combate; Cavebot fica pausado.");
@@ -3815,6 +3822,7 @@ static void DrawCavebot(const Theme& t) {
 }
 
 static void DrawTools(const Theme& t) {
+    static bool changeGold=false;
     static bool mana=false,light=false,antiIdle=false,fish=false,food=false;
     static bool para=false,haste=false,advert=false,spear=false,reAmmo=false;
     static char paraSpell[32]="exura",hasteSpell[32]="utani hur",manaSpell[32]="utamo vita",ad[64]="Set Message...",spears[64]="2389";
@@ -3830,6 +3838,7 @@ static void DrawTools(const Theme& t) {
         }
         nlohmann::json tj;
         if(ReadJsonFile(g_baseDir/"config"/"tools.json",tj)){
+            if(tj.contains("change_gold") && tj["change_gold"].is_object()) changeGold=tj["change_gold"].value("enabled",false);
             auto loadSpell=[&](const char* key,bool& en,char* buf,size_t cap,int& interval,const char* def){ if(tj.contains(key)&&tj[key].is_object()){ const auto& o=tj[key]; en=o.value("enabled",false); const auto sp=o.value("spell",std::string(def)); std::snprintf(buf,cap,"%s",sp.c_str()); interval=o.value("fallback_interval_ms",interval);} };
             loadSpell("mana_shield",mana,manaSpell,sizeof(manaSpell),manaInterval,"utamo vita");
             loadSpell("anti_paralyze",para,paraSpell,sizeof(paraSpell),hasteInterval,"exura");
@@ -3858,7 +3867,7 @@ static void DrawTools(const Theme& t) {
         }
     }
     const float toolsCardHeight =
-        g_nativeRuntimeLoaded ? (fish ? 200.0f : 166.0f) :
+        g_nativeRuntimeLoaded ? (fish ? 222.0f : 188.0f) :
         (g_ramoniaBridgeReady.load() ? 170.0f : 148.0f);
     CardBegin("tools","Tools",CardIcon::Gear,ImVec4(0.43f,0.48f,1.0f,1),toolsCardHeight,t);
     const bool foodRuntimeReady = FoodRuntimeReady();
@@ -3922,7 +3931,12 @@ static void DrawTools(const Theme& t) {
         ImGui::EndTable();
     }
 
-    if(g_nativeRuntimeLoaded && fish){ ImGui::TextDisabled("Fishing usa Game::useWith(rod, waterThing), recarrega config em runtime e sorteia o tile."); ImGui::TextUnformatted("Delay:"); ImGui::SameLine(); SmallInt("##fmin",&fishMinDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("-"); ImGui::SameLine(); SmallInt("##fmax",&fishMaxDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("ms  Range:"); ImGui::SameLine(); SmallInt("##frange",&fishRange,45); }
+    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::Checkbox("Change Gold",&changeGold);
+    if(ImGui::IsItemHovered()) ImGui::SetTooltip("Converte pilhas de 100 gold em platinum e 100 platinum em crystal.");
+    ImGui::SameLine(); ImGui::TextDisabled("IDs: Cavebot > IDs");
+    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    if(g_nativeRuntimeLoaded && fish){ ImGui::TextUnformatted("Pesca: Delay"); ImGui::SameLine(); SmallInt("##fmin",&fishMinDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("-"); ImGui::SameLine(); SmallInt("##fmax",&fishMaxDelay,60); ImGui::SameLine(); ImGui::TextUnformatted("ms  Range:"); ImGui::SameLine(); SmallInt("##frange",&fishRange,45); }
 
     if(!foodRuntimeReady) ImGui::BeginDisabled();
     ImGui::TextDisabled("Food IDs: usa catalogo global"); ImGui::SameLine();
@@ -4002,6 +4016,7 @@ static void DrawTools(const Theme& t) {
     for(const auto id:ramSpear.itemIds) if(id>0 && id<=0xFFFFu) spearIds.push_back(id);
 
     nlohmann::json tcfg={
+      {"change_gold",{{"enabled",g_nativeRuntimeLoaded&&changeGold},{"interval_ms",1000},{"item_ids",CatalogIds("changeGold")}}},
       {"food",{{"enabled",foodRuntimeReady&&food},{"interval_ms",foodInterval},{"item_ids",foodIds}}},
       {"anti_idle",{{"enabled",g_nativeRuntimeLoaded&&antiIdle},{"min_interval_ms",idleMin},{"max_interval_ms",idleMax},{"mode","turn_only"},{"status","runtime_turn_action_pending"}}},
       {"mana_shield",{{"enabled",g_nativeRuntimeLoaded&&mana},{"spell",manaSpell},{"fallback_interval_ms",manaInterval},{"prefer_condition_state",true}}},

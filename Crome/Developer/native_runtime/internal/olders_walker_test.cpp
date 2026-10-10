@@ -224,6 +224,7 @@ FishingConfig loadFishingConfig(const std::string& path) {
 
 
 struct ToolsConfig {
+    crome::ChangeGoldConfig changeGold;
     bool foodEnabled{false}; std::vector<std::uint32_t> foodIds{}; std::uint32_t foodIntervalMs{60000};
     bool manaEnabled{false}; std::string manaSpell{"utamo vita"}; std::uint32_t manaIntervalMs{170000};
     bool paraEnabled{false}; std::string paraSpell{"exura"};
@@ -234,6 +235,7 @@ ToolsConfig loadToolsConfig(const std::string& path) {
     ToolsConfig out;
     const auto root = crome::json::parse(crome::readRouteText(path));
     if (!root.isObject()) return out;
+    out.changeGold=crome::parseChangeGoldConfig(root.get("change_gold"));
     auto parseIds=[&](const crome::json::Value* obj,const char* key,std::vector<std::uint32_t>& dst){ if(!obj||!obj->isObject())return; if(const auto* a=obj->get(key);a&&a->isArray()){ dst.clear(); for(const auto& v:a->array()) if(v.isNumber()){ auto id=(std::uint32_t)v.number(); if(id) dst.push_back(id);} } };
     if(const auto* o=root.get("food");o&&o->isObject()){ if(const auto* v=o->get("enabled");v&&v->isBool())out.foodEnabled=v->boolean(); out.foodIntervalMs=crome::jsonU32(o->get("interval_ms"),out.foodIntervalMs); parseIds(o,"item_ids",out.foodIds); }
     if(const auto* o=root.get("mana_shield");o&&o->isObject()){ if(const auto* v=o->get("enabled");v&&v->isBool())out.manaEnabled=v->boolean(); if(const auto* v=o->get("spell");v&&v->isString())out.manaSpell=v->string(); out.manaIntervalMs=crome::jsonU32(o->get("fallback_interval_ms"),out.manaIntervalMs); }
@@ -443,6 +445,7 @@ DWORD WINAPI worker(LPVOID) {
         std::uint64_t nextFishingReloadMs = 0;
         ToolsConfig toolsConfig{}; try { toolsConfig=loadToolsConfig(toolsPath); } catch(...) {}
         std::uint64_t nextToolsReloadMs=0, nextFoodMs=0, nextManaMs=0, nextHasteMs=0, nextParaMs=0;
+        std::uint64_t nextChangeGoldMs=0;
         std::cout << "[OK] Fishing config: enabled=" << (fishingConfig.enabled?"true":"false")
                   << " rod=" << fishingConfig.rodId << " waterIds=" << fishingConfig.waterIds.size()
                   << " range=" << fishingConfig.range << " delay=" << fishingConfig.minDelayMs << "-" << fishingConfig.maxDelayMs << "ms\n";
@@ -887,6 +890,12 @@ DWORD WINAPI worker(LPVOID) {
                     nextFishingMs = t + fishingConfig.minDelayMs + jitter;
                     if(ok) std::cout << "[FISH] auto request accepted; next=" << (fishingConfig.minDelayMs+jitter) << "ms\n";
                 } else nextFishingMs = t + 250;
+            }
+
+            if (toolsConfig.changeGold.enabled && t >= nextChangeGoldMs) {
+                if (!actions.itemActionPending() && !actions.manualInteractionActive())
+                    actions.changeGold(toolsConfig.changeGold.itemIds);
+                nextChangeGoldMs=t+toolsConfig.changeGold.intervalMs;
             }
 
             if (healingEnabled && t >= nextHealingPoll) {
