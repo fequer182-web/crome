@@ -4114,7 +4114,7 @@ static void DrawLoot(const Theme& t) {
         g_ramoniaBridgeReady.load() && g_ramoniaBridgeVersion.load()>=21;
 
     const float lootCardHeight =
-        g_nativeRuntimeLoaded ? 138.0f : 122.0f;
+        g_nativeRuntimeLoaded ? 200.0f : 122.0f;
     CardBegin("loot","Loot / Looter",CardIcon::Coins,ImVec4(1.0f,0.76f,0.12f,1),lootCardHeight,t);
 
     // Top controls: keep Ramonia-visible values inside fixed columns so
@@ -4153,9 +4153,9 @@ static void DrawLoot(const Theme& t) {
             ImGui::SameLine();
             SmallInt("##lootbag",&targetBagId,52);
         }else{
-            ImGui::TextDisabled("Max Weight");
+            ImGui::TextDisabled("Destination Bag ID");
             ImGui::SameLine();
-            SmallInt("##weight",&maxWeight,64);
+            SmallInt("##lootbag_olders",&targetBagId,52);
         }
         ImGui::EndTable();
     }
@@ -4176,17 +4176,21 @@ static void DrawLoot(const Theme& t) {
         ImGui::TableSetColumnIndex(1);
         ImGui::TextDisabled("Corpse Bag IDs (abre bags dentro do corpse)");
         ImGui::SetNextItemWidth(-1);
-        if(!ramoniaLootReady) ImGui::BeginDisabled();
+        if(!lootRuntimeReady) ImGui::BeginDisabled();
         ImGui::InputText("##nestedbagids",nestedIds,sizeof(nestedIds));
-        if(!ramoniaLootReady) ImGui::EndDisabled();
+        if(!lootRuntimeReady) ImGui::EndDisabled();
 
         ImGui::EndTable();
     }
 
+    if(g_nativeRuntimeLoaded){
+        ImGui::TextDisabled("Corpse Client ID");ImGui::SameLine();SmallInt("##corpse_olders",&corpseId,62);
+        ImGui::TextWrapped("Use os Client IDs do Look. Deixe a bag de destino aberta e com espaco.");
+    }
     // Ground Drop remains a native-only feature and is visually separated
     // from the Ramonia corpse/bag workflow.
     ImGui::Separator();
-    if(!g_nativeRuntimeLoaded) ImGui::BeginDisabled();
+    ImGui::BeginDisabled();
     ImGui::Checkbox("Ground Drop",&dropEnabled);
     ImGui::SameLine();
     ImGui::Checkbox("Loot on Screen",&onScreen);
@@ -4195,7 +4199,7 @@ static void DrawLoot(const Theme& t) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##dropids",dropIds,sizeof(dropIds));
-    if(!g_nativeRuntimeLoaded) ImGui::EndDisabled();
+    ImGui::EndDisabled();
 
     const auto lootJsonIds=csvIds(lootIds);
     const auto nestedJsonIds=csvIds(nestedIds);
@@ -4229,7 +4233,7 @@ static void DrawLoot(const Theme& t) {
 
     nlohmann::json lcfg={
       {"enabled",lootRuntimeReady&&items},
-      {"loot_on_screen",g_nativeRuntimeLoaded&&onScreen},
+      {"loot_on_screen",false},
       {"only_list",only},
       {"radius",radius},
       {"max_weight",maxWeight},
@@ -4241,10 +4245,10 @@ static void DrawLoot(const Theme& t) {
       {"recursive_container_depth",3},
       {"item_ids",lootJsonIds},
       {"drop_item",{
-          {"enabled",g_nativeRuntimeLoaded&&dropEnabled},
+          {"enabled",false},
           {"item_ids",csvIds(dropIds)},
           {"destination","ground_near_corpse"},
-          {"status",g_nativeRuntimeLoaded?"available":"requires_native_move_backend"}
+          {"status","pending_native_drop_validation"}
       }}
     };
     WriteJsonIfChanged("loot.json",lcfg);

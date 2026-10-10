@@ -10,6 +10,7 @@
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Snapshots.hpp"
 #include "../bot/ChangeGold.hpp"
+#include "../bot/OldersLoot.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -536,6 +537,10 @@ public:
         return true;
     }
 
+    OldersLootStep lootStep(const OldersLootConfig& config) {
+        if(!dispatcherReady())return {false,false,{},"dispatcher_unavailable"};
+        lootConfig_=config;SendMessage(gameWindow_,kLootMessage,0,0);return lootResult_;
+    }
     bool move(const Item&, Position, Position, std::uint32_t) override { return false; }
     bool open(Position) override { return false; }
     bool close(std::size_t) override { return false; }
@@ -639,6 +644,7 @@ private:
     static constexpr UINT kCreatureScanMessage = WM_APP + 0x517;
     static constexpr UINT kAttackMessage = WM_APP + 0x518;
     static constexpr UINT kFollowBlockMessage = WM_APP + 0x519;
+    static constexpr UINT kLootMessage = WM_APP + 0x51A;
     inline static OldersInternalActions* active_ = nullptr;
 
     std::uintptr_t base_{};
@@ -1678,9 +1684,12 @@ private:
         return true;
     }
 
+#include "OldersLootActions.inl"
+
     static LRESULT CALLBACK hookedWndProc(HWND hwnd, UINT message,
                                           WPARAM wParam, LPARAM lParam) {
         auto* self = active_;
+        if(self && message==kLootMessage){self->lootResult_=self->executeLootStep();return 0;}
         if (self && isManualMouseMessage(message)) {
             self->noteManualInteraction(message);
         }

@@ -325,6 +325,7 @@ DWORD WINAPI worker(LPVOID) {
         const auto healingPath = baseDir + "\\config\\healing.json";
         const auto targetingPath = baseDir + "\\config\\targeting.json";
         const auto fishingPath = baseDir + "\\config\\fishing.json";
+        const auto lootPath = baseDir + "\\config\\loot.json";
         const auto toolsPath = baseDir + "\\config\\tools.json";
         const auto inspectRequestPath = baseDir + "\\config\\inspect_request.json";
         const auto inspectResultPath = baseDir + "\\config\\inspect_result.json";
@@ -413,6 +414,10 @@ DWORD WINAPI worker(LPVOID) {
         bool targetingEnabled = targetingConfig.enabled;
         actions.setManualInteractionPauseMs(targetingConfig.manualInputPauseMs);
         std::uint64_t nextTargetingPoll = 0;
+        crome::OldersLootConfig lootConfig{};
+        std::uint64_t nextLootReloadMs=0,nextLootPollMs=0;
+        bool walkerPausedByLoot=false,resumeWalkerAfterLoot=false;
+        std::string lastLootStatus;
         bool walkerPausedByTarget = false;
         bool resumeWalkerAfterTarget = false;
         std::uint64_t targetMissingSince = 0;
@@ -700,6 +705,7 @@ DWORD WINAPI worker(LPVOID) {
             }
 
             if (f8 && !oldF8) {
+                if(walkerPausedByLoot){resumeWalkerAfterLoot=false;}
                 walker.toggle(t, p);
                 std::cout << "[F8] Walker=" << (walker.running() ? "RUNNING" : "PAUSED") << "\n";
             }
@@ -1099,7 +1105,8 @@ DWORD WINAPI worker(LPVOID) {
                 } // !manualInteractionActive
 
                 if (hasCombatTarget && targetingConfig.pauseWalker && !walkerPausedByTarget) {
-                    resumeWalkerAfterTarget = walker.running();
+                    resumeWalkerAfterTarget = walker.running() || resumeWalkerAfterLoot;
+                    walkerPausedByLoot=false;resumeWalkerAfterLoot=false;
                     if (walker.running()) walker.pause();
                     walkerPausedByTarget = true;
                     std::cout << "[TARGET] Walker pausado durante combate/chase.\n";
@@ -1115,6 +1122,26 @@ DWORD WINAPI worker(LPVOID) {
                 }
             }
 
+            if(t>=nextLootReloadMs){
+                nextLootReloadMs=t+750;
+                try {lootConfig=crome::parseOldersLoot(crome::json::parse(crome::readRouteText(lootPath)));}
+                catch(...) {lootConfig={};}
+            }
+            if(t>=nextLootPollMs && !targeter.hasLock() && !walkerPausedByTarget &&
+               !manualFollowActive && !actions.currentAttackTargetAddress() && !actions.manualInteractionActive() && !actions.walkPending()){
+                nextLootPollMs=t+600;
+                const auto loot=actions.lootStep(lootConfig);
+                if(loot.status!=lastLootStatus){std::cout<<"[LOOT] "<<loot.status<<"\n"<<std::flush;lastLootStatus=loot.status;}
+                if(loot.active){
+                    if(!walkerPausedByLoot){resumeWalkerAfterLoot=walker.running();walkerPausedByLoot=true;}
+                    if(walker.running())walker.pause();
+                    if(loot.walk)actions.walkTo(loot.position);
+                }else if(walkerPausedByLoot){
+                    if(resumeWalkerAfterLoot && route.enabled && !walker.running())walker.start(t,p);
+                    walkerPausedByLoot=false;resumeWalkerAfterLoot=false;
+                }
+            }
+            if(walkerPausedByLoot && walker.running())walker.pause();
             walker.tick(t, p);
 
             if (end && !oldEnd) g_running = false;
