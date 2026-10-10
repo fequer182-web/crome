@@ -34,6 +34,23 @@ Essas correcoes nao confirmam a causa original do fechamento do Olders.
 
 Validacao local: Crome.exe e CromeRuntime.dll compilados; olders_pipe_tests cobre
 fingerprint, prontidao, entrega repetida por Pipe real, persistencia/ACK, caminho
-com acento, rejeicao de traversal/config invalida e parada limitada. Os wrappers
-antigos nao foram modificados. A inicializacao e as acoes reais dependem de teste
+com acento, rejeicao de traversal/config invalida e parada limitada. A inicializacao e as acoes reais dependem de teste
 no Olders. Reinicie o cliente ao substituir a DLL e use a pasta nova do pacote.
+
+## Correcao de ownership no ataque
+
+O dump Olders_OpenGL.exe.17092.dmp registra heap corruption (0xC0000374) e
+retorno CromeRuntime.dll+0x2FE89, imediatamente depois da chamada Game::attack
+na DLL instalada. Na build exata, o caller natural incrementa Creature+8 para
+o argumento em RVA 0x217CFE; Game::attack consome essa referencia no caminho
+comum de retorno em RVA 0x16565F, inclusive nos retornos antecipados.
+
+O wrapper passava um ponteiro emprestado sem adquirir essa referencia. Agora
+adquire uma referencia atomicamente antes da chamada, rejeitando contador
+invalido ou saturado. Nao libera novamente depois: o callee ja consumiu o
+argumento. A chamada permanece no game thread e com as validacoes existentes.
+Esta correcao e restrita ao ataque da baseline exata; nao promove outras ABIs.
+
+olders_attack_ownership_tests simula o contrato consumido, retorno antecipado,
+troca de alvo, 100 chamadas e contadores invalidos. Teste e DLL compilados com
+sucesso; o ataque real corrigido ainda depende de confirmacao no cliente.

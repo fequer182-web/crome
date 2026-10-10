@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include "IActions.hpp"
+#include "OldersAttackOwnership.hpp"
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Snapshots.hpp"
 
@@ -1322,14 +1323,24 @@ private:
                   << "[CALL] game/window thread\n";
 
         const auto fn = reinterpret_cast<GameAttackFn>(base_ + *profile_.actions.attack);
+        // The native caller acquires one intrusive reference for the argument.
+        // Attack consumes it even when it returns early. Passing a borrowed
+        // pointer here used to release the map's existing reference instead.
+        auto* counter=reinterpret_cast<volatile LONG*>(target+olders_attack::counterOffset);
+        if(!olders_attack::acquireConsumedReference(counter)){
+            std::cout<<"[ATTACK] ABORT: reference counter invalid.\n"<<std::flush;
+            return false;
+        }
+        std::cout<<"[ATTACK OWNERSHIP] acquired argument reference; native callee consumes it.\n"<<std::flush;
         fn(reinterpret_cast<void*>(game), &handle, false);
+        // Do not decrement here: Game::attack already released its argument.
         const auto attackTargetAfter = readPtr(game + 0x08);
         std::cout << "[RETURN] Game::attack returned normally.\n"
                   << std::hex << std::uppercase
                   << "AttackTarget before  : 0x" << attackTargetBefore << "\n"
                   << "AttackTarget after   : 0x" << attackTargetAfter
                   << (attackTargetAfter == target ? "  <MATCH>\n" : "  <NO MATCH>\n")
-                  << std::dec;
+                  << std::dec << std::flush;
         return true;
     }
 
