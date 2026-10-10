@@ -1,5 +1,6 @@
 #pragma once
 #include "CompletionProbe.hpp"
+#include "CompletionGuidance.hpp"
 
 static std::vector<uintptr_t> CompletionCandidates(const Profile& profile,const std::string& key) {
     std::vector<uintptr_t> values;
@@ -46,7 +47,7 @@ static AbiResult CompletionEntryEvidence(const Profile& profile,const std::map<s
     // this current invocation to return to that site with exactly RSP+8.
     if(result.naturalReturnRva&&result.callerSiteValidated&&IsExecutable(g_base+result.naturalReturnRva))return result;
     std::cout << "[CALLER PENDENTE] " << key << " " << Hex(candidate) << ": duas acoes naturais antes do teste de retorno.\n";
-    if(CaptureTwo(candidate,"Faca a acao correspondente no objeto/tile A; ENTER...","Repita no objeto/tile B; ENTER...",result.a,result.b,2)) {
+    if(CaptureTwo(candidate,completion_guidance::prompt(key,false),completion_guidance::prompt(key,true),result.a,result.b,2)) {
         result.tested=true;result.runtimeHit=true;result.naturalThreadId=ConsistentThread(result.a,result.b);FinalizeCallerEvidence(result);
     }
     return result;
@@ -105,7 +106,8 @@ static void RunCompletionTests(Profile& profile,const Fingerprint& fp,const std:
             }
         }catch(...){}
         const bool priority=key=="tileGetTopMoveThing"||key=="tileGetTopUseThing"||key=="gameAutoWalk"||key=="itemGetId"||key=="itemGetCount";
-        if(!AskYes("Testar conclusao de "+key+"?",priority))continue;
+        completion_guidance::explain(key,candidates.size());
+        if(!AskYes("Fazer este teste de conclusao agora?",priority))continue;
         std::vector<completion_probe::Outcome> tests;
         for(uintptr_t candidate:candidates) {
             if(candidates.size()>1&&!AskYes("Testar candidato "+Hex(candidate)+"?",true))continue;
@@ -121,7 +123,7 @@ static void RunCompletionTests(Profile& profile,const Fingerprint& fp,const std:
                 else if(CompletionGameRelay(key)) {
                     // Refresh the thread when reusing historical ABI/caller facts.
                     if(entry.a.empty()) {
-                        CaptureTwo(candidate,"Execute a acao A; ENTER...","Execute outra acao B; ENTER...",entry.a,entry.b,2);
+                        CaptureTwo(candidate,completion_guidance::prompt(key,false),completion_guidance::prompt(key,true),entry.a,entry.b,2);
                         entry.naturalThreadId=ConsistentThread(entry.a,entry.b);FinalizeCallerEvidence(entry);
                     }
                     result=completion_probe::actionTests(profile,entry);
@@ -129,7 +131,7 @@ static void RunCompletionTests(Profile& profile,const Fingerprint& fp,const std:
                     const auto config=completion_probe::layout(profile);
                     for(int stimulus=0;stimulus<2;++stimulus) {
                         completion_probe::Pair pair{};
-                        completion_probe::take(candidate,entry.naturalReturnRva,config,stimulus==0?"Execute a acao no objeto/tile A; ENTER...":"Repita no objeto/tile B; ENTER...",pair);
+                        completion_probe::take(candidate,entry.naturalReturnRva,config,completion_guidance::prompt(key,stimulus!=0),pair);
                         result.observations.push_back(pair);
                     }
                     result.reason="paired_return_recorded_typed_receiver_and_ownership_pending";

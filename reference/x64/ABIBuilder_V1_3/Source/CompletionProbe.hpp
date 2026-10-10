@@ -1,4 +1,5 @@
 #pragma once
+#include "CompletionGuidance.hpp"
 #include <array>
 #include <limits>
 
@@ -455,7 +456,7 @@ inline Outcome actionTests(const Profile& profile,const AbiResult& evidence) {
     if(!callerDiscardsScalar(g_base+evidence.naturalReturnRva)) {result.reason="caller_return_usage_required";return result;}
     Pair active{};
     if(!evidence.naturalThreadId){result.reason="current_natural_thread_required";return result;}
-    take(result.rva,evidence.naturalReturnRva,config,"Execute a acao normalmente; o Builder chamara a funcao uma vez, no lugar da chamada natural. ENTER...",active,0,{},3,evidence.naturalThreadId);
+    take(result.rva,evidence.naturalReturnRva,config,completion_guidance::forMethod(evidence.key).a+" O Builder chamara a funcao uma vez no lugar da chamada natural. Depois volte e pressione ENTER...",active,0,{},3,evidence.naturalThreadId);
     result.observations.push_back(active);result.active=active.active&&active.returned&&active.stackBalanced;
     result.returned=result.active;result.thread=result.active&&active.entry.tid==evidence.naturalThreadId;
     result.effect=result.active&&AskYes("A acao aconteceu corretamente no cliente?",false);
@@ -551,7 +552,7 @@ inline Outcome scalarTests(const Profile& profile,const AbiResult& anchor,const 
         Pair pair{};
         const DWORD requiredTid=stimulus?result.observations[0].entry.tid:anchor.naturalThreadId;
         if(!start(anchor.rva,anchor.naturalReturnRva,config,0,{},5,g_base+candidate,offset,width,requiredTid)) {result.reason="scalar_anchor_install_failed";return result;}
-        Wait(stimulus==0?"De LOOK no item A; ENTER...":"De LOOK em OUTRO item B com ID/quantidade diferente; ENTER...");
+        Wait(completion_guidance::prompt(key,stimulus!=0));
         if(!stop()) {result.reason="scalar_capture_still_in_flight";return result;}
         pair=state.pair;result.observations.push_back(pair);
         if(!pair.active || pair.rax!=pair.scalarExpected || (stimulus && (pair.scalarReceiver==result.observations[0].scalarReceiver ||

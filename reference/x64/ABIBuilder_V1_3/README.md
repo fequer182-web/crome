@@ -124,3 +124,14 @@ medindo entrada/retorno, escrita de incremento, liberação pelo caller e chamad
 ativa sem duplicação. Também verifica cancelamento sem hit, INT3 atrasado,
 breakpoints alheios, leitura escalar e rejeição de vetor/refcount inválidos.
 Esses testes não substituem a validação no Olders da fingerprint correspondente.
+
+## Instrucoes da prova final x64
+
+Cada um dos 29 testes de conclusao mostra um nome simples, o significado da
+funcao e um roteiro especifico para A e B. A/B sao duas amostras; os enderecos
+candidatos sao hipoteses que recebem o mesmo roteiro. O usuario nao precisa
+identificar qual endereco esta correto. GetTile consulta um SQM; GetContainers
+consulta bags abertas; Container::getCapacity e quantidade de slots, nao peso.
+As acoes sugeridas estimulam a interface e nao garantem chamada em toda build.
+Ausencia de captura permanece inconclusiva. Roteiros nao alteram contratos ABI,
+selecao de candidatos, ownership ou callable.
