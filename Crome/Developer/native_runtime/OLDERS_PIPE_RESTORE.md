@@ -54,3 +54,26 @@ Esta correcao e restrita ao ataque da baseline exata; nao promove outras ABIs.
 olders_attack_ownership_tests simula o contrato consumido, retorno antecipado,
 troca de alvo, 100 chamadas e contadores invalidos. Teste e DLL compilados com
 sucesso; o ataque real corrigido ainda depende de confirmacao no cliente.
+
+## Modos de posicionamento no combate
+
+O menu Mode agora grava movement_mode no targeting.json e no Pipe. Indices:
+0 follow (aproxima ate 1 SQM), 1 none (nao solicita movimento), 2 stand near
+(mantem 1 SQM), 3/4/5 mantem 2/3/4 SQMs por distancia Chebyshev, 6 diagonal
+(1 SQM nos dois eixos), 7 diagonal 3sqm (3 SQMs nos dois eixos).
+Keep Follow foi substituido pelo proprio Mode, eliminando controles conflitantes.
+O modo e restaurado ao abrir o Crome e ao carregar um profile; configs antigas
+sem movement_mode mantem o comportamento legado no runtime.
+
+Modos de distancia tambem recuam quando o monstro chega perto. O destino e o
+ponto geometricamente mais proximo na borda escolhida; o caminho continua sendo
+calculado/aceito pelo LocalPlayer::autoWalk existente, sem nova chamada nativa.
+Nao verifica ataques do monstro ou garante protecao durante o percurso, nem
+escolhe automaticamente outra diagonal se a escolhida estiver bloqueada.
+O bloqueio de Follow existente, pausa do Cavebot, guard de interacao manual e
+limites de frequencia continuam ativos. None nao cancela um caminho ja enviado.
+Pathable IDs ainda nao altera o pathfinding do cliente nesta implementacao.
+
+target_positioning_tests verifica todos os quadrantes da diagonal, anel de
+distancia/afastamento, alvo em movimento, andar diferente, None e compatibilidade
+de configuracao. Build/testes locais nao substituem a validacao no Olders.

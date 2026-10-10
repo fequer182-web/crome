@@ -1,6 +1,7 @@
 #pragma once
 #include "../profiles/MiniJson.hpp"
 #include "../sdk/Snapshots.hpp"
+#include "TargetPositioning.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -77,6 +78,7 @@ struct TargetingConfig {
     bool attackAnyMonster{true};
     bool pauseWalker{true};
     bool chaseEnabled{true};
+    int movementMode{-1}; // Missing key preserves legacy chase settings.
     int chaseDistance{1};
     int chaseScanRange{15};
     std::uint32_t chaseIntervalMs{350};
@@ -124,6 +126,13 @@ inline TargetingConfig loadTargetingConfig(const std::string& path) {
     if (const auto* v = root.get("attack_any_monster"); v && v->isBool()) out.attackAnyMonster = v->boolean();
     if (const auto* v = root.get("pause_walker"); v && v->isBool()) out.pauseWalker = v->boolean();
     if (const auto* v = root.get("chase_enabled"); v && v->isBool()) out.chaseEnabled = v->boolean();
+    if (const auto* v = root.get("movement_mode"); v && v->isNumber()) {
+        const auto mode = v->number();
+        if (mode >= 0 && mode <= 7 && mode == static_cast<int>(mode)) {
+            out.movementMode = static_cast<int>(mode);
+            out.chaseEnabled = out.movementMode != 1;
+        } else { out.movementMode = 1; out.chaseEnabled = false; }
+    }
     out.chaseDistance = targetingJsonInt(root.get("chase_distance"), out.chaseDistance);
     out.chaseScanRange = targetingJsonInt(root.get("chase_scan_range"), out.chaseScanRange);
     out.chaseIntervalMs = targetingJsonU32(root.get("chase_interval_ms"), out.chaseIntervalMs);
@@ -144,6 +153,7 @@ inline TargetingConfig loadTargetingConfig(const std::string& path) {
     if (out.manualInputPauseMs > 5000) out.manualInputPauseMs = 5000;
     if (out.chaseDistance < 1) out.chaseDistance = 1;
     if (out.chaseDistance > 4) out.chaseDistance = 4;
+    if (out.movementMode >= 0) out.chaseDistance = targetModeDistance(out.movementMode);
     if (out.chaseScanRange < out.maxRange) out.chaseScanRange = out.maxRange;
     if (out.chaseScanRange < 1) out.chaseScanRange = 1;
     if (out.chaseScanRange > 15) out.chaseScanRange = 15;

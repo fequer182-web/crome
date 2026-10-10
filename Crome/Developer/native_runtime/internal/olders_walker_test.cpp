@@ -982,13 +982,17 @@ DWORD WINAPI worker(LPVOID) {
 
                             if (targetingConfig.chaseEnabled) {
                                 const int dist = selfNow.chebyshevDistance(it->position);
-                                if (dist <= targetingConfig.chaseDistance) {
+                                const auto modeDestination = targetPositionDestination(selfNow, it->position,
+                                                                                       targetingConfig.movementMode);
+                                const bool positioned = targetingConfig.movementMode >= 0
+                                    ? !modeDestination.has_value() : dist <= targetingConfig.chaseDistance;
+                                if (positioned) {
                                     haveLastChaseDestination = false;
                                     lastChaseRemaining = 9999;
                                     lastChaseProgressMs = t;
                                 } else if (!actions.walkPending() && !actions.manualInteractionActive()) {
-                                    const auto dest = chaseDestination(selfNow, it->position,
-                                                                       targetingConfig.chaseDistance);
+                                    const auto dest = modeDestination.value_or(chaseDestination(selfNow, it->position,
+                                                                       targetingConfig.chaseDistance));
                                     if (dest.z == selfNow.z && dest.x > 0 && dest.y > 0) {
                                         const int remaining = haveLastChaseDestination
                                             ? selfNow.chebyshevDistance(lastChaseDestination) : 9999;
@@ -1003,7 +1007,7 @@ DWORD WINAPI worker(LPVOID) {
                                         const bool first = !haveLastChaseDestination;
                                         const bool reachedOld = haveLastChaseDestination && remaining <= 1;
                                         const bool targetMovedEnough = haveLastChaseDestination &&
-                                            destShift >= 2 && t - lastChaseMs >= targetingConfig.chaseRepathMs;
+                                            destShift >= (targetingConfig.movementMode >= 0 ? 1 : 2) && t - lastChaseMs >= targetingConfig.chaseRepathMs;
                                         const bool stalePath = haveLastChaseDestination &&
                                             t - lastChaseProgressMs >= targetingConfig.chaseForceRefreshMs;
                                         const bool intervalReady = t - lastChaseMs >= targetingConfig.chaseIntervalMs;

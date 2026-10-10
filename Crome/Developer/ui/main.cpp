@@ -3401,7 +3401,7 @@ static std::string BuildWaypointLine(int type,int x,int y,int z,int item,int del
 static void DrawCavebot(const Theme& t) {
     static bool enabled=false,targeting=false,keep=false,attackAny=false,shouldAttack=false;
     static bool recording=false,recordInitialized=false;
-    static int hpMin=0,hpMax=100,range=7,mode=0; static int selected=-1;
+    static int hpMin=0,hpMax=100,range=7,mode=1; static int selected=-1;
     static std::vector<std::string> wps;
     static RamoniaPositionUi recordLast{};
     static char monsters[160]="";
@@ -3412,7 +3412,7 @@ static void DrawCavebot(const Theme& t) {
     static char addText[96]="";
     const char* addTypes[]={"Walk","Stand","Use","Rope","Shovel","Ladder","Hole","Say","Wait"};
     const char* modes[]={"follow","none","stand near","2sqm","3sqm","4sqm","diagonal","diagonal 3sqm"};
-    static std::uint64_t seenProfileLoadGeneration=0;
+    static std::uint64_t seenProfileLoadGeneration=UINT64_MAX;
     if(seenProfileLoadGeneration!=g_profileLoadGeneration){
         seenProfileLoadGeneration=g_profileLoadGeneration;
         nlohmann::json wj;
@@ -3443,6 +3443,7 @@ static void DrawCavebot(const Theme& t) {
             targeting=tj.value("enabled",false); attackAny=tj.value("attack_any_monster",false);
             hpMin=tj.value("hp_min",0); hpMax=tj.value("hp_max",100); range=tj.value("max_range",7);
             keep=tj.value("chase_enabled",false);
+            mode=std::clamp(tj.value("movement_mode",keep?0:1),0,7);
             std::string csv;
             if(tj.contains("targets")&&tj["targets"].is_array()) for(auto& v:tj["targets"]){
                 if(!v.is_object()) continue; const auto nm=v.value("name",std::string()); if(nm.empty()) continue;
@@ -3644,12 +3645,14 @@ static void DrawCavebot(const Theme& t) {
     if(!targetRuntimeReady) ImGui::BeginDisabled();
     ImGui::Checkbox("Ativar Target",&targeting);ImGui::SameLine(140);ImGui::TextUnformatted("HP Range:");ImGui::SameLine();SmallInt("##hpmin",&hpMin,44);ImGui::SameLine();ImGui::TextUnformatted("-");ImGui::SameLine();SmallInt("##hpmax",&hpMax,44);
     ImGui::TextUnformatted("Alvos:");ImGui::SameLine();ImGui::SetNextItemWidth(-1);ImGui::InputText("##monsters",monsters,sizeof(monsters));
-    ImGui::Checkbox("Keep Follow",&keep);ImGui::SameLine(120);ImGui::Checkbox("Attack Any (*)",&attackAny);ImGui::SameLine(285);ImGui::TextUnformatted("Range:");ImGui::SameLine();SmallInt("##range",&range,44);
-    if(keep && g_nativeRuntimeLoaded) ImGui::TextDisabled("Follow/chase pode disputar movimento com o Cavebot.");
+    ImGui::Checkbox("Attack Any (*)",&attackAny);ImGui::SameLine(285);ImGui::TextUnformatted("Range:");ImGui::SameLine();SmallInt("##range",&range,44);
     ImGui::Checkbox("Should Attack Me",&shouldAttack);ImGui::SameLine(160);ImGui::TextUnformatted("Mode:");ImGui::SameLine();ImGui::SetNextItemWidth(120);ImGui::Combo("##targetmode",&mode,modes,IM_ARRAYSIZE(modes));
+    keep=mode!=1;
+    const int modeDistance=mode==3?2:(mode==4||mode==7)?3:mode==5?4:1;
+    if(g_nativeRuntimeLoaded) ImGui::TextDisabled(mode==1?"None: ataca sem seguir.":"Reposiciona durante combate; Cavebot fica pausado.");
     if(!targetRuntimeReady) ImGui::EndDisabled();
 
-    nlohmann::json tcfg={{"enabled",targetRuntimeReady&&targeting},{"poll_ms",300},{"attack_any_monster",attackAny},{"pause_walker",true},{"chase_enabled",keep},{"chase_distance",1},{"chase_scan_range",15},{"chase_interval_ms",350},{"hp_min",hpMin},{"hp_max",hpMax},{"max_range",range},{"chase_repath_ms",900},{"chase_force_refresh_ms",1800},{"manual_input_pause_ms",1500},{"targets",nlohmann::json::array()}};
+    nlohmann::json tcfg={{"enabled",targetRuntimeReady&&targeting},{"poll_ms",300},{"attack_any_monster",attackAny},{"pause_walker",true},{"movement_mode",mode},{"chase_enabled",keep},{"chase_distance",modeDistance},{"chase_scan_range",15},{"chase_interval_ms",350},{"hp_min",hpMin},{"hp_max",hpMax},{"max_range",range},{"chase_repath_ms",900},{"chase_force_refresh_ms",1800},{"manual_input_pause_ms",1500},{"targets",nlohmann::json::array()}};
     const auto targetNames=SplitCsv(monsters);
     int pr=0;for(const auto&name:targetNames)tcfg["targets"].push_back({{"name",name},{"priority",pr++}});WriteJsonIfChanged("targeting.json",tcfg);
 
