@@ -92,4 +92,5 @@ add_library(CromeRuntime SHARED
 target_include_directories(CromeRuntime PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/native_runtime
 )
+target_link_libraries(CromeRuntime PRIVATE nlohmann_json::nlohmann_json)
 set_target_properties(CromeRuntime PROPERTIES OUTPUT_NAME "CromeRuntime" PREFIX "")

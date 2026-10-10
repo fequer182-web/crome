@@ -28,6 +28,8 @@
 #include "core/profile/Capabilities.hpp"
 #include "modules/support/RamoniaSpearPickup.hpp"
 #include "modules/cavebot/RamoniaToolTileCycle.hpp"
+#include "native_runtime/runtime/OldersBaseline.hpp"
+#include "native_runtime/runtime/OldersPipe.hpp"
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -2464,7 +2466,8 @@ static bool InjectRuntimeDll(DWORD pid, const std::filesystem::path& dllPath, st
     auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(k32, "LoadLibraryW"));
     HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remote, 0, nullptr);
     if (!thread) { error = "CreateRemoteThread=" + std::to_string(GetLastError()); VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process); return false; }
-    WaitForSingleObject(thread, 5000);
+    const DWORD wait=WaitForSingleObject(thread, 5000);
+    if(wait!=WAIT_OBJECT_0){error="LoadLibraryW timeout; restart client before retry";CloseHandle(thread);CloseHandle(process);return false;}
     DWORD code = 0; GetExitCodeThread(thread, &code);
     CloseHandle(thread); VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process);
     if (!code) { error = "LoadLibraryW returned 0"; return false; }
@@ -2477,12 +2480,12 @@ static void RefreshNativeRuntime() {
         g_nativeRuntimeLoaded = false; g_nativeRuntimeStatus = "Olders not running";
         g_nativeAttemptPid = 0; g_nativeAttemptedForPid = false; return;
     }
-    // Discovery-only profiles must never start the legacy injected runtime.
-    // In particular, a process name or matching module size is not permission
-    // to execute the Olders action wrappers.
+    // Restore the historical wrappers only for their exact baseline. Discovery
+    // candidates from other builds remain disabled; loaded DLL != ready runtime.
     const auto* profile=g_session ? g_session->profile() : nullptr;
     const auto* session=g_session ? &g_session->status() : nullptr;
-    if (!profile || !profile->nativeActionsReady ||
+    const bool legacyBaseline=profile&&crome::olders_baseline::matches(static_cast<DWORD>(profile->build.timestamp),static_cast<DWORD>(profile->build.sizeOfImage),std::strtoull(profile->build.textHash.c_str(),nullptr,16));
+    if (!profile || (!profile->nativeActionsReady && !legacyBaseline) ||
         profile->build.architecture!="x64" || !session ||
         session->pid!=pid || !session->profileMatched ||
         !session->localPlayerResolved || !session->localPlayerVtableOk) {
@@ -2494,10 +2497,14 @@ static void RefreshNativeRuntime() {
     }
     if (pid != g_nativeAttemptPid) { g_nativeAttemptPid = pid; g_nativeAttemptedForPid = false; }
     if (IsModuleLoaded(pid, L"CromeRuntime.dll")) {
-        g_nativeRuntimeLoaded = true; g_nativeRuntimeStatus = "CONNECTED"; return;
+        nlohmann::json reply;const bool connected=crome::olders_pipe::request(pid,{{"cmd","STATUS"}},reply);
+        const bool ready=connected&&reply.value("ready",false)&&reply.value("protocol",0)==1&&reply.value("pid",0u)==pid&&reply.value("build",std::string{})=="6AA9FA57_89D3D35243890EA2";
+        if(ready&&!g_nativeRuntimeLoaded)g_lastWrittenJson.clear();
+        g_nativeRuntimeLoaded=ready;g_nativeRuntimeStatus=ready?"CONNECTED - Olders Pipe":"runtime sem Pipe pronto; aguarde ou reinicie com a DLL nova";return;
     }
     g_nativeRuntimeLoaded = false;
     if (g_nativeAttemptedForPid) { g_nativeRuntimeStatus = "runtime not loaded - use Retry"; return; }
+    if(!crome::olders_baseline::processMatches(pid)){g_nativeRuntimeStatus="Olders: fingerprint diferente da base restaurada";return;}
     g_nativeAttemptedForPid = true;
     g_lastNativeInjectAttempt = GetTickCount64();
     std::string err;
@@ -2512,6 +2519,10 @@ static void WriteJsonIfChanged(const std::string& fileName, const nlohmann::json
     const std::string text = j.dump(2) + "\n";
     auto& old = g_lastWrittenJson[fileName];
     if (old == text) return;
+    if(g_nativeRuntimeLoaded&&crome::olders_pipe::configName(fileName)){
+        nlohmann::json reply;if(crome::olders_pipe::request(g_nativeAttemptPid,{{"cmd","SET_CONFIG"},{"file",fileName},{"value",j}},reply)){old=text;return;}
+        g_nativeRuntimeLoaded=false;g_nativeRuntimeStatus="Olders Pipe: envio falhou; modulos aguardam reconexao";return;
+    }
     const auto dir = g_baseDir / "config";
     std::error_code ec; std::filesystem::create_directories(dir, ec);
     const auto dst = dir / fileName;
@@ -4302,7 +4313,7 @@ static void DrawFooter(const Theme& t) {
 static void DrawRuntimeGuard(const Theme& t) {
     if (g_ramoniaPid.load()) return;
     const auto* profile=g_session ? g_session->profile() : nullptr;
-    if (!profile || !profile->nativeActionsReady) return;
+    if (!profile || (!profile->nativeActionsReady&&!crome::olders_baseline::matches(static_cast<DWORD>(profile->build.timestamp),static_cast<DWORD>(profile->build.sizeOfImage),std::strtoull(profile->build.textHash.c_str(),nullptr,16)))) return;
     const auto* sessionStatus = g_session ? &g_session->status() : nullptr;
     const bool nonOldersProfile = sessionStatus && sessionStatus->profileMatched && sessionStatus->exe.find("Olders") == std::string::npos && sessionStatus->exe.find("olders") == std::string::npos;
     if (nonOldersProfile) return; // permite validar builds como Classico em modo leitura sem exigir o runtime Olders.

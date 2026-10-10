@@ -10,6 +10,8 @@
 #include "../bot/Walker.hpp"
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Conditions.hpp"
+#include "../runtime/OldersBaseline.hpp"
+#include "../runtime/OldersPipe.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -32,13 +34,15 @@ std::uintptr_t g_base{};
 std::string moduleDirectory(HMODULE mod) {
     char path[MAX_PATH]{};
     GetModuleFileNameA(mod, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path().string();
+    const std::string value(path);const auto slash=value.find_last_of("\\/");
+    return slash==std::string::npos?std::string{}:value.substr(0,slash);
 }
 
 std::string currentExecutableName() {
     char path[MAX_PATH]{};
     GetModuleFileNameA(nullptr, path, MAX_PATH);
-    return std::filesystem::path(path).filename().string();
+    const std::string value(path);const auto slash=value.find_last_of("\\/");
+    return slash==std::string::npos?value:value.substr(slash+1);
 }
 
 std::uint32_t currentImageSize() {
@@ -294,10 +298,11 @@ void printRouteFlowWarnings(const crome::RouteConfig& route) {
 }
 
 DWORD WINAPI worker(LPVOID) {
-    const auto baseDirEarly = moduleDirectory(g_module);
-    const auto logPathEarly = baseDirEarly + "\\CromeRuntime.log";
-    std::freopen(logPathEarly.c_str(), "a", stdout);
-    std::freopen(logPathEarly.c_str(), "a", stderr);
+    wchar_t modulePath[32768]{};GetModuleFileNameW(g_module,modulePath,32768);
+    const auto baseDirWide=std::filesystem::path(modulePath).parent_path();
+    std::ofstream runtimeLog(baseDirWide/L"CromeRuntime.log",std::ios::app);
+    auto* priorOut=std::cout.rdbuf(); auto* priorError=std::cerr.rdbuf();
+    if(runtimeLog){std::cout.rdbuf(runtimeLog.rdbuf());std::cerr.rdbuf(runtimeLog.rdbuf());}
 
     std::cout << "\n============================================================\n"
               << "       CROME SDK V21.6 - FOLLOW BLOCKER / SAFE CHASE / HEALING / WALKER\n"
@@ -320,6 +325,10 @@ DWORD WINAPI worker(LPVOID) {
         const auto inspectResultPath = baseDir + "\\config\\inspect_result.json";
         const auto lookResultPath = baseDir + "\\config\\look_result.json";
 
+        wchar_t executable[32768]{};
+        if(!GetModuleFileNameW(nullptr,executable,32768)||!crome::olders_baseline::matchesExecutable(executable)){
+            std::cout<<"[STOP] Legacy Olders runtime requires exact timestamp/size/disk text hash.\n"; goto done;
+        }
         auto profiles = crome::profiles::loadProfiles(profilesPath);
         const auto* profile = selectInternalProfile(profiles);
         if (!profile) {
@@ -378,6 +387,9 @@ DWORD WINAPI worker(LPVOID) {
         }
         if (!g_running) goto done;
 
+        crome::olders_pipe::Server pipeServer{baseDirWide};
+        pipeServer.start(); pipeServer.setReady(true);
+        std::cout<<"[PIPE READY] Olders legacy actions connected.\n";
         crome::RouteConfig route = crome::loadRouteConfig(routePath);
         walker.setRoute(route);
         std::cout << "[OK] Waypoints carregados: " << route.waypoints.size()
@@ -1097,6 +1109,7 @@ DWORD WINAPI worker(LPVOID) {
             Sleep(20);
         }
 
+        pipeServer.stop();
         actions.uninstallDispatcher();
     } catch (const std::exception& e) {
         std::cout << "[-] Exception: " << e.what() << "\n";
@@ -1105,8 +1118,8 @@ DWORD WINAPI worker(LPVOID) {
 done:
     std::cout << "\n[UNLOAD] Encerrando Crome SDK V21.6...\n";
     Sleep(150);
-    std::fflush(stdout);
-    std::fflush(stderr);
+    std::cout.flush();std::cerr.flush();
+    std::cout.rdbuf(priorOut);std::cerr.rdbuf(priorError);runtimeLog.close();
     FreeLibraryAndExitThread(g_module, 0);
     return 0;
 }
