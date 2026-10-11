@@ -1,3 +1,4 @@
+#include "../../common/PipeDiscoveryCatalog.hpp"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdint>
@@ -16,14 +17,95 @@
 #include <iterator>
 #include <cctype>
 #include <filesystem>
+#include <streambuf>
+#include <stdexcept>
+#include "../../../../Crome/Developer/native_runtime/profiles/MiniJson.hpp"
 
 static_assert(sizeof(void*) == 8, "OTCLab ABI Builder V1.3 is x64-only");
 
 namespace fs = std::filesystem;
 
+// Keep filesystem paths in their native UTF-16 representation on Windows.
+// UTF-8 is only for display, never passed back to filesystem constructors.
+static std::string DisplayPath(const fs::path& path){
+    const auto utf8=path.u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()),utf8.size());
+}
+
 static HMODULE g_self = nullptr;
 static uintptr_t g_base = 0;
 static size_t g_imageSize = 0;
+static HANDLE g_startupLog = INVALID_HANDLE_VALUE;
+
+static void LogStage(const char* stage) {
+    if(g_startupLog==INVALID_HANDLE_VALUE) return;
+    SYSTEMTIME now{}; GetLocalTime(&now);
+    char line[512]{};
+    const int n=snprintf(line,sizeof(line),"[%02u:%02u:%02u] PID=%lu %s\r\n",
+        now.wHour,now.wMinute,now.wSecond,GetCurrentProcessId(),stage);
+    if(n>0){DWORD written=0;WriteFile(g_startupLog,line,static_cast<DWORD>(std::min(n,511)),&written,nullptr);FlushFileBuffers(g_startupLog);}
+}
+
+static void OpenStartupLog() {
+    wchar_t path[32768]{};
+    DWORD n=GetModuleFileNameW(g_self,path,32768);
+    if(!n||n>=32768) return;
+    wchar_t* slash=wcsrchr(path,L'\\'); if(!slash) return;
+    const wchar_t name[]=L"ABIBuilderStartup.log";
+    if(static_cast<size_t>(slash-path)+1+std::size(name)>32768) return;
+    memcpy(slash+1,name,sizeof(name));
+    g_startupLog=CreateFileW(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,
+        nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    LogStage("worker_entered; build=isolated_console_unicode_v2");
+}
+
+// Use owned Win32 console handles. freopen(stdout/stderr/stdin) also changes
+// the shared CRT streams used by the injected host and other loaded tools.
+class ConsoleOutputBuffer : public std::streambuf {
+    HANDLE handle_;
+protected:
+    std::streamsize xsputn(const char* s,std::streamsize n) override {
+        DWORD written=0;
+        if(n<=0) return 0;
+        if(g_startupLog!=INVALID_HANDLE_VALUE){DWORD logged=0;WriteFile(g_startupLog,s,static_cast<DWORD>(n),&logged,nullptr);}
+        return WriteFile(handle_,s,static_cast<DWORD>(n),&written,nullptr)?written:0;
+    }
+    int_type overflow(int_type ch) override {
+        if(traits_type::eq_int_type(ch,traits_type::eof())) return traits_type::not_eof(ch);
+        char c=traits_type::to_char_type(ch);
+        return xsputn(&c,1)==1?ch:traits_type::eof();
+    }
+public:
+    explicit ConsoleOutputBuffer(HANDLE handle):handle_(handle){}
+};
+
+class ConsoleInputBuffer : public std::streambuf {
+    HANDLE handle_; char bytes_[256]{};
+protected:
+    int_type underflow() override {
+        if(gptr()&&gptr()<egptr()) return traits_type::to_int_type(*gptr());
+        for(;;){
+            DWORD read=0;
+            if(!ReadFile(handle_,bytes_,sizeof(bytes_),&read,nullptr)||!read) return traits_type::eof();
+            // Match CRT text mode so ENTER preserves the guided default.
+            DWORD kept=0;for(DWORD i=0;i<read;++i)if(bytes_[i]!='\r')bytes_[kept++]=bytes_[i];
+            if(!kept)continue;
+            setg(bytes_,bytes_,bytes_+kept);
+            return traits_type::to_int_type(*gptr());
+        }
+    }
+public:
+    explicit ConsoleInputBuffer(HANDLE handle):handle_(handle){}
+};
+
+class ScopedConsoleStreams {
+    ConsoleInputBuffer input_; ConsoleOutputBuffer output_;
+    std::streambuf *oldIn_,*oldOut_,*oldErr_;
+public:
+    ScopedConsoleStreams(HANDLE input,HANDLE output):input_(input),output_(output),
+        oldIn_(std::cin.rdbuf(&input_)),oldOut_(std::cout.rdbuf(&output_)),oldErr_(std::cerr.rdbuf(&output_)){}
+    ~ScopedConsoleStreams(){std::cin.rdbuf(oldIn_);std::cout.rdbuf(oldOut_);std::cerr.rdbuf(oldErr_);}
+};
 
 static std::string Hex(uint64_t v) {
     std::ostringstream s; s << "0x" << std::uppercase << std::hex << v; return s.str();
@@ -153,7 +235,7 @@ static bool GetFingerprint(Fingerprint& fp) {
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_base);
     if(dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
     auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
-    if(nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    if(nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64 || nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
     fp.timestamp = nt->FileHeader.TimeDateStamp;
     fp.sizeOfImage = nt->OptionalHeader.SizeOfImage;
     fp.entryPoint = nt->OptionalHeader.AddressOfEntryPoint;
@@ -163,7 +245,8 @@ static bool GetFingerprint(Fingerprint& fp) {
         char name[9]{}; memcpy(name, sec[i].Name, 8);
         if(std::string(name)==".text"){
             fp.textRva = sec[i].VirtualAddress;
-            fp.textSize = sec[i].Misc.VirtualSize;
+            // Match BuildExplorer's mapped .text fingerprint definition.
+            fp.textSize = std::max(sec[i].Misc.VirtualSize,sec[i].SizeOfRawData);
             if(fp.textRva + fp.textSize <= fp.sizeOfImage)
                 fp.textHash = Fnv1a64(reinterpret_cast<const uint8_t*>(g_base + fp.textRva), fp.textSize);
             break;
@@ -197,7 +280,7 @@ static bool IsExecutable(uintptr_t a) {
 }
 
 struct Profile {
-    std::string path;
+    fs::path path;
     std::string raw;
     uint32_t timestamp=0, sizeOfImage=0;
     uint64_t textHash=0;
@@ -209,12 +292,51 @@ struct Profile {
     uintptr_t inventoryBaseOffset=0, inventorySlotStride=0, gameContainersOffset=0;
     std::string sigGameAutoWalk, sigLocalPlayerAutoWalk, sigGameAttack, sigGameFollow, sigGameLook, sigGameMove, sigGameUse, sigGameUseWith;
     uintptr_t fnGameAutoWalk=0, fnLocalPlayerAutoWalk=0, fnGameAttack=0, fnGameFollow=0;
-    uintptr_t fnGameLook=0, fnGameDetailedLook=0, fnGameMove=0, fnGameUse=0, fnGameUseWith=0, fnGameTalk=0;
+    uintptr_t fnGameLook=0, fnGameDetailedLook=0, fnGameMove=0, fnGameUse=0, fnGameUseWith=0, fnGameTalk=0, fnGameTalkChannel=0;
     uintptr_t fnMapGetTile=0, fnMapGetCreatureById=0, fnMapGetCreatureByName=0, fnContainerGetItem=0;
 };
 
+
+static bool DiscoveryFingerprintMatches(const Profile& p) {
+    const auto cat=ExtractNamedObject(p.raw,"pipeDiscovery");
+    const auto fp=ExtractNamedObject(cat,"fingerprint");
+    return FlatJsonString(cat,"schema")==pipe_discovery::schema &&
+        FlatJsonString(cat,"architecture")=="x64" &&
+        pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(fp,"timestamp")),
+            ParseNum(FlatJsonString(fp,"sizeOfImage")),ParseNum(FlatJsonString(fp,"textHashFNV1A64")),
+            p.timestamp,p.sizeOfImage,p.textHash);
+}
+static uintptr_t DiscoveredRva(const Profile& p,const std::string& key) {
+    if(!DiscoveryFingerprintMatches(p)) return 0;
+    const auto obj=ExtractNamedObject(ExtractNamedObject(ExtractNamedObject(p.raw,"pipeDiscovery"),"functions"),key);
+    if(FlatJsonString(obj,"status")!="unique_bind_candidate") return 0;
+    const auto countKey=obj.find("\"candidateCount\"");
+    if(countKey==std::string::npos) return 0;
+    const auto colon=obj.find(':',countKey);
+    if(colon==std::string::npos) return 0;
+    try {
+        std::size_t used=0;
+        if(std::stoull(obj.substr(colon+1),&used)!=1) return 0;
+        const auto tail=obj.find_first_not_of(" \t\r\n",colon+1+used);
+        if(tail==std::string::npos || (obj[tail]!=',' && obj[tail]!='}')) return 0;
+    } catch(...) { return 0; }
+    const auto rva=ParseNum(FlatJsonString(obj,"rva"));
+    return rva && rva<p.sizeOfImage ? static_cast<uintptr_t>(rva) : 0;
+}
+static std::string ForcePassive(std::string obj) {
+    for(const char* field:{"callable","contractComplete","activeCallValidated"}) {
+        const std::string key=std::string("\"")+field+"\"";
+        const auto at=obj.find(key);
+        if(at==std::string::npos) { obj.insert(obj.find('{')+1,key+":false,"); continue; }
+        auto value=obj.find(':',at+key.size())+1;
+        while(value<obj.size() && std::isspace(static_cast<unsigned char>(obj[value]))) ++value;
+        if(obj.compare(value,4,"true")==0) obj.replace(value,4,"false");
+    }
+    return obj;
+}
+
 static Profile ParseProfile(const fs::path& path) {
-    Profile p; p.path=path.string(); p.raw=ReadText(path);
+    Profile p; p.path=path; p.raw=ReadText(path);
     std::string m=ExtractNamedObject(p.raw,"migratorState"); if(m.empty()) m=p.raw;
     auto N=[&](const char* k)->uintptr_t{return static_cast<uintptr_t>(ParseNum(FlatJsonString(m,k)));};
     p.timestamp=static_cast<uint32_t>(N("timestamp")); p.sizeOfImage=static_cast<uint32_t>(N("sizeOfImage")); p.textHash=ParseNum(FlatJsonString(m,"textHashFNV1A64"));
@@ -228,6 +350,22 @@ static Profile ParseProfile(const fs::path& path) {
     p.fnGameAutoWalk=N("fnGameAutoWalk");p.fnLocalPlayerAutoWalk=N("fnLocalPlayerAutoWalk");p.fnGameAttack=N("fnGameAttack");p.fnGameFollow=N("fnGameFollow");
     p.fnGameLook=N("fnGameLook");p.fnGameDetailedLook=N("fnGameDetailedLook");p.fnGameMove=N("fnGameMove");p.fnGameUse=N("fnGameUse");p.fnGameUseWith=N("fnGameUseWith");p.fnGameTalk=N("fnGameTalk");
     p.fnMapGetTile=N("fnMapGetTile");p.fnMapGetCreatureById=N("fnMapGetCreatureById");p.fnMapGetCreatureByName=N("fnMapGetCreatureByName");p.fnContainerGetItem=N("fnContainerGetItem");
+    // Fresh discovery is mandatory. Legacy/reference RVAs cannot authorize captures.
+    p.fnGameAutoWalk=DiscoveredRva(p,"gameAutoWalk");
+    p.fnLocalPlayerAutoWalk=DiscoveredRva(p,"localPlayerAutoWalk");
+    p.fnGameAttack=DiscoveredRva(p,"gameAttack");
+    p.fnGameFollow=DiscoveredRva(p,"gameFollow");
+    p.fnGameLook=DiscoveredRva(p,"gameLook");
+    p.fnGameDetailedLook=DiscoveredRva(p,"gameDetailedLook");
+    p.fnGameMove=DiscoveredRva(p,"gameMove");
+    p.fnGameUse=DiscoveredRva(p,"gameUse");
+    p.fnGameUseWith=DiscoveredRva(p,"gameUseWith");
+    p.fnGameTalk=DiscoveredRva(p,"gameTalk");
+    p.fnGameTalkChannel=DiscoveredRva(p,"gameTalkChannel");
+    p.fnMapGetTile=DiscoveredRva(p,"mapGetTile");
+    p.fnMapGetCreatureById=DiscoveredRva(p,"mapGetCreatureById");
+    p.fnMapGetCreatureByName=DiscoveredRva(p,"mapGetCreatureByName");
+    p.fnContainerGetItem=DiscoveredRva(p,"containerGetItem");
     return p;
 }
 
@@ -238,27 +376,36 @@ static int ProfileEvidenceScore(const Profile& p){
     score+=std::min(16,count("strong_candidate")*2);
     score+=std::min(12,count("\"callerCandidateReady\": true")*3);
     score+=std::min(12,count("\"callerSiteValidated\": true")*3);
-    std::string low=p.path;std::transform(low.begin(),low.end(),low.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+    std::string low=DisplayPath(p.path);std::transform(low.begin(),low.end(),low.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
     if(low.find("profiles")!=std::string::npos)score+=2;return score;
 }
 
 static fs::path DllDir() {
-    char buf[MAX_PATH*4]{}; GetModuleFileNameA(g_self,buf,sizeof(buf)); return fs::path(buf).parent_path();
+    wchar_t buf[32768]{};const DWORD n=GetModuleFileNameW(g_self,buf,32768);
+    if(!n||n>=32768)throw std::runtime_error("Cannot resolve ABI DLL directory");
+    return fs::path(buf).parent_path();
 }
 
-static std::vector<fs::path> FindProfiles() {
-    std::set<std::string> seen; std::vector<fs::path> out;
-    std::vector<fs::path> dirs={DllDir(),DllDir()/"profiles",DllDir().parent_path(),DllDir().parent_path()/"profiles",fs::current_path()};
-    for(auto& d:dirs){
+static std::vector<fs::path> FindProfilesInDirectories(const std::vector<fs::path>& dirs) {
+    std::set<fs::path> seen; std::vector<fs::path> out;
+    for(const auto& d:dirs){
         std::error_code ec; if(!fs::exists(d,ec)||!fs::is_directory(d,ec)) continue;
         for(auto& e:fs::directory_iterator(d,ec)){
-            if(ec) break; if(!e.is_regular_file()) continue;
-            auto ext=e.path().extension().string(); std::transform(ext.begin(),ext.end(),ext.begin(),::tolower);
-            if(ext!=".json") continue;
-            std::string s=e.path().string(); if(seen.insert(s).second) out.push_back(e.path());
+            if(ec) break; if(!e.is_regular_file(ec)||ec) continue;
+            auto ext=e.path().extension().native();
+            std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return c>=L'A'&&c<=L'Z'?c-L'A'+L'a':c;});
+            if(ext!=L".json") continue;
+            if(seen.insert(e.path()).second) out.push_back(e.path());
         }
     }
     return out;
+}
+
+static std::vector<fs::path> FindProfiles() {
+    const auto dir=DllDir();std::error_code ec;
+    std::vector<fs::path> dirs={dir,dir/L"profiles",dir.parent_path(),dir.parent_path()/L"profiles"};
+    auto current=fs::current_path(ec);if(!ec)dirs.push_back(current);
+    return FindProfilesInDirectories(dirs);
 }
 
 static bool AskYes(const std::string& q, bool def=false) {
@@ -470,7 +617,16 @@ static std::set<std::string> MatchScalarPair(const std::vector<Capture>& a,uint3
 static bool StartsWithAt(uintptr_t p,const std::string& s){ if(!p||s.empty()||!Readable(p,s.size()))return false; return memcmp(reinterpret_cast<const void*>(p),s.data(),s.size())==0; }
 static std::set<std::string> MatchString(const std::vector<Capture>& caps,const std::string& phrase){
     std::set<std::string> out;
-    for(auto& c:caps)for(auto& lv:Locations(c)){ if(StartsWithAt(lv.v,phrase))out.insert(lv.loc+"->char*");uintptr_t d=0;if(lv.v&&SafeRead(lv.v,d)&&StartsWithAt(d,phrase))out.insert("*("+lv.loc+")->char*"); }
+    for(auto& c:caps)for(auto& lv:Locations(c)){
+        const auto* snap=SnapForReg(c,lv.loc);
+        // Short strings can live in the caller's temporary stack wrapper.
+        // Match their bytes at entry, before ENTER allows that frame to vanish.
+        if(snap&&snap->validBytes>=phrase.size()){
+            if(!phrase.empty()&&memcmp(snap->bytes,phrase.data(),phrase.size())==0)out.insert(lv.loc+"->char*");
+        }else if(StartsWithAt(lv.v,phrase))out.insert(lv.loc+"->char*");
+        uintptr_t d=0;const bool hasPointer=snap?SnapRead(*snap,0,d):(lv.v&&SafeRead(lv.v,d));
+        if(hasPointer&&StartsWithAt(d,phrase))out.insert("*("+lv.loc+")->char*");
+    }
     return out;
 }
 
@@ -511,7 +667,11 @@ static void FinalizeCallerEvidence(AbiResult& r){
 }
 
 static std::string SnapJson(const MemSnap& m){
-    uintptr_t q0=0,q1=0;SnapRead(m,0,q0);SnapRead(m,8,q1);std::ostringstream j;j<<"{\"base\":\""<<Hex(m.base)<<"\",\"validBytes\":"<<m.validBytes<<",\"q0\":\""<<Hex(q0)<<"\",\"q1\":\""<<Hex(q1)<<"\"}";return j.str();
+    uintptr_t q0=0,q1=0;SnapRead(m,0,q0);SnapRead(m,8,q1);std::ostringstream j;
+    const auto bytes=std::min<uint32_t>(m.validBytes,ARG_SNAP_BYTES);
+    j<<"{\"base\":\""<<Hex(m.base)<<"\",\"validBytes\":"<<bytes<<",\"q0\":\""<<Hex(q0)<<"\",\"q1\":\""<<Hex(q1)<<"\",\"bytesHex\":\"";
+    for(uint32_t i=0;i<bytes;++i)j<<std::hex<<std::setw(2)<<std::setfill('0')<<static_cast<unsigned>(m.bytes[i]);
+    j<<"\"}";return j.str();
 }
 static std::string CaptureJson(const std::vector<Capture>& v){
     std::ostringstream j;j<<"[";size_t n=std::min<size_t>(v.size(),8);
@@ -540,6 +700,40 @@ static std::string CandidateJson(const std::vector<AbiCandidate>& v){
     j<<"]"; return j.str();
 }
 
+static std::string CandidateReviewJson(const std::vector<AbiCandidate>& candidates){
+    std::vector<AbiCandidate> ranked=candidates;
+    std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b){return a.score==b.score?a.path<b.path:a.score>b.score;});
+    constexpr int closeGap=15;
+    const auto gap=ranked.size()>1?static_cast<int64_t>(ranked[0].score)-ranked[1].score:0;
+    const bool close=ranked.size()>1&&gap<closeGap;
+    std::ostringstream j;j<<"{\"policy\":\"score_is_ranking_only_not_abi_proof\",\"candidateCount\":"<<ranked.size()
+        <<",\"closeScoreThreshold\":"<<closeGap<<",\"bestRunnerUpGap\":"<<gap
+        <<",\"needsDisambiguation\":"<<(close?"true":"false")<<",\"status\":\""
+        <<(ranked.empty()?"no_ranked_candidates":(close?"close_candidates_need_new_stimulus":"ranked_candidates_need_contract_validation"))<<"\",\"ranked\":[";
+    for(size_t i=0;i<ranked.size();++i){if(i)j<<",";const auto delta=static_cast<int64_t>(ranked[0].score)-ranked[i].score;
+        j<<"{\"path\":\""<<EscapeJson(ranked[i].path)<<"\",\"score\":"<<ranked[i].score<<",\"rank\":"<<i+1
+            <<",\"deltaFromBest\":"<<delta<<",\"closeToBest\":"<<(delta<closeGap?"true":"false")<<"}";}
+    j<<"],\"nextStimulus\":\""<<(close?"Change one semantic argument at a time and collect a third natural sample; keep all alternative paths.":"Validate the typed argument contract, return/ownership and active call; ranking alone cannot enable the function.")<<"\"}";
+    return j.str();
+}
+
+static std::string ValidationProgressJson(const AbiResult& r){
+    bool ownedReturn=false;for(const auto& method:pipe_discovery::methods)if(r.key==method.key)ownedReturn=method.ownedReturn;
+    std::ostringstream j;
+    j<<"{\"schema\":\"crome-abi-validation-progress-v1\",\"argumentEvidenceMeasured\":"<<(r.machine?"true":"false")
+        <<",\"naturalThreadEvidenceMeasured\":"<<(r.naturalThreadId&&!r.a.empty()&&!r.b.empty()?"true":"false")
+        <<",\"callerEvidenceMeasured\":"<<(r.callerSiteValidated?"true":"false")
+        <<",\"typedArgumentsComplete\":false,\"returnContractValidated\":false,\"ownershipValidated\":false,\"activeCallValidated\":false"
+        <<",\"requiresOwnedReturn\":"<<(ownedReturn?"true":"false")
+        <<",\"contractComplete\":false,\"remainingChecks\":[\"typed_argument_contract\",\"return_or_void_contract\"";
+    if(ownedReturn)j<<",\"returned_object_membership\",\"reference_increment_and_release\"";
+    if(!r.naturalThreadId||r.a.empty()||r.b.empty())j<<",\"natural_thread_evidence\"";
+    if(!r.callerSiteValidated)j<<",\"natural_caller_evidence\"";
+    j<<",\"game_thread_dispatch\",\"active_call_result\"],\"savedPointersAreHistorical\":true,\"refreshObjectsBeforeActiveTest\":true}";
+    return j.str();
+}
+
+static std::string FrozenCandidateReplayJson(const AbiResult& r);
 static std::string ResultJson(const AbiResult& r){
     std::ostringstream j;
     j<<"{\n"
@@ -554,6 +748,13 @@ static std::string ResultJson(const AbiResult& r){
     for(size_t i=0;i<r.mappings.size();++i){if(i)j<<",";j<<"{\"semantic\":\""<<EscapeJson(r.mappings[i].first)<<"\",\"path\":\""<<EscapeJson(r.mappings[i].second)<<"\"}";}
     j<<"],\n"
      <<"        \"evidenceCandidates\": "<<CandidateJson(r.candidates)<<",\n"
+     <<"        \"contractComplete\": false,\n"
+     <<"        \"activeCallValidated\": false,\n"
+     <<"        \"candidateReview\": "<<CandidateReviewJson(r.candidates)<<",\n"
+     <<"        \"frozenCandidateReplay\": "<<FrozenCandidateReplayJson(r)<<",\n"
+     <<"        \"validationProgress\": "<<ValidationProgressJson(r)<<",\n"
+     <<"        \"captureScope\": {\"processId\":"<<GetCurrentProcessId()<<",\"moduleBase\":\""<<Hex(g_base)<<"\",\"purpose\":\"historical_evidence_not_live_call_arguments\"},\n"
+     <<"        \"captureStorage\": {\"storedA\":"<<std::min<size_t>(r.a.size(),8)<<",\"storedB\":"<<std::min<size_t>(r.b.size(),8)<<",\"limitPerStimulus\":8,\"truncated\":"<<(r.a.size()>8||r.b.size()>8?"true":"false")<<"},\n"
      <<"        \"machineAbiValidated\": "<<(r.machine?"true":"false")<<",\n"
      <<"        \"naturalThreadObserved\": "<<(r.naturalThreadId?"true":"false")<<",\n"
      <<"        \"naturalThreadId\": "<<r.naturalThreadId<<",\n"
@@ -569,7 +770,7 @@ static std::string ResultJson(const AbiResult& r){
      <<"        \"callSiteWindow\": \""<<EscapeJson(r.callSiteWindow)<<"\",\n"
      <<"        \"callerProloguePrefix\": \""<<EscapeJson(r.callerProloguePrefix)<<"\",\n"
      <<"        \"callerCandidateReady\": "<<(r.callerCandidateReady?"true":"false")<<",\n"
-     <<"        \"callable\": "<<(r.callable?"true":"false")<<",\n"
+     <<"        \"callable\": "<<"false"<<",\n"
      <<"        \"notes\": \""<<EscapeJson(r.notes)<<"\",\n"
      <<"        \"capturesA\": "<<CaptureJson(r.a)<<",\n"
      <<"        \"capturesB\": "<<CaptureJson(r.b)<<"\n"
@@ -581,6 +782,68 @@ static uintptr_t RawLocation(const Capture& c,const std::string& loc){
     if(loc=="RCX")return c.rcx; if(loc=="RDX")return c.rdx; if(loc=="R8")return c.r8; if(loc=="R9")return c.r9;
     if(loc.rfind("STACK+0x",0)==0){ try{ unsigned off=std::stoul(loc.substr(8),nullptr,16); if(off>=8 && off<=STACK_QWORDS*8 && off%8==0) return c.stack[off/8-1]; }catch(...){} }
     return 0;
+}
+
+static bool FrozenPointerPath(const Capture& c,const std::string& path,uintptr_t& out){
+    out=0;
+    if(path.rfind("*(",0)==0&&path.size()>3&&path.back()==')'){
+        auto reg=path.substr(2,path.size()-3);uint32_t offset=0;
+        const auto plus=reg.find("+0x");
+        if(plus!=std::string::npos){
+            try{size_t used=0;const auto value=std::stoull(reg.substr(plus+1),&used,0);
+                if(used!=reg.size()-plus-1||value>ARG_SNAP_BYTES)return false;offset=static_cast<uint32_t>(value);
+            }catch(...){return false;}
+            reg.resize(plus);
+        }
+        const auto* snap=SnapForReg(c,reg);
+        return snap&&SnapRead(*snap,offset,out);
+    }
+    if(path.rfind("STACK+0x",0)==0){
+        try{size_t used=0;const auto offset=std::stoull(path.substr(6),&used,0);
+            if(used!=path.size()-6||offset<8||offset>STACK_QWORDS*8||offset%8)return false;
+        }catch(...){return false;}
+        out=RawLocation(c,path);return true;
+    }
+    if(path=="RCX"||path=="RDX"||path=="R8"||path=="R9"){out=RawLocation(c,path);return true;}
+    return false;
+}
+
+static std::string FrozenCandidateReplayJson(const AbiResult& r){
+    std::ostringstream j;j<<"{\"policy\":\"compare_recorded_values_without_dereferencing_old_addresses\",\"activeValidation\":false,\"paths\":[";
+    for(size_t i=0;i<r.candidates.size();++i){
+        if(i)j<<",";const auto& path=r.candidates[i].path;size_t recorded=0,missing=0;
+        j<<"{\"path\":\""<<EscapeJson(path)<<"\",\"sampleValues\":[";bool first=true;
+        for(const auto* captures:{&r.a,&r.b})for(const auto& c:*captures){
+            if(!first)j<<",";first=false;uintptr_t value=0;
+            if(FrozenPointerPath(c,path,value)){++recorded;j<<"\""<<Hex(value)<<"\"";}else{++missing;j<<"null";}
+        }
+        j<<"],\"recordedValues\":"<<recorded<<",\"missingValues\":"<<missing<<"}";
+    }
+    j<<"]}";return j.str();
+}
+
+static void ShowSavedCandidateReview(const Profile& p){
+    const auto previousFp=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"fingerprint");
+    if(!DiscoveryFingerprintMatches(p)||!pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(previousFp,"timestamp")),ParseNum(FlatJsonString(previousFp,"sizeOfImage")),ParseNum(FlatJsonString(previousFp,"textHashFNV1A64")),p.timestamp,p.sizeOfImage,p.textHash))return;
+    try{
+        const auto root=crome::json::parse(p.raw);const auto* abi=root.get("abiCatalog");
+        const auto* observations=abi?abi->get("lastEvidenceSession"):nullptr;
+        if(!observations||!observations->isObject())return;
+        for(const auto& [key,obj]:observations->object()){
+            const auto* rva=obj.get("rva");const auto current=DiscoveredRva(p,key);
+            if(!current||!rva||!rva->isString()||ParseNum(rva->string())!=current)continue;
+            const auto* candidates=obj.get("evidenceCandidates");if(!candidates||!candidates->isArray()||candidates->array().empty())continue;
+            std::vector<AbiCandidate> alternatives;
+            for(const auto& candidate:candidates->array()){
+                const auto* path=candidate.get("path");const auto* score=candidate.get("score");
+                if(!path||!path->isString()||!score||!score->isNumber()||score->number()<-1000000||score->number()>1000000)continue;
+                alternatives.push_back({path->string(),static_cast<int>(score->number()),{}});
+            }
+            const auto review=crome::json::parse(CandidateReviewJson(alternatives));
+            std::cout<<"[RESUME ABI] "<<key<<": alternativas salvas="<<alternatives.size()
+                <<" proximas="<<(review.get("needsDisambiguation")->boolean()?"SIM; variar um argumento e coletar nova amostra":"NAO; concluir contrato e chamada ativa")<<"\n";
+        }
+    }catch(const std::exception& e){std::cout<<"[RESUME ABI] Revisao diagnostica indisponivel: "<<e.what()<<"\n";}
 }
 
 static bool EvalPointerPath(const Capture& c,const std::string& path,uintptr_t& out){
@@ -627,17 +890,56 @@ static std::map<std::string,uint32_t> ItemPaths(const std::vector<Capture>& caps
     return out;
 }
 
+struct ActionEntry { std::string key,name;uintptr_t rva=0; };
+using LookEntry=ActionEntry;
+static std::vector<ActionEntry> ActionEntries(const Profile& p,const std::string& family){
+    std::vector<ActionEntry> entries;
+    for(const auto& group:pipe_discovery::actionFamilies){
+        if(family!=group.key)continue;
+        for(const auto* key:group.functionKeys){
+            const auto rva=DiscoveredRva(p,key);if(!rva)continue;
+            for(const auto& method:pipe_discovery::methods)
+                if(std::string(key)==method.key){entries.push_back({key,method.semantic,rva});break;}
+        }
+    }
+    return entries;
+}
+static std::vector<LookEntry> LookEntries(const Profile& p){return ActionEntries(p,"look");}
+using ActionCaptureFn=bool(*)(uintptr_t,const std::string&,const std::string&,std::vector<Capture>&,std::vector<Capture>&,int);
+using LookCaptureFn=ActionCaptureFn;
+static bool CaptureActionSamples(const Profile& p,const std::string& family,const std::string& promptA,const std::string& promptB,ActionEntry& selected,std::vector<Capture>& a,std::vector<Capture>& b,ActionCaptureFn capture=CaptureTwo){
+    for(const auto& entry:ActionEntries(p,family)){
+        selected=entry;a.clear();b.clear();
+        std::cout<<"[ACTION DISCOVERY] "<<family<<": candidato da build atual "<<entry.name<<" @ "<<Hex(entry.rva)<<"\n";
+        if(capture(entry.rva,promptA,promptB,a,b,2)&&!a.empty()&&!b.empty())return true;
+        if(!a.empty()||!b.empty()){
+            std::cout<<"[ACTION DISCOVERY][PENDING] Captura parcial; repita esta funcao. Amostras de funcoes diferentes nao serao combinadas.\n";
+            return false;
+        }
+        std::cout<<"[ACTION DISCOVERY] Sem chamadas observadas nesta funcao. Proximo candidato sera testado separadamente, se existir.\n";
+    }
+    return false;
+}
+static bool CaptureLookSamples(const Profile& p,LookEntry& selected,std::vector<Capture>& a,std::vector<Capture>& b,LookCaptureFn capture=CaptureTwo){
+    return CaptureActionSamples(p,"look","De LOOK em um ITEM A qualquer e pressione ENTER...\n","De LOOK em um ITEM B DIFERENTE e pressione ENTER...\n",selected,a,b,capture);
+}
 static bool CaptureLookRaw(const Profile& p,const std::string& prompt,std::vector<Capture>& caps){
-    uintptr_t rva=p.fnGameDetailedLook?p.fnGameDetailedLook:p.fnGameLook; if(!rva)return false;
+    const uintptr_t rva=g_lookOracle.ready?g_lookOracle.rva:0;
+    const auto entries=LookEntries(p);
+    if(!rva||std::none_of(entries.begin(),entries.end(),[&](const LookEntry& e){return e.rva==rva;}))return false;
     uintptr_t addr=g_base+rva; if(!InstallBP(addr))return false; ClearCaps(); Wait(prompt); Sleep(100); caps=Snapshot(); UninstallBP(); return !caps.empty();
 }
 
-static bool EstablishLookOracle(const Profile& p,AbiResult* result=nullptr){
+static bool EstablishLookOracle(const Profile& p,AbiResult* result=nullptr,LookCaptureFn capture=CaptureTwo){
     if(g_lookOracle.ready)return true;
-    uintptr_t rva=p.fnGameDetailedLook?p.fnGameDetailedLook:p.fnGameLook; if(!rva||!p.itemIdOffset||!p.itemVtableRva){std::cout<<"[LOOK ASSIST] Profile sem Look/Item layout suficiente.\n";return false;}
+    if(LookEntries(p).empty()||!p.itemIdOffset||!p.itemVtableRva){std::cout<<"[LOOK ASSIST] Profile sem Look descoberto/Item layout suficiente.\n";return false;}
     std::cout<<"\n============================================================\nLOOK ASSISTANT - AUTO ID / THING ORACLE\n============================================================\n";
     std::cout<<"Voce NAO precisa saber nenhum ID. Use o LOOK normal do cliente em dois ITENS diferentes.\n";
-    std::vector<Capture>a,b; if(!CaptureTwo(rva,"De LOOK em um ITEM A qualquer e pressione ENTER...\n","De LOOK em um ITEM B DIFERENTE e pressione ENTER...\n",a,b,2))return false;
+    std::vector<Capture>a,b;LookEntry selected;
+    const bool captured=CaptureLookSamples(p,selected,a,b,capture);
+    const uintptr_t rva=selected.rva;
+    if(result){result->key=selected.key;result->name=selected.name;result->rva=rva;result->a=a;result->b=b;result->runtimeHit=!a.empty()||!b.empty();}
+    if(!captured){if(result){result->status=result->runtimeHit?"captured_runtime_partial":"rva_not_observed_runtime";result->notes="Look candidates captured separately; no complete pair of natural calls observed.";}return false;}
     auto pa=ItemPaths(a,p),pb=ItemPaths(b,p); std::vector<AbiCandidate> cand;
     for(auto& [path,idA]:pa){ auto it=pb.find(path); if(it==pb.end()||!idA||!it->second||idA==it->second)continue; AbiCandidate c; c.path=path; c.score=70+PathPreference(path,"thing"); c.evidence={"valid Item vtable in sample A","valid Item vtable in sample B","item ID changed across samples"}; if(path=="*(RDX+0x0)"||path=="*(RDX)")c.score+=80; else if(path=="RDX")c.score+=20; if(path.rfind("STACK+",0)==0||path.rfind("*(STACK+",0)==0)c.score-=40; cand.push_back(c); }
     std::sort(cand.begin(),cand.end(),[](auto&a,auto&b){return a.score>b.score;});
@@ -645,9 +947,10 @@ static bool EstablishLookOracle(const Profile& p,AbiResult* result=nullptr){
     auto best=cand.front(); uint32_t ida=pa[best.path],idb=pb[best.path];
     bool strong=cand.size()==1 || best.score>=cand[1].score+15;
     std::cout<<"[LOOK ASSIST] Melhor caminho: "<<best.path<<" score="<<best.score<<" IDs observados="<<ida<<" / "<<idb<<"\n";
-    if(!strong){std::cout<<"[LOOK ASSIST][WARN] Ha concorrencia de evidencias; usando melhor candidato apenas como STRONG CANDIDATE.\n";}
-    g_lookOracle={true,rva,best.path,ida,idb,best.score};
+    if(!strong){std::cout<<"[LOOK ASSIST][PENDING] Caminho de Item ambiguo; assistente nao sera utilizado.\n";}
     if(result){result->a=a;result->b=b;result->runtimeHit=true;result->mappings.push_back({"Thing*/Item* argument",best.path});result->candidates=cand;result->machine=strong;result->status=strong?"confirmed_runtime_primary_argument":"strong_candidate_runtime_primary_argument";result->notes="Look oracle learned without user-supplied IDs; two different runtime Item IDs observed.";result->naturalThreadId=ConsistentThread(a,b);result->callerCandidateReady=strong;}
+    if(!strong)return false;
+    g_lookOracle={true,rva,best.path,ida,idb,best.score};
     return true;
 }
 
@@ -705,7 +1008,9 @@ static AbiResult TestAttackFollow(const Profile& p,bool attack){
 }
 
 static AbiResult TestLook(const Profile& p){
-    AbiResult r;r.key=p.fnGameDetailedLook?"gameDetailedLook":"gameLook";r.name="Game::look/detailedLook";r.rva=p.fnGameDetailedLook?p.fnGameDetailedLook:p.fnGameLook;r.tested=true;if(!r.rva){r.status="missing_rva";return r;}
+    AbiResult r;r.key="gameLook";r.name="Game::look";r.tested=true;
+    const auto entries=LookEntries(p);if(entries.empty()){r.status="missing_rva";return r;}
+    r.key=entries.front().key;r.name=entries.front().name;r.rva=entries.front().rva;
     EstablishLookOracle(p,&r); return r;
 }
 
@@ -752,9 +1057,21 @@ static AbiResult TestUseWith(const Profile& p){
     auto src=Intersect(MatchPointer(r.a,sa.ptr),MatchPointer(r.b,sb.ptr));auto trg=Intersect(MatchPointer(r.a,ta.ptr),MatchPointer(r.b,tb.ptr));auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));std::string srcPath=src.count("*(RDX+0x0)")?"*(RDX+0x0)":(src.size()==1?*src.begin():"");std::string trgPath=trg.count("*(R8+0x0)")?"*(R8+0x0)":(trg.size()==1?*trg.begin():"");if(!srcPath.empty())r.mappings.push_back({"source ItemPtr pointee",srcPath});if(!trgPath.empty())r.mappings.push_back({"target ThingPtr pointee",trgPath});if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});r.naturalThreadId=ConsistentThread(r.a,r.b);r.machine=!srcPath.empty()&&ga.count("RCX");r.callerCandidateReady=r.machine&&r.naturalThreadId;r.status=r.machine?(!trgPath.empty()?"confirmed_runtime_arguments":"confirmed_runtime_primary_argument"):"captured_runtime_partial";r.notes="V1.3 snapshots temporary shared_ptr wrappers at breakpoint time. Reference prototype expects RDX=ItemPtr&, R8=ThingPtr&; runtime pointees are required before promotion.";return r;
 }
 
-static AbiResult TestTalk(const Profile& p){
-    AbiResult r;r.key="gameTalk";r.name="Game::talk";r.rva=p.fnGameTalk;r.tested=true;if(!r.rva){r.status="missing_rva";r.notes="Este profile nao possui Game::talk RVA.";return r;}
-    std::string a="ABI_TEST_ALPHA",b="ABI_TEST_BETA";if(!CaptureTwo(r.rva,"No jogo fale exatamente: "+a+" ; depois ENTER...\n","No jogo fale exatamente: "+b+" ; depois ENTER...\n",r.a,r.b,2)){r.status="rva_not_observed_runtime";return r;}r.runtimeHit=!r.a.empty()||!r.b.empty();auto m=Intersect(MatchString(r.a,a),MatchString(r.b,b));auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));if(m.size()==1)r.mappings.push_back({"text/string argument",*m.begin()});if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});r.naturalThreadId=ConsistentThread(r.a,r.b);r.machine=m.size()==1&&ga.count("RCX");r.callerCandidateReady=r.machine&&r.naturalThreadId;r.status=r.machine?"confirmed_runtime_text_argument":"captured_runtime_ambiguous";r.notes="Two different phrases used as evidence. Talk mode/channel arguments may still be pending.";return r;
+static AbiResult TestTalk(const Profile& p,ActionCaptureFn capture=CaptureTwo){
+    AbiResult r;r.key="gameTalk";r.name="Game::talk";r.tested=true;
+    if(ActionEntries(p,"talk").empty()){r.status="discovery_required";r.notes="No unique Talk-family method discovered for this build.";return r;}
+    std::cout<<"\n[TALK] Selecione o canal Default e envie as duas frases pelo chat normal. Mantenha o mesmo canal e modo nas duas amostras.\n";
+    const std::string a="ABI_TEST_ALPHA",b="ABI_TEST_BETA";ActionEntry selected;
+    const bool captured=CaptureActionSamples(p,"talk","No jogo fale exatamente: "+a+" ; depois ENTER...\n","No jogo fale exatamente: "+b+" ; depois ENTER...\n",selected,r.a,r.b,capture);
+    r.key=selected.key;r.name=selected.name;r.rva=selected.rva;r.runtimeHit=!r.a.empty()||!r.b.empty();
+    if(!captured){r.status=r.runtimeHit?"captured_runtime_partial":"rva_not_observed_runtime";r.notes="Talk methods captured separately; no complete natural pair observed.";return r;}
+    const auto m=Intersect(MatchString(r.a,a),MatchString(r.b,b));const auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));
+    if(m.size()==1)r.mappings.push_back({"text/string argument",*m.begin()});
+    if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});
+    r.naturalThreadId=ConsistentThread(r.a,r.b);r.machine=m.size()==1&&ga.count("RCX")&&r.naturalThreadId;
+    r.callerCandidateReady=r.machine;r.status=r.machine?"confirmed_runtime_text_argument":"captured_runtime_ambiguous";
+    r.notes="Two distinct phrases matched on the observed method only. Talk mode/channel arguments and active-call validation remain pending; no ABI borrowed from the other Talk method.";
+    return r;
 }
 
 struct PosObs { std::string path; uint32_t x=0,y=0,z=0; int score=0; };
@@ -784,38 +1101,78 @@ static AbiResult TestGameAutoWalk(const Profile& p){
     if(!CaptureTwo(r.rva,"Clique em um destino A 4-8 SQMs distante; ENTER quando iniciar...\n","Clique em um destino B diferente; ENTER quando iniciar...\n",r.a,r.b,3)){r.status="rva_not_observed_runtime";return r;}r.runtimeHit=!r.a.empty()||!r.b.empty();auto ga=Intersect(MatchKnownGame(r.a,p),MatchKnownGame(r.b,p));if(ga.count("RCX"))r.mappings.push_back({"Game* this","RCX"});r.naturalThreadId=ConsistentThread(r.a,r.b);r.status=r.runtimeHit?"captured_runtime_raw_autowalk":"rva_not_observed_runtime";r.notes="Game::autoWalk carries a non-trivial direction vector; V1.3 records natural calls/thread and preserves argument snapshots for the dedicated vector-layout stage.";return r;
 }
 
+
+static AbiResult TestTileReturnEntry(const Profile& p,const char* key,const char* name) {
+    AbiResult r; r.key=key; r.name=name; r.rva=DiscoveredRva(p,key); r.tested=true;
+    if(!r.rva) { r.status="discovery_required"; return r; }
+    if(!CaptureTwo(r.rva,"Arraste um item do chao normalmente no tile A; depois ENTER...\n",
+                         "Arraste outro item no tile B; depois ENTER...\n",r.a,r.b,2)) {
+        r.status="rva_not_observed_runtime"; return r;
+    }
+    r.runtimeHit=!r.a.empty() || !r.b.empty();
+    r.naturalThreadId=ConsistentThread(r.a,r.b);
+    r.status="captured_entry_return_pending";
+    r.notes="Passive x64 entry snapshots only. This/hidden return lowering, returned ThingPtr, same-tile membership and ownership balance must be measured before ABI promotion. The x86 ECX/RET4 contract is never imported.";
+    return r;
+}
+
 static std::string ExistingFunctionObject(const std::string& raw,const std::string& key){std::string abi=ExtractNamedObject(raw,"abiCatalog");std::string f=ExtractNamedObject(abi,"functions");return ExtractNamedObject(f,key);}
 
 static int StatusStrength(const std::string& s){
     if(s.find("confirmed_runtime")!=std::string::npos)return 5;
     if(s.find("strong_candidate")!=std::string::npos)return 4;
     if(s.find("captured_runtime_partial")!=std::string::npos)return 3;
+    if(s=="captured_entry_return_pending")return 2;
     if(s.find("captured_runtime")!=std::string::npos)return 2;
     if(s.find("rva_not_observed")!=std::string::npos)return 1;
     return 0;
 }
 
 static std::string BuildAbiCatalog(const Profile& p,const Fingerprint& fp,const std::map<std::string,AbiResult>& results){
-    const std::vector<std::string> keys={"gameAutoWalk","localPlayerAutoWalk","gameAttack","gameFollow","gameLook","gameDetailedLook","gameMove","gameUse","gameUseWith","gameTalk","mapGetTile","mapGetCreatureById","mapGetCreatureByName","containerGetItem"};
+    std::vector<std::string> keys;
+    for(const auto& spec:pipe_discovery::methods) keys.emplace_back(spec.key);
     std::ostringstream j;j<<"{\n    \"schema\": \"otclab-abi-catalog-v4\",\n    \"schemaVersion\": 4,\n    \"builder\": \"OTCLab_ABIBuilder_V1_3_X64_AUTOCALIBRATOR_CALLER_EVIDENCE\",\n    \"policy\": \"guided_runtime_autocalibration_with_natural_caller_resolution\",\n    \"fingerprint\": {\"timestamp\":\""<<Hex(fp.timestamp)<<"\",\"sizeOfImage\":\""<<Hex(fp.sizeOfImage)<<"\",\"textHashFNV1A64\":\""<<Hex(fp.textHash)<<"\"},\n    \"functions\": {\n";
     bool first=true;
     for(auto& key:keys){
-        auto it=results.find(key);std::string existing=ExistingFunctionObject(p.raw,key),obj=existing;
+        auto it=results.find(key);std::string existing=ExistingFunctionObject(p.raw,key),obj;
+        const auto discovered=DiscoveredRva(p,key);
+        const auto priorFp=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"fingerprint");
+        const bool sameEvidenceBuild=pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(priorFp,"timestamp")),ParseNum(FlatJsonString(priorFp,"sizeOfImage")),ParseNum(FlatJsonString(priorFp,"textHashFNV1A64")),fp.timestamp,fp.sizeOfImage,fp.textHash);
+        if(!sameEvidenceBuild || !discovered || ParseNum(FlatJsonString(existing,"rva"))!=discovered) existing.clear();
+        if(!existing.empty()) obj=ForcePassive(existing);
         if(it!=results.end()&&it->second.tested){
             std::string fresh=ResultJson(it->second), oldStatus=FlatJsonString(existing,"status");
             if(existing.empty() || StatusStrength(it->second.status)>=StatusStrength(oldStatus)) obj=fresh;
         }
-        if(obj.empty())continue;if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<obj;
+        if(obj.empty()) { AbiResult pending; pending.key=key; pending.name=key; pending.rva=discovered; pending.status=discovered?"abi_validation_required":"discovery_required"; pending.notes="Discovered address is a candidate only. Complete ABI, return/ownership, thread and active call validation remain required."; obj=ResultJson(pending); }
+        obj=ForcePassive(obj);
+        if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<obj;
     }
     j<<"\n    },\n    \"lastEvidenceSession\": {\n";
-    first=true;for(auto& [key,r]:results){if(!r.tested)continue;if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<ResultJson(r);}j<<"\n    },\n";
+    // Retain the latest inconclusive observations as well as the strongest
+    // contract. Skipping a test must not erase its alternative candidates.
+    first=true;
+    const auto previousSession=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"lastEvidenceSession");
+    const auto previousFp=ExtractNamedObject(ExtractNamedObject(p.raw,"abiCatalog"),"fingerprint");
+    const bool sameSessionBuild=pipe_discovery::exactFingerprint(ParseNum(FlatJsonString(previousFp,"timestamp")),ParseNum(FlatJsonString(previousFp,"sizeOfImage")),ParseNum(FlatJsonString(previousFp,"textHashFNV1A64")),fp.timestamp,fp.sizeOfImage,fp.textHash);
+    for(const auto& key:keys){
+        std::string observation;const auto it=results.find(key);
+        if(it!=results.end()&&it->second.tested)observation=ResultJson(it->second);
+        else if(sameSessionBuild){
+            auto prior=ExtractNamedObject(previousSession,key);const auto current=DiscoveredRva(p,key);
+            if(current&&ParseNum(FlatJsonString(prior,"rva"))==current)observation=ForcePassive(prior);
+        }
+        if(observation.empty())continue;
+        if(!first)j<<",\n";first=false;j<<"      \""<<key<<"\": "<<observation;
+    }
+    j<<"\n    },\n";
     j<<"    \"evidencePolicy\": {\"neverDowngradeStrongerExistingEvidence\":true,\"userRole\":\"generate_runtime_transition_only\",\"profileFactsAreReused\":true},\n";
     j<<"    \"callabilityPolicy\": {\"requiresMachineAbiValidated\":true,\"requiresNaturalThreadEvidence\":true,\"requiresCallerSiteValidated\":true,\"requiresActiveCallValidation\":true}\n  }";return j.str();
 }
 
 static bool SaveProfile(Profile& p,const Fingerprint& fp,const std::map<std::string,AbiResult>& results){
     std::string raw=ReadText(p.path);if(raw.empty())return false;
-    fs::path bak=fs::path(p.path);bak += ".pre_abi.bak.json";std::error_code ec;if(!fs::exists(bak,ec))WriteText(bak,raw);
+    fs::path bak=p.path;bak += L".pre_abi.bak.json";std::error_code ec;if(!fs::exists(bak,ec))WriteText(bak,raw);
     std::string cat=BuildAbiCatalog(p,fp,results);if(!ReplaceOrInsertRootObject(raw,"abiCatalog",cat))return false;
     if(!WriteText(p.path,raw))return false;p.raw=raw;return true;
 }
@@ -827,20 +1184,26 @@ static void ProfileCrossCheck(const Profile& p){
     struct E{const char* n;uintptr_t r;const std::string* s;};std::vector<E> v={{"attack",p.fnGameAttack,&p.sigGameAttack},{"follow",p.fnGameFollow,&p.sigGameFollow},{"look",p.fnGameLook,&p.sigGameLook},{"move",p.fnGameMove,&p.sigGameMove},{"use",p.fnGameUse,&p.sigGameUse},{"useWith",p.fnGameUseWith,&p.sigGameUseWith},{"autoWalk",p.fnGameAutoWalk,&p.sigGameAutoWalk},{"lpAutoWalk",p.fnLocalPlayerAutoWalk,&p.sigLocalPlayerAutoWalk}};int checked=0,ok=0;std::cout<<"[PROFILE CROSS-CHECK] function prologue prefixes:\n";for(auto&e:v){if(!e.r||e.s->empty())continue;++checked;bool m=MatchSignaturePrefix(e.r,*e.s);if(m)++ok;std::cout<<"  "<<e.n<<" @ "<<Hex(e.r)<<" : "<<(m?"MATCH":"DIFF")<<"\n";}std::cout<<"[PROFILE CROSS-CHECK] matched "<<ok<<"/"<<checked<<" known function prefixes.\n";
 }
 
-static DWORD WINAPI MainThread(LPVOID){
-    AllocConsole();FILE* f=nullptr;f=freopen("CONOUT$","w",stdout);f=freopen("CONOUT$","w",stderr);f=freopen("CONIN$","r",stdin);SetConsoleTitleA("OTCLab ABI Builder V1.3 X64");
-    std::cout<<"============================================================\n       OTCLab ABI Builder V1.3 X64 - AUTOCALIBRATOR / CALLER EVIDENCE\n============================================================\nRecebe o BuildProfile pronto e reutiliza Game/Target/Item/Look/Position/RVAs como evidencias.\nO usuario gera somente a acao real no jogo; IDs e ponteiros sao lidos automaticamente quando possivel.\nNao chama funcoes internas nesta versao. INT3+VEH sao temporarios e reversiveis.\nEvidencia fraca nunca sobrescreve uma evidencia anterior mais forte.\nO jogador apenas executa a acao real; CALL site/caller sao descobertos automaticamente e gravados no JSON.\nV1.3 preserva snapshots e resolve automaticamente return RVA, CALL site e funcao caller natural via .pdata.\n============================================================\n";
-    Fingerprint fp{};if(!GetFingerprint(fp)){std::cout<<"[STOP] Falha no fingerprint.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
+#include "CompletionSession.hpp"
+
+static void RunAbiSession(){
+    LogStage("session_start; completion_tests_v1; no_breakpoint_installed");
+    std::cout<<"============================================================\n       OTCLab ABI Builder V1.3 X64 - AUTOCALIBRATOR / CALLER EVIDENCE\n============================================================\nRecebe o BuildProfile pronto e reutiliza Game/Target/Item/Look/Position/RVAs como evidencias.\nO usuario gera somente a acao real no jogo; IDs e ponteiros sao lidos automaticamente quando possivel.\nEtapa inicial passiva; conclusao oferece chamadas ativas guiadas no thread natural. INT3+VEH sao temporarios e reversiveis.\nEvidencia fraca nunca sobrescreve uma evidencia anterior mais forte.\nO jogador apenas executa a acao real; CALL site/caller sao descobertos automaticamente e gravados no JSON.\nV1.3 preserva snapshots e resolve automaticamente return RVA, CALL site e funcao caller natural via .pdata.\n============================================================\n";
+    LogStage("fingerprint_begin");
+    Fingerprint fp{};if(!GetFingerprint(fp)){std::cout<<"[STOP] Falha no fingerprint.\n";Wait("ENTER...");return;}
     std::cout<<"Timestamp : "<<Hex(fp.timestamp)<<"\nSizeImage : "<<Hex(fp.sizeOfImage)<<"\nTextHash  : "<<Hex(fp.textHash)<<"\n";
-    auto paths=FindProfiles();struct Cand{fs::path path;Profile p;int score;};std::vector<Cand> cs;
-    for(auto& x:paths){Profile p=ParseProfile(x);if(!p.timestamp||!p.sizeOfImage)continue;int s=0;if(p.timestamp==fp.timestamp)s+=4;if(p.sizeOfImage==fp.sizeOfImage)s+=4;if(p.textHash&&p.textHash==fp.textHash)s+=8;if(s>=8){s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
-    if(cs.empty()){std::cout<<"[STOP] Nenhum BuildProfile JSON com timestamp+SizeImage desta build foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");FreeLibraryAndExitThread(g_self,0);}
+    LogStage("fingerprint_ok; profile_search_begin");
+    auto paths=FindProfiles();LogStage("profile_search_done");struct Cand{fs::path path;Profile p;int score;};std::vector<Cand> cs;
+    for(auto& x:paths){LogStage("profile_parse_begin");Profile p=ParseProfile(x);LogStage("profile_parse_done");if(!p.timestamp||!p.sizeOfImage)continue;if(!pipe_discovery::exactFingerprint(p.timestamp,p.sizeOfImage,p.textHash,fp.timestamp,fp.sizeOfImage,fp.textHash) || !DiscoveryFingerprintMatches(p)) continue;int s=16;{s+=ProfileEvidenceScore(p);cs.push_back({x,p,s});}}
+    if(cs.empty()){std::cout<<"[STOP] Nenhum profile com fingerprint exata e pipeDiscovery atual foi encontrado.\nCopie o JSON gerado pelo BuildExplorer para a pasta profiles ao lado da DLL.\n";Wait("ENTER...");return;}
     std::sort(cs.begin(),cs.end(),[](auto&a,auto&b){return a.score>b.score;});
-    std::cout<<"\nProfiles compatíveis:\n";for(size_t i=0;i<cs.size();++i)std::cout<<"  #"<<i<<" score="<<cs[i].score<<" "<<cs[i].path.string()<<"\n";
+    std::cout<<"\nProfiles compatíveis:\n";for(size_t i=0;i<cs.size();++i)std::cout<<"  #"<<i<<" score="<<cs[i].score<<" "<<DisplayPath(cs[i].path)<<"\n";
     size_t pick=0;if(cs.size()>1){if(cs[0].score>cs[1].score){std::cout<<"[AUTO PROFILE] Selecionado #0 por conter evidencias ABI mais fortes/mais novas.\n";}else{pick=AskU32("Escolha profile",0);if(pick>=cs.size())pick=0;}}Profile p=cs[pick].p;
-    bool hashMatch=!p.textHash||p.textHash==fp.textHash;
-    std::cout<<"\n[PROFILE] "<<p.path<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
-    if(!hashMatch){std::cout<<"[WARN] Timestamp+SizeImage batem, mas hash .text difere. Vou cruzar os prologos conhecidos antes de continuar.\n";ProfileCrossCheck(p);if(!AskYes("Continuar com este profile apos o cross-check?",false)){FreeLibraryAndExitThread(g_self,0);}} else ProfileCrossCheck(p);
+    std::cout<<"\n[PROFILE] "<<DisplayPath(p.path)<<"\nItem ID off="<<Hex(p.itemIdOffset)<<" Item VTable RVA="<<Hex(p.itemVtableRva)<<"\n";
+    LogStage("profile_selected; prologue_cross_check_begin");
+    ProfileCrossCheck(p); // Diagnostic only; discovery and fingerprint gates remain mandatory.
+    ShowSavedCandidateReview(p);
+    LogStage("initialization_complete; waiting_for_user; no_breakpoint_installed");
     std::map<std::string,AbiResult> results;
     if(p.fnGameAttack&&AskYes("Testar ABI Game::attack com evidencias do profile?",true))results["gameAttack"]=TestAttackFollow(p,true);
     if(p.fnGameFollow&&AskYes("Testar ABI Game::follow com evidencias do profile?",true))results["gameFollow"]=TestAttackFollow(p,false);
@@ -848,9 +1211,13 @@ static DWORD WINAPI MainThread(LPVOID){
     if(p.fnGameMove&&AskYes("Testar ABI Game::move com Look Assistant?",true))results["gameMove"]=TestMove(p);
     if(p.fnGameUse&&AskYes("Testar ABI Game::use com Look Assistant?",true))results["gameUse"]=TestUse(p);
     if(p.fnGameUseWith&&AskYes("Testar ABI Game::useWith com Look Assistant?",true))results["gameUseWith"]=TestUseWith(p);
-    if(p.fnGameTalk&&AskYes("Testar ABI Game::talk?",false))results["gameTalk"]=TestTalk(p);
+    if(!ActionEntries(p,"talk").empty()&&AskYes("Testar ABI do chat normal (Talk/TalkChannel descobertos)?",false)){auto r=TestTalk(p);results[r.key]=r;}
     if(p.fnLocalPlayerAutoWalk&&AskYes("Testar ABI LocalPlayer::autoWalk por CLICK-TO-WALK?",true))results["localPlayerAutoWalk"]=TestLocalPlayerAutoWalk(p);
     if(p.fnGameAutoWalk&&AskYes("Capturar cadeia Game::autoWalk por CLICK-TO-WALK?",false))results["gameAutoWalk"]=TestGameAutoWalk(p);
+    if(DiscoveredRva(p,"tileGetTopMoveThing") && AskYes("Capturar entrada Tile::getTopMoveThing (retorno permanece pendente)?",true))
+        results["tileGetTopMoveThing"]=TestTileReturnEntry(p,"tileGetTopMoveThing","Tile::getTopMoveThing");
+    if(DiscoveredRva(p,"tileGetTopUseThing") && AskYes("Capturar entrada Tile::getTopUseThing (retorno permanece pendente)?",false))
+        results["tileGetTopUseThing"]=TestTileReturnEntry(p,"tileGetTopUseThing","Tile::getTopUseThing");
     for(auto& [k,r]:results)FinalizeCallerEvidence(r);
     std::cout<<"\n============================================================\nABI SESSION SUMMARY\n============================================================\n";
     for(auto& [k,r]:results){
@@ -862,9 +1229,45 @@ static DWORD WINAPI MainThread(LPVOID){
             std::cout<<" samples="<<r.callerSamples<<" validated="<<(r.callerSiteValidated?"YES":"NO")<<"\n";
         }else std::cout<<"    caller site -> unresolved\n";
     }
-    if(SaveProfile(p,fp,results))std::cout<<"\n[SAVE][OK] ABI catalog gravado no MESMO JSON:\n"<<p.path<<"\nBackup preservado: "<<p.path<<".pre_abi.bak.json\n";else std::cout<<"\n[SAVE][FAIL] Nao consegui atualizar JSON.\n";
-    std::cout<<"\nIMPORTANTE: V1.3 resolve automaticamente CALL site e funcao caller natural a partir do return address de cada acao real. callerCandidateReady exige ABI + thread + mesmo CALL site observado nos dois estimulos. callable continua FALSE; nenhuma chamada interna ativa e executada nesta versao.\n";
-    Wait("ENTER para descarregar ABI Builder...\n");FreeLibraryAndExitThread(g_self,0);return 0;
+    if(SaveProfile(p,fp,results))std::cout<<"\n[SAVE][OK] ABI catalog gravado no MESMO JSON:\n"<<DisplayPath(p.path)<<"\nBackup preservado: "<<DisplayPath(p.path)<<".pre_abi.bak.json\n";else std::cout<<"\n[SAVE][FAIL] Nao consegui atualizar JSON.\n";
+    RunCompletionTests(p,fp,results);
+    std::cout<<"\n[ABI COMPLETION] Retorno/refcount, vetor e chamadas ativas sao etapas separadas. Resultados ficam em abiCompletion; testes incompletos e replay de holders existentes nao habilitam construcao independente de argumentos.\n";
+    Wait("ENTER para encerrar a sessao ABI Builder...\n");
+}
+
+static DWORD WINAPI MainThread(LPVOID){
+    OpenStartupLog();
+    HANDLE input=INVALID_HANDLE_VALUE,output=INVALID_HANDLE_VALUE;
+    bool ownsConsole=false;
+    try {
+        LogStage("console_attach_begin");
+        ownsConsole=AllocConsole()!=FALSE;
+        output=CreateFileW(L"CONOUT$",GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        input=CreateFileW(L"CONIN$",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        if(input==INVALID_HANDLE_VALUE||output==INVALID_HANDLE_VALUE){
+            LogStage("console_open_failed; session_aborted_without_hooks");
+        }else{
+            ScopedConsoleStreams streams(input,output);
+            if(ownsConsole){SetConsoleCP(CP_UTF8);SetConsoleOutputCP(CP_UTF8);}
+            LogStage("console_ready; shared_CRT_stdio_unchanged");
+            if(ownsConsole)SetConsoleTitleA("OTCLab ABI Builder V1.3 X64 - Startup Diagnostic");
+            RunAbiSession();
+        }
+    }catch(const std::exception& e){LogStage("session_exception");LogStage(e.what());}
+    catch(...){LogStage("session_unknown_cpp_exception");}
+    // Do not unload code while a capture is still armed.
+    if(InterlockedCompareExchange(&g_bp.installed,0,0) || completion_probe::state.installed){
+        LogStage("capture_still_installed; DLL_retained_to_avoid_unsafe_unload");
+        return 0;
+    }
+    if(input!=INVALID_HANDLE_VALUE)CloseHandle(input);
+    if(output!=INVALID_HANDLE_VALUE)CloseHandle(output);
+    if(ownsConsole)FreeConsole();
+    LogStage("session_finished; completion_handler_retained_if_used");
+    if(g_startupLog!=INVALID_HANDLE_VALUE){CloseHandle(g_startupLog);g_startupLog=INVALID_HANDLE_VALUE;}
+    if(completion_probe::retainedHandler)return 0; // Delayed INT3 handler lives until client shutdown.
+    FreeLibraryAndExitThread(g_self,0);
+    return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){g_self=h;DisableThreadLibraryCalls(h);HANDLE t=CreateThread(nullptr,0,MainThread,nullptr,0,nullptr);if(t)CloseHandle(t);}return TRUE;}

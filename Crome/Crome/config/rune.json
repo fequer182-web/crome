@@ -1,0 +1,14 @@
+{
+  "enabled": false,
+  "spell": "exura",
+  "mana_percent": 70,
+  "soul_min": 5,
+  "soul_mode": "auto_if_available",
+  "cooldown_ms": 1000,
+  "ramonia_backend": "bridge_v26_get_player_plus_say",
+  "relog_after": false,
+  "relog_minutes": 6,
+  "player_logout": false,
+  "no_blank_runes": false,
+  "mode": 0
+}

@@ -27,7 +27,9 @@
   },
   "light": {
     "enabled": false,
-    "profile_gated": true
+    "profile_gated": true,
+    "ambient": 1,
+    "ramonia_bridge_min_version": 22
   },
   "mana_shield": {
     "enabled": false,
@@ -45,7 +47,25 @@
   },
   "spear_pickup": {
     "enabled": false,
-    "item_ids": [],
-    "status": "requires_move_equip_backend"
+    "item_ids": [
+      2389
+    ],
+    "status": "ramonia_ground_to_hand_live_validated",
+    "reserve_free_capacity_percent": 20,
+    "capacity_baseline": "free_capacity_at_enable",
+    "hand_policy": "existing_spear_else_free_hand",
+    "right_hand_slot": 5,
+    "left_hand_slot": 6,
+    "tile_match_policy": "exact_item_id_any_stack_index",
+    "ignore_other_tile_items": true,
+    "top_item_only": false,
+    "scan_radius": 1,
+    "scan_shape": "center_plus_8_neighbors",
+    "scan_only_when_enabled": true,
+    "tile_index_policy": "coordinate_index_built_on_tile_cache_refresh",
+    "poll_policy": "nearby_tiles_only",
+    "capacity_guard_enabled": false,
+    "capacity_guard_status": "pending_GET_PLAYER_capacity",
+    "ramonia_bridge_min_version": 35
   }
 }

@@ -5,8 +5,12 @@
 #include <windows.h>
 
 #include "IActions.hpp"
+#include "OldersAttackOwnership.hpp"
+#include "PendingItemPayload.hpp"
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Snapshots.hpp"
+#include "../bot/ChangeGold.hpp"
+#include "../bot/OldersLoot.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -424,6 +428,11 @@ public:
         return requestItemAction(PendingItemAction::Use, item.id, found);
     }
 
+    bool changeGold(const std::vector<std::uint16_t>& ids) {
+        if(ids.empty() || !dispatcherReady() || !validateRuntime(false) || !profile_.actions.use)return false;
+        return requestItemAction(PendingItemAction::ChangeGold,0,FoundItem{},nullptr,ids);
+    }
+
     // Creature/self path validated in V13.
     bool useWith(const Item& item, Position target) override {
         if (!validateRuntime(false) || !profile_.actions.useWith) {
@@ -484,12 +493,8 @@ public:
                       << " nao encontrado em equipment nem containers abertos.\n";
             return false;
         }
-        pendingGroundIds_ = groundIds;
-        pendingGroundRange_ = maxRange;
-        const bool ok = requestItemAction(PendingItemAction::UseWithNearestGround,
-                                          item.id, found, nullptr);
-        if (!ok) pendingGroundIds_.clear();
-        return ok;
+        return requestItemAction(PendingItemAction::UseWithNearestGround,
+                                 item.id, found, nullptr, groundIds, maxRange);
     }
 
     // Diagnostic used by V15 hotkey F2. Map::getTile itself executes only on
@@ -532,6 +537,10 @@ public:
         return true;
     }
 
+    OldersLootStep lootStep(const OldersLootConfig& config) {
+        if(!dispatcherReady())return {false,false,{},"dispatcher_unavailable"};
+        lootConfig_=config;SendMessage(gameWindow_,kLootMessage,0,0);return lootResult_;
+    }
     bool move(const Item&, Position, Position, std::uint32_t) override { return false; }
     bool open(Position) override { return false; }
     bool close(std::size_t) override { return false; }
@@ -618,6 +627,7 @@ private:
         UseWithNearestGround,
         InspectTile,
         UseGroundObject,
+        ChangeGold,
     };
 
     using LocalPlayerAutoWalkFn = bool(__fastcall*)(void*, NativePosition*, bool);
@@ -634,6 +644,7 @@ private:
     static constexpr UINT kCreatureScanMessage = WM_APP + 0x517;
     static constexpr UINT kAttackMessage = WM_APP + 0x518;
     static constexpr UINT kFollowBlockMessage = WM_APP + 0x519;
+    static constexpr UINT kLootMessage = WM_APP + 0x51A;
     inline static OldersInternalActions* active_ = nullptr;
 
     std::uintptr_t base_{};
@@ -1100,7 +1111,7 @@ private:
         return ok;
     }
 
-    bool findInventoryItemById(std::uint32_t wantedId, FoundItem& out) const {
+    bool findInventoryItemById(std::uint32_t wantedId, FoundItem& out, std::uint16_t expectedCount=0) const {
         out = {};
         if (!wantedId || wantedId > 0xFFFFu || !profile_.inventory.base || !profile_.inventory.slotStride)
             return false;
@@ -1113,6 +1124,7 @@ private:
             const auto itemPtr = readPtr(slotAddr);
             if (!itemPtr || !isReadableRange(itemPtr, profile_.container.itemSubtype + sizeof(std::uint16_t))) continue;
             if (readU16(itemPtr + profile_.container.itemId) != static_cast<std::uint16_t>(wantedId)) continue;
+            if (!coinStackMatches(readU16(itemPtr + profile_.container.itemSubtype),expectedCount)) continue;
             out.ptr = itemPtr;
             out.index = static_cast<std::uint32_t>(i);
             out.subtype = readU16(itemPtr + profile_.container.itemSubtype);
@@ -1122,12 +1134,12 @@ private:
         return false;
     }
 
-    bool findUsableItemById(std::uint32_t wantedId, FoundItem& out) const {
-        if (findInventoryItemById(wantedId, out)) return true;
-        return findOpenContainerItemById(wantedId, out);
+    bool findUsableItemById(std::uint32_t wantedId, FoundItem& out, std::uint16_t expectedCount=0) const {
+        if (findInventoryItemById(wantedId, out, expectedCount)) return true;
+        return findOpenContainerItemById(wantedId, out, expectedCount);
     }
 
-    bool findOpenContainerItemById(std::uint32_t wantedId, FoundItem& out) const {
+    bool findOpenContainerItemById(std::uint32_t wantedId, FoundItem& out, std::uint16_t expectedCount=0) const {
         out = {};
         if (!wantedId || wantedId > 0xFFFFu) return false;
 
@@ -1197,6 +1209,7 @@ private:
 
                 const auto id = readU16(itemPtr + c.itemId);
                 if (id != static_cast<std::uint16_t>(wantedId)) continue;
+                if (!coinStackMatches(readU16(itemPtr + c.itemSubtype),expectedCount)) continue;
 
                 out.ptr = itemPtr;
                 out.containerId = containerId;
@@ -1322,38 +1335,49 @@ private:
                   << "[CALL] game/window thread\n";
 
         const auto fn = reinterpret_cast<GameAttackFn>(base_ + *profile_.actions.attack);
+        // The native caller acquires one intrusive reference for the argument.
+        // Attack consumes it even when it returns early. Passing a borrowed
+        // pointer here used to release the map's existing reference instead.
+        auto* counter=reinterpret_cast<volatile LONG*>(target+olders_attack::counterOffset);
+        if(!olders_attack::acquireConsumedReference(counter)){
+            std::cout<<"[ATTACK] ABORT: reference counter invalid.\n"<<std::flush;
+            return false;
+        }
+        std::cout<<"[ATTACK OWNERSHIP] acquired argument reference; native callee consumes it.\n"<<std::flush;
         fn(reinterpret_cast<void*>(game), &handle, false);
+        // Do not decrement here: Game::attack already released its argument.
         const auto attackTargetAfter = readPtr(game + 0x08);
         std::cout << "[RETURN] Game::attack returned normally.\n"
                   << std::hex << std::uppercase
                   << "AttackTarget before  : 0x" << attackTargetBefore << "\n"
                   << "AttackTarget after   : 0x" << attackTargetAfter
                   << (attackTargetAfter == target ? "  <MATCH>\n" : "  <NO MATCH>\n")
-                  << std::dec;
+                  << std::dec << std::flush;
         return true;
     }
 
     bool requestItemAction(PendingItemAction action,
                            std::uint32_t requestedItemId,
                            const FoundItem& found,
-                           const Position* target = nullptr) {
-        if (InterlockedCompareExchange(&itemActionPending_, 1, 0) != 0) {
-            std::cout << "\n[ITEM ACTION] Ja existe uma requisicao pendente.\n";
-            return false;
-        }
+                           const Position* target = nullptr,
+                           std::vector<std::uint16_t> groundIds = {},
+                           int groundRange = 0) {
+        return tryPublishItemRequest(itemActionPending_, [&] {
+            pendingGroundIds_ = std::move(groundIds);
+            pendingGroundRange_ = std::clamp(groundRange, 0, 15);
+            pendingItemAction_ = action;
+            pendingRequestedItemId_ = requestedItemId;
+            pendingFoundItem_ = found;
+            if (target) setPendingTarget(*target);
 
-        pendingItemAction_ = action;
-        pendingRequestedItemId_ = requestedItemId;
-        pendingFoundItem_ = found;
-        if (target) setPendingTarget(*target);
-
-        if (!PostMessage(gameWindow_, kItemActionMessage, 0, 0)) {
-            pendingItemAction_ = PendingItemAction::None;
-            InterlockedExchange(&itemActionPending_, 0);
-            std::cout << "\n[ITEM ACTION] PostMessage falhou. error=" << GetLastError() << "\n";
-            return false;
-        }
-        return true;
+            if (!PostMessage(gameWindow_, kItemActionMessage, 0, 0)) {
+                pendingItemAction_ = PendingItemAction::None;
+                pendingGroundIds_.clear();
+                std::cout << "\n[ITEM ACTION] PostMessage falhou. error=" << GetLastError() << "\n";
+                return false;
+            }
+            return true;
+        });
     }
 
     bool executePendingWalk() {
@@ -1403,6 +1427,22 @@ private:
 
         if (pendingItemAction_ == PendingItemAction::InspectTile)
             return dumpTileGameThread(pendingTargetPosition_);
+
+        if (pendingItemAction_ == PendingItemAction::ChangeGold) {
+            if (!profile_.actions.use || manualInteractionActive()) return false;
+            for (const auto id : pendingGroundIds_) {
+                FoundItem coin{};
+                if (!findUsableItemById(id,coin,100)) continue;
+                ThingHandle handle{}; handle.thing=coin.ptr;
+                handle.representation=reinterpret_cast<std::uintptr_t>(&handle.thing);
+                std::cout << "[CHANGE GOLD] use id=" << id << " count=100\n" << std::flush;
+                const auto fn=reinterpret_cast<GameUseFn>(base_+*profile_.actions.use);
+                fn(reinterpret_cast<void*>(game),&handle);
+                std::cout << "[CHANGE GOLD] Game::use returned; waiting for server update.\n" << std::flush;
+                return true;
+            }
+            return false;
+        }
 
         if (pendingItemAction_ == PendingItemAction::UseGroundObject) {
             if (!profile_.actions.use) return false;
@@ -1510,6 +1550,13 @@ private:
 
         if (pendingItemAction_ == PendingItemAction::UseWithNearestGround) {
             if (!profile_.actions.useWith || !mapRuntimeReady()) return false;
+            FoundItem refreshed{};
+            if (!findUsableItemById(pendingRequestedItemId_, refreshed)) {
+                std::cout << "[FISH] ABORT: rod no longer available.\n" << std::flush;
+                return false;
+            }
+            pendingFoundItem_ = refreshed;
+            source.thing = refreshed.ptr;
             NativePosition targetPos{};
             std::uintptr_t tile{}, groundThing{};
             std::uint16_t targetId{};
@@ -1637,9 +1684,12 @@ private:
         return true;
     }
 
+#include "OldersLootActions.inl"
+
     static LRESULT CALLBACK hookedWndProc(HWND hwnd, UINT message,
                                           WPARAM wParam, LPARAM lParam) {
         auto* self = active_;
+        if(self && message==kLootMessage){self->lootResult_=self->executeLootStep();return 0;}
         if (self && isManualMouseMessage(message)) {
             self->noteManualInteraction(message);
         }

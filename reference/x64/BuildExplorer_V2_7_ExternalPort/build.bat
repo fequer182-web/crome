@@ -13,11 +13,11 @@ if not exist "%CXX%" (
 if not exist Build mkdir Build
 
 echo ============================================================
-echo   OTCLab BuildExplorer V2.7 EXTERNAL PORT - x64
+echo   OTCLab External Builder V2.8 GUIADO - x64
 echo ============================================================
 echo [1/1] Compilando EXE externo x64...
 
-"%CXX%" -std=c++20 -O2 -Wall -Wextra -static-libgcc -static-libstdc++ ^
+"%CXX%" -std=c++17 -O2 -Wall -Wextra -static -s ^
   "Source\OTCLab_BuildExplorer_V2_7_EXTERNAL_PORT.cpp" ^
   -o "Build\OTCLab_BuildExplorer_V2_7_EXTERNAL_PORT.exe"
 

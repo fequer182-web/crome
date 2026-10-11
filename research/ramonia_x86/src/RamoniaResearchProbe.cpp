@@ -19,9 +19,13 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include "ProbeConsole.hpp"
+#include "RamoniaPipeBaseline.hpp"
+#include "GuidedDiscovery.hpp"
+#include "../../../Crome/Developer/native_runtime/profiles/MiniJson.hpp"
 
 // ============================================================================
-// OTCLab Ramonia x86 Research Probe V33.1
+// OTCLab Ramonia x86 Research Probe V39
 // DISCOVERY READ-ONLY + ONE-SHOT RUNTIME ABI CAPTURE
 // No internal game action is called by the probe. V33 temporarily replaces one
 // selected action entry byte with INT3, captures the natural game call made by
@@ -155,6 +159,7 @@ struct ModuleView {
     uint32_t entryRva = 0;
     std::string path;
     std::vector<SectionInfo> sections;
+    std::map<std::string,std::vector<uintptr_t>> semanticStringIndex;
     IMAGE_DATA_DIRECTORY importDirectory{};
 
     const SectionInfo* text() const {
@@ -500,6 +505,8 @@ void PrintCapacityPairCodeUseV9(const ModuleView& m, int aOff, int bOff) {
 }
 
 std::vector<uintptr_t> FindStringAddresses(const ModuleView& m, const std::string& exact) {
+    const auto indexed=m.semanticStringIndex.find(exact);
+    if(indexed!=m.semanticStringIndex.end()) return indexed->second;
     std::vector<uintptr_t> out;
     std::vector<uint8_t> needle(exact.begin(), exact.end());
     needle.push_back(0);
@@ -509,6 +516,38 @@ std::vector<uintptr_t> FindStringAddresses(const ModuleView& m, const std::strin
         out.insert(out.end(), h.begin(), h.end());
     }
     return out;
+}
+
+void BuildSemanticStringIndex(ModuleView& module,const std::vector<std::string>& tokens) {
+    module.semanticStringIndex.clear();
+    for(const auto& token:tokens) module.semanticStringIndex[token]={};
+    guided_discovery::TokenIndex index(tokens);
+    std::array<uint8_t,4096> bytes{};
+    std::cout << "[BUSCA COMPARTILHADA] " << tokens.size()
+              << " nomes em uma passagem; nenhuma secao de recursos excluida.\n" << std::flush;
+    for(const auto& section:module.sections) {
+        if(!section.readable() || section.executable() || section.end<=section.start) continue;
+        index.gap();
+        std::cout << "[BUSCANDO STRINGS] " << section.name << " bytes=" << section.end-section.start << "\n" << std::flush;
+        uintptr_t progress=section.start;
+        size_t skipped=0;
+        for(uintptr_t address=section.start;address<section.end;) {
+            const size_t take=std::min<size_t>(section.end-address,4096u-(address&4095u));
+            SIZE_T got=0;
+            if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<LPCVOID>(address),bytes.data(),take,&got) && got==take)
+                index.feed(bytes.data(),take,address,[&](size_t id,uintptr_t at) {
+                    module.semanticStringIndex[tokens[id]].push_back(at);
+                });
+            else { index.gap(); skipped+=take; }
+            address+=take;
+            if(address-progress>=16u*1024u*1024u) {
+                std::cout << "[PROGRESSO STRINGS] " << section.name << " "
+                          << address-section.start << "/" << section.end-section.start << " bytes\n" << std::flush;
+                progress=address;
+            }
+        }
+        std::cout << "[SECAO CONCLUIDA] " << section.name << " bytes_nao_lidos=" << skipped << "\n" << std::flush;
+    }
 }
 
 struct RttiResult {
@@ -576,31 +615,24 @@ RttiResult ResolveRttiClass(const ModuleView& m, const std::string& cls) {
 }
 
 std::vector<std::string> FindAsciiStringsContaining(const ModuleView& m, const std::string& needle) {
-    std::vector<std::string> out;
-    const std::string want = Lower(needle);
+    guided_discovery::AsciiHints hints(needle);
+    std::array<uint8_t,4096> bytes{};
     for (const auto& sec : m.sections) {
         if (!sec.readable() || sec.executable() || sec.end <= sec.start) continue;
         uintptr_t cur = sec.start;
-        std::string acc;
         while (cur < sec.end) {
-            char c = 0;
-            if (!SafeRead(cur, c)) { ++cur; acc.clear(); continue; }
-            const unsigned char uc = static_cast<unsigned char>(c);
-            const bool printable = (uc >= 0x20 && uc <= 0x7E);
-            if (printable) {
-                if (acc.size() < 256) acc.push_back(c);
-            } else {
-                if (acc.size() >= 4 && Lower(acc).find(want) != std::string::npos) out.push_back(acc);
-                acc.clear();
-            }
-            ++cur;
+            // Align chunks to page boundaries so an unreadable page does not
+            // discard readable bytes from the adjacent page.
+            const size_t take=std::min<size_t>(sec.end-cur,4096u-(cur&4095u));
+            SIZE_T got=0;
+            if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<LPCVOID>(cur),bytes.data(),take,&got)
+               && got==take) hints.feed(bytes.data(),take);
+            else hints.gap();
+            cur+=take;
         }
-        if (acc.size() >= 4 && Lower(acc).find(want) != std::string::npos) out.push_back(acc);
+        hints.finish();
     }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-    if (out.size() > 64) out.resize(64);
-    return out;
+    return hints.result();
 }
 
 struct BindCandidate {
@@ -620,6 +652,21 @@ struct BindResult {
     BindCandidate selected{};
     bool selectedOk = false;
 };
+
+void PrintAllBindCandidates(const BindResult& bind) {
+    std::cout << "[CANDIDATOS] " << bind.name << " total=" << bind.candidates.size() << "\n";
+    for(size_t i=0;i<bind.candidates.size();++i) {
+        const auto& candidate=bind.candidates[i];
+        std::cout << "  #" << i+1 << " method=" << HexU32(candidate.methodRva)
+                  << " owner=" << HexU32(candidate.ownerRva) << " [" << candidate.ownerSection
+                  << "] score=" << candidate.score << " token=" << HexU32(candidate.tokenRva)
+                  << " xref=" << HexU32(candidate.xrefRva) << "\n";
+    }
+    if(bind.candidates.empty()) std::cout << "  [PENDENTE] nenhum candidato; ajuda de busca sera oferecida no guia.\n";
+    else if(guided_discovery::candidates(bind).size()>1)
+        std::cout << "  [DUVIDA] varios enderecos: testar por acao natural; score nao confirma ABI.\n";
+    std::cout << std::flush;
+}
 
 std::vector<BindCandidate> ResolveBindCandidates(const ModuleView& m, const std::string& token) {
     std::vector<BindCandidate> out;
@@ -951,7 +998,7 @@ struct RuntimePositionValidation {
 };
 
 char AskYesNo(const std::string& text) {
-    std::cout << text << " [S/N]: " << std::flush;
+    probe_console::ui() << text << " [S/N]: " << std::flush;
     std::string s;
     std::getline(std::cin, s);
     if (s.empty()) return 'n';
@@ -959,7 +1006,7 @@ char AskYesNo(const std::string& text) {
 }
 
 void WaitEnter(const std::string& text) {
-    std::cout << text << std::flush;
+    probe_console::ui() << text << std::flush;
     std::string dummy;
     std::getline(std::cin, dummy);
 }
@@ -1770,13 +1817,37 @@ SelectedField ResolveChangedValueTransition(uintptr_t base,
 
 double AskDouble(const std::string& label) {
     for (;;) {
-        std::cout << label << ": " << std::flush;
+        probe_console::ui() << label << ": " << std::flush;
         std::string s;
         std::getline(std::cin, s);
         try { return std::stod(s); }
-        catch (...) { std::cout << "Valor invalido.\n"; }
+        catch (...) { probe_console::ui() << "Valor invalido.\n"; }
     }
 }
+
+struct ActionAbiArgV34 {
+    int index = 0;
+    std::string semantic;
+    std::string abiType;
+    std::string status;
+    std::string rtti;
+    bool hasObservedBool = false;
+    bool observedBool = false;
+    bool hasRefCountOffset = false;
+    uint32_t refCountOffset = 0;
+    std::string ownership;
+};
+
+struct ActionAbiV34 {
+    std::string name;
+    uint32_t methodRva = 0;
+    uint32_t ownerRva = 0;
+    std::string callingConvention = "x86_thiscall_like";
+    std::string thisSemantic = "Game";
+    std::string thisLocation = "ecx";
+    std::string status = "pending";
+    std::vector<ActionAbiArgV34> args;
+};
 
 struct Report {
     ModuleView module;
@@ -1811,6 +1882,9 @@ struct Report {
     bool profileLoaded = false;
     bool profileImportedLegacy = false;
     std::vector<std::string> profileSources;
+    std::map<std::string,ActionAbiV34> actionAbi;
+    std::map<std::string,std::string> actionAbiRaw;
+    std::map<std::string,std::string> guidedEvidence;
 };
 
 std::string ProbeDirectory() {
@@ -1840,6 +1914,8 @@ struct ProfileCache {
     std::map<std::string,SelectedField> fields;
     CreatureLayout creatureLayout;
     WorldLightLayout worldLight;
+    std::map<std::string,std::string> actionAbiRaw;
+    std::map<std::string,std::string> guidedEvidence;
     std::vector<std::string> sources;
 };
 
@@ -1879,6 +1955,21 @@ std::string PersistentProfileDirectory() {
 
 std::string PersistentProfilePath(const Report& r) {
     return PersistentProfileDirectory() + "\\" + FingerprintStem(r) + ".json";
+}
+
+std::string CanonicalProjectProfilePath(const Report& r) {
+    const std::string probeDir = ProbeDirectory();
+    const std::string low = Lower(probeDir);
+    const std::string marker = "\\build\\ramonia_x86_test";
+    const size_t p = low.rfind(marker);
+    if (p == std::string::npos) return {};
+
+    const std::string projectRoot = probeDir.substr(0, p);
+    const std::string profiles = projectRoot + "\\profiles";
+    const std::string ramonia = profiles + "\\ramonia_x86";
+    EnsureDir(profiles);
+    EnsureDir(ramonia);
+    return ramonia + "\\" + FingerprintStem(r) + ".json";
 }
 
 std::string FindJsonObject(const std::string& json, const std::string& key) {
@@ -2006,6 +2097,23 @@ ProfileCache ParseProfileFile(const std::string& path, const Report& r) {
     const std::string owners = FindJsonObject(json, "owners");
     p.gameOwnerRva = HexU32Value(JsonStringValue(owners, "gameRva"));
     p.mapOwnerRva = HexU32Value(JsonStringValue(owners, "mapRva"));
+
+    const std::string actions = FindJsonObject(json, "actions");
+    const std::string guided = FindJsonObject(json, "guidedValidation");
+    if(!guided.empty()) {
+        try {
+            const auto parsed=crome::json::Parser(guided).parse();
+            if(parsed.isObject()) for(const auto& entry:parsed.object()) {
+                if(!entry.second.isObject()) continue;
+                const auto object=FindJsonObject(guided,entry.first);
+                if(!object.empty()) p.guidedEvidence[entry.first]=object;
+            }
+        } catch(...) { /* Malformed optional evidence is never imported. */ }
+    }
+    for (const char* tok : ramonia_baseline::abiMethods) {
+        const std::string obj = FindJsonObject(actions, tok);
+        if (!obj.empty()) p.actionAbiRaw[tok] = obj;
+    }
 
     const std::string gl = FindJsonObject(json, "gameLayout");
     p.localPlayer = HexOffsetValue(JsonStringValue(gl, "localPlayerOffset"));
@@ -2238,6 +2346,11 @@ void MergeProfile(ProfileCache& dst, const ProfileCache& src) {
             dst.fields[kv.first] = kv.second;
         }
     }
+    for (const auto& kv : src.actionAbiRaw) {
+        if (!dst.actionAbiRaw.count(kv.first)) dst.actionAbiRaw[kv.first] = kv.second;
+    }
+    for(const auto& kv:src.guidedEvidence)
+        if(!dst.guidedEvidence.count(kv.first)) dst.guidedEvidence[kv.first]=kv.second;
 }
 
 ProfileCache LoadProfileForBuild(const Report& r) {
@@ -2354,6 +2467,8 @@ void ApplyLoadedProfile(Report& r, const ProfileCache& p) {
     for (const auto& kv : p.fields) {
         if (kv.second.offset >= 0 && EvidenceScore(kv.second.status) > 0) r.selectedFields[kv.first] = kv.second;
     }
+    r.actionAbiRaw = p.actionAbiRaw;
+    r.guidedEvidence = p.guidedEvidence;
 }
 
 bool QuickCheckPosition(uintptr_t lp, const RuntimePositionValidation& p,
@@ -2409,7 +2524,7 @@ void PrintLoadedFieldQuickChecks(Report& r) {
 void SaveCheckpoint(Report& r, const std::string& checkpoint);
 
 std::string AskText(const std::string& label) {
-    std::cout << label << ": " << std::flush;
+    probe_console::ui() << label << ": " << std::flush;
     std::string s;
     std::getline(std::cin, s);
     return s;
@@ -4340,7 +4455,7 @@ void RunCreatureLayoutDiscovery(Report& r) {
                         SafeRead(game + r.gameLayout.attackTarget, afterKill);
                         bool sawClear = afterKill==0;
                         if(!sawClear) {
-                            std::cout << "[HP% AUTO] AttackTarget ainda nao zerou. Espere/cancele o target e ENTER... ";
+                            probe_console::ui() << "AttackTarget ainda nao zerou. Espere/cancele o target e ENTER... " << std::flush;
                             std::string dummy; std::getline(std::cin,dummy);
                             afterKill=0; SafeRead(game + r.gameLayout.attackTarget,afterKill);
                             sawClear = afterKill==0;
@@ -4402,16 +4517,68 @@ void RunCreatureLayoutDiscovery(Report& r) {
     SaveCheckpoint(r,"creature_layout");
 }
 
+
+bool TopMoveContractMatches(const std::string& raw,uint32_t methodRva) {
+    const auto self=FindJsonObject(raw,"this");
+    const auto ret=FindJsonObject(raw,"return");
+    const auto hidden=FindJsonObject(ret,"hiddenStorage");
+    const auto refs=FindJsonObject(ret,"refCount");
+    return methodRva && HexU32Value(JsonStringValue(raw,"methodRva"))==methodRva &&
+        JsonStringValue(raw,"status")=="runtime_confirmed" &&
+        JsonStringValue(raw,"callingConvention")=="x86_thiscall_sret" &&
+        JsonStringValue(self,"semantic")=="Tile" &&
+        JsonStringValue(self,"location")=="ecx" &&
+        HexU32Value(JsonStringValue(raw,"stackCleanupBytes"))==4 &&
+        JsonStringValue(ret,"abiType")=="shared_object_ptr<Thing>" &&
+        JsonStringValue(ret,"status")=="runtime_confirmed" &&
+        JsonStringValue(hidden,"entryLocation")=="[esp+4]" &&
+        JsonStringValue(hidden,"frameLocation")=="[ebp+8]" &&
+        HexU32Value(JsonStringValue(refs,"offset"))==4 &&
+        JsonStringValue(refs,"status")=="increment_and_release_runtime_confirmed" &&
+        JsonStringValue(ret,"tileMembership")=="runtime_confirmed";
+}
+
+std::string CurrentPipeBaselineJson(const Report& r) {
+    std::ostringstream o;
+    o << "{\"id\":\"" << ramonia_baseline::id
+      << "\",\"policy\":\"current_build_discovery_then_runtime_abi\","
+      << "\"binds\":{";
+    bool first=true;
+    for(const char* token:ramonia_baseline::requiredBinds) {
+        if(!first) o << ",";
+        first=false;
+        const auto it=r.binds.find(token);
+        o << "\"" << token << "\":\""
+          << (it!=r.binds.end() && it->second.selectedOk ? "discovered" : "pending") << "\"";
+    }
+    o << "},\"requiredAbi\":[";
+    first=true;
+    for(const char* token:ramonia_baseline::abiMethods) {
+        if(std::string(token)=="talk") continue; // talkChannel is the live UI route.
+        if(!first) o << ",";
+        first=false;
+        o << "\"" << token << "\"";
+    }
+    o << "],\"requiredFields\":[\"tileThings\",\"tileThingsElem\","
+      << "\"tileVtableRva\",\"itemId\",\"itemCount\",\"inventoryArray\",\"inventoryStride\","
+      << "\"containerItems\",\"openContainersMap\"],"
+      << "\"tileAccessPolicy\":\"runtime_getTopMoveThing_same_tile_membership\","
+      << "\"uncoverPolicy\":\"one_blocker_then_reread\","
+      << "\"toolUsePolicy\":\"require_exposed_target_then_useWith\","
+      << "\"abiPromotion\":\"static_or_entry_only_evidence_is_not_confirmation\"}";
+    return o.str();
+}
+
 std::string SaveJson(const Report& r) {
     const std::string path = PersistentProfilePath(r);
     std::ofstream o(path, std::ios::binary);
     if (!o) return {};
 
     o << "{\n";
-    o << "  \"schema\": \"otclab-ramonia-x86-research-v27\",\n";
-    o << "  \"mode\": \"read_only_no_hooks_no_internal_calls\",\n";
+    o << "  \"schema\": \"otclab-ramonia-x86-research-v40\",\n";
+    o << "  \"mode\": \"discovery_and_natural_call_capture_no_internal_calls\",\n";
     o << "  \"policy\": \"discovery_rules_only_no_cross_build_rva_oracle\",\n";
-    o << "  \"persistence\": {\"profileVersion\": 27, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
+    o << "  \"persistence\": {\"profileVersion\": 40, \"checkpoint\": \"" << JsonEscape(r.checkpoint)
       << "\", \"resumeEnabled\": true},\n";
     o << "  \"build\": {\n";
     o << "    \"exe\": \"" << JsonEscape(r.module.path) << "\",\n";
@@ -4451,12 +4618,79 @@ std::string SaveJson(const Report& r) {
         } else {
             o << "\"methodRva\": \"0x0\", \"ownerRva\": \"0x0\", \"status\": \"not_found\"";
         }
-        o << "}" << (++bi<r.binds.size()?",":"") << "\n";
+        o << ",\"candidates\":[";
+        for(size_t i=0;i<kv.second.candidates.size();++i) {
+            const auto& c=kv.second.candidates[i];
+            if(i) o << ",";
+            o << "{\"methodRva\":\"" << HexU32(c.methodRva)
+              << "\",\"ownerRva\":\"" << HexU32(c.ownerRva)
+              << "\",\"ownerSection\":\"" << JsonEscape(c.ownerSection)
+              << "\",\"tokenRva\":\"" << HexU32(c.tokenRva)
+              << "\",\"xrefRva\":\"" << HexU32(c.xrefRva)
+              << "\",\"score\":" << c.score << "}";
+        }
+        o << "]}" << (++bi<r.binds.size()?",":"") << "\n";
     }
     o << "  },\n";
 
     o << "  \"owners\": {\"gameRva\": \"" << HexU32(r.gameOwnerRva)
       << "\", \"mapRva\": \"" << HexU32(r.mapOwnerRva) << "\"},\n";
+
+    o << "  \"pipeBaseline\": " << CurrentPipeBaselineJson(r) << ",\n";
+    o << "  \"guidedValidation\": {";
+    size_t gi=0;
+    for(const auto& kv:r.guidedEvidence) {
+        if(gi++) o << ",";
+        o << "\"" << JsonEscape(kv.first) << "\":" << kv.second;
+    }
+    o << "},\n";
+
+    o << "  \"actions\": {\n";
+    const std::vector<std::string> actionOrder(
+        ramonia_baseline::abiMethods.begin(),ramonia_baseline::abiMethods.end());
+    std::vector<std::string> actionPresent;
+    for (const auto& name : actionOrder) {
+        if (r.actionAbi.count(name) || r.actionAbiRaw.count(name)) actionPresent.push_back(name);
+    }
+    for (size_t ai=0; ai<actionPresent.size(); ++ai) {
+        const std::string& name = actionPresent[ai];
+        auto it = r.actionAbi.find(name);
+        if (it == r.actionAbi.end()) {
+            o << "    \"" << JsonEscape(name) << "\": " << r.actionAbiRaw.at(name)
+              << (ai+1<actionPresent.size()?",":"") << "\n";
+            continue;
+        }
+        const ActionAbiV34& a = it->second;
+        o << "    \"" << JsonEscape(name) << "\": {\n"
+          << "      \"methodRva\": \"" << HexU32(a.methodRva) << "\",\n"
+          << "      \"ownerRva\": \"" << HexU32(a.ownerRva) << "\",\n"
+          << "      \"callingConvention\": \"" << JsonEscape(a.callingConvention) << "\",\n";
+        if (name=="autoWalk")
+            o << "      \"stackCleanupBytes\": 16,\n";
+        o << "      \"this\": {\"semantic\": \"" << JsonEscape(a.thisSemantic)
+          << "\", \"location\": \"" << JsonEscape(a.thisLocation) << "\"},\n"
+          << "      \"status\": \"" << JsonEscape(a.status) << "\",\n"
+          << "      \"args\": [";
+        for (size_t i=0;i<a.args.size();++i) {
+            const ActionAbiArgV34& arg=a.args[i];
+            if (i) o << ", ";
+            o << "{\"index\":" << arg.index
+              << ",\"semantic\":\"" << JsonEscape(arg.semantic)
+              << "\",\"abiType\":\"" << JsonEscape(arg.abiType)
+              << "\",\"status\":\"" << JsonEscape(arg.status) << "\"";
+            if (!arg.rtti.empty()) o << ",\"rtti\":\"" << JsonEscape(arg.rtti) << "\"";
+            if (arg.hasObservedBool)
+                o << ",\"observedRequiredValue\":" << (arg.observedBool?"true":"false");
+            if (arg.hasRefCountOffset)
+                o << ",\"refCountOffset\":\"" << HexU32(arg.refCountOffset) << "\"";
+            if (!arg.ownership.empty())
+                o << ",\"ownership\":\"" << JsonEscape(arg.ownership) << "\"";
+            o << "}";
+        }
+        o << "]\n"
+          << "    }" << (ai+1<actionPresent.size()?",":"") << "\n";
+    }
+    o << "  },\n";
     o << "  \"gameLayout\": {\n";
     auto joff=[&](int v){ return v>=0 ? HexU32(static_cast<uint32_t>(v)) : std::string("0x0"); };
     o << "    \"localPlayerOffset\": \"" << joff(r.gameLayout.localPlayer) << "\",\n";
@@ -4554,6 +4788,16 @@ std::string SaveJson(const Report& r) {
     o << "    }\n";
     o << "  }\n";
     o << "}\n";
+    o.flush();
+    o.close();
+
+    const std::string canonical = CanonicalProjectProfilePath(r);
+    if (!canonical.empty() && Lower(canonical) != Lower(path)) {
+        if (CopyFileA(path.c_str(), canonical.c_str(), FALSE))
+            std::cout << "[PROFILE MIRROR] canonical -> " << canonical << "\n";
+        else
+            std::cout << "[PROFILE MIRROR] falhou Win32=" << GetLastError() << " -> " << canonical << "\n";
+    }
     return path;
 }
 
@@ -4567,7 +4811,8 @@ void SaveCheckpoint(Report& r, const std::string& checkpoint) {
 void PrintHeader() {
     std::cout
         << "============================================================\n"
-        << "        OTCLab Ramonia x86 Research Probe V33.1\n"
+        << "        OTCLab x86 Research Probe V40 - Clear Results R4\n"
+        << "[BUILD REVISION] x86-results-r4-simple-console-diagnostic-log\n"
         << "      RTTI-FIRST / SEMANTIC-BIND / RUNTIME-ABI\n"
         << "============================================================\n"
         << "[MODE] descoberta estrutural permanece READ-ONLY\n"
@@ -4575,6 +4820,8 @@ void PrintHeader() {
         << "[MODE] byte original restaurado no primeiro hit ou cancelamento\n"
         << "[MODE] nenhuma chamada interna do jogo feita pelo probe\n"
         << "[RULE] Nenhum RVA de outra build e usado como oracle\n"
+        << "[RULE] Nome do cliente nao restringe a descoberta; exige PE32/i386\n"
+        << "[RULE] Cada build usa sua fingerprint e valida seus proprios binds/ABI\n"
         << "[RULE] IDs externos/server sao separados do Client Thing ID em memoria\n"
         << "============================================================\n\n";
 }
@@ -4585,7 +4832,7 @@ void OpenConsole() {
     freopen_s(&f, "CONOUT$", "w", stdout);
     freopen_s(&f, "CONOUT$", "w", stderr);
     freopen_s(&f, "CONIN$", "r", stdin);
-    SetConsoleTitleA("OTCLab Ramonia x86 Research Probe V33.1 - RUNTIME ABI CAPTURE");
+    SetConsoleTitleA("OTCLab x86 Research Probe V40 - Clear Results R4");
 }
 
 
@@ -4606,13 +4853,13 @@ struct V19InventoryCandidate {
 
 int AskIntRangeV19(const std::string& label, int lo, int hi) {
     for (;;) {
-        std::cout << label << " [" << lo << "-" << hi << "]: " << std::flush;
+        probe_console::ui() << label << " [" << lo << "-" << hi << "]: " << std::flush;
         std::string x; std::getline(std::cin,x);
         try {
             int v=std::stoi(x);
             if(v>=lo && v<=hi) return v;
         } catch(...) {}
-        std::cout << "Valor invalido.\n";
+        probe_console::ui() << "Valor invalido.\n";
     }
 }
 
@@ -8388,9 +8635,119 @@ void RunGameActionAbiProbeV32(Report& r) {
               << "============================================================\n"
               << "[MODE] READ-ONLY / NO ACTION CALLS / NO HOOKS / NO MEMORY WRITES\n"
               << "[RULE] RVAs are current-build semantic binds; ABI is reported, not assumed.\n";
-    for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"})
+    for(const char* tok:ramonia_baseline::abiMethods)
         V32DumpActionAbi(r,tok);
     std::cout << "\n[V32 NOTE] Envie este bloco inteiro. O proximo passo so chama uma acao depois de fecharmos assinatura/calling convention por evidencia.\n";
+}
+
+
+// ============================================================================
+// V40 - AUTOWALK DEEP ABI DIAGNOSTIC
+// READ-ONLY. The old V32 pass inspected only 192 bytes, while this build's
+// autoWalk has branches beyond +0x300. V40 scans a bounded deeper window and
+// reports stack-frame references and plausible RET epilogues without promoting
+// any ABI from byte adjacency alone.
+// ============================================================================
+void RunAutoWalkDeepAbiProbeV40(const Report& r) {
+    auto it=r.binds.find("autoWalk");
+    if(it==r.binds.end() || !it->second.selectedOk) {
+        std::cout << "\n[V40 AUTOWALK DEEP] <bind unavailable>\n";
+        return;
+    }
+
+    const uint32_t methodRva=it->second.selected.methodRva;
+    uint32_t nextRva=r.module.sizeOfImage;
+    for(const auto& kv:r.binds) {
+        if(!kv.second.selectedOk) continue;
+        const uint32_t candidate=kv.second.selected.methodRva;
+        if(candidate>methodRva && candidate<nextRva) nextRva=candidate;
+    }
+
+    const size_t maxAvailable =
+        nextRva>methodRva ? static_cast<size_t>(nextRva-methodRva) : 0x1000u;
+    const size_t scanSize=std::min<size_t>(0x1000u,std::max<size_t>(0x400u,maxAvailable));
+    std::vector<uint8_t> b(scanSize);
+    if(!SafeCopy(r.module.base+methodRva,b.data(),b.size())) {
+        std::cout << "\n[V40 AUTOWALK DEEP] read failed\n";
+        return;
+    }
+
+    std::map<int,int> ebpCounts;
+    std::map<int,int> espCounts;
+    struct RetCandidate { size_t off{}; int cleanup{}; };
+    std::vector<RetCandidate> rets;
+
+    for(size_t i=0;i<b.size();++i) {
+        const uint8_t op=b[i];
+
+        if(op==0xC2 && i+2<b.size()) {
+            uint16_t imm=0;
+            std::memcpy(&imm,b.data()+i+1,2);
+            bool epilogue=false;
+            const size_t begin=i>16?i-16:0;
+            for(size_t j=begin;j<i;++j)
+                if(b[j]==0x5D || b[j]==0xC9) { epilogue=true; break; }
+            if(epilogue && imm<=0x40) rets.push_back({i,static_cast<int>(imm)});
+        } else if(op==0xC3) {
+            bool epilogue=false;
+            const size_t begin=i>16?i-16:0;
+            for(size_t j=begin;j<i;++j)
+                if(b[j]==0x5D || b[j]==0xC9) { epilogue=true; break; }
+            if(epilogue) rets.push_back({i,0});
+        }
+
+        size_t modrmPos=0;
+        if(op==0x8B || op==0x8D || op==0x89 || op==0x8A || op==0x88 ||
+           op==0x39 || op==0x3B || op==0x83 || op==0x81 || op==0xFF) {
+            modrmPos=i+1;
+        } else if(op==0x0F && i+2<b.size() &&
+                  (b[i+1]==0xB6 || b[i+1]==0xB7 || b[i+1]==0xBE || b[i+1]==0xBF)) {
+            modrmPos=i+2;
+        }
+        if(!modrmPos || modrmPos>=b.size()) continue;
+
+        std::set<int> ebp,esp;
+        V32CollectBaseDisp(b.data(),b.size(),modrmPos,ebp,esp);
+        for(int d:ebp) if(d>=0x8 && d<=0x40) ++ebpCounts[d];
+        for(int d:esp) if(d>=0 && d<=0x40) ++espCounts[d];
+    }
+
+    std::cout << "\n============================================================\n"
+              << "          AUTOWALK DEEP ABI STATIC PROBE V40\n"
+              << "============================================================\n"
+              << "[MODE] READ-ONLY / scan=" << scanSize << " bytes\n"
+              << "methodRva=" << HexU32(methodRva)
+              << " nextSemanticRva=" << (nextRva<r.module.sizeOfImage?HexU32(nextRva):std::string("<none>"))
+              << "\n";
+
+    std::cout << "[V40 EBP REFS]";
+    if(ebpCounts.empty()) std::cout << " <none>";
+    for(const auto& kv:ebpCounts)
+        std::cout << " +" << HexU32(static_cast<uint32_t>(kv.first))
+                  << "(x" << kv.second << ")";
+    std::cout << "\n[V40 ESP REFS]";
+    if(espCounts.empty()) std::cout << " <none>";
+    for(const auto& kv:espCounts)
+        std::cout << " +" << HexU32(static_cast<uint32_t>(kv.first))
+                  << "(x" << kv.second << ")";
+
+    std::cout << "\n[V40 RET CANDIDATES]";
+    if(rets.empty()) std::cout << " <none>";
+    for(const auto& rc:rets)
+        std::cout << " +" << HexU32(static_cast<uint32_t>(rc.off))
+                  << (rc.cleanup?(" RET "+std::to_string(rc.cleanup)):std::string(" RET"));
+    std::cout << "\n";
+
+    for(const auto& rc:rets) {
+        const size_t begin=rc.off>20?rc.off-20:0;
+        const size_t end=std::min(b.size(),rc.off+4);
+        std::cout << "  [RET CONTEXT +" << HexU32(static_cast<uint32_t>(rc.off)) << "]";
+        for(size_t i=begin;i<end;++i)
+            std::cout << " " << std::uppercase << std::hex << std::setw(2)
+                      << std::setfill('0') << static_cast<unsigned>(b[i])
+                      << std::dec << std::setfill(' ');
+        std::cout << "\n";
+    }
 }
 
 
@@ -8598,6 +8955,427 @@ bool V33LooksVector3(const V33MemSnap& s,uint32_t& begin,uint32_t& end,uint32_t&
     return true;
 }
 
+
+int V33ExpectedArgs(const std::string& token);
+
+bool V34CreatureFamily(const std::string& cls) {
+    return cls=="LocalPlayer" || cls=="Player" || cls=="Monster" || cls=="Npc";
+}
+
+bool V34LooksPosition(const V33MemSnap& s,uint32_t& x,uint32_t& y,uint32_t& z) {
+    if(s.valid<12) return false;
+    x=V33SnapDword(s,0); y=V33SnapDword(s,4); z=V33SnapDword(s,8);
+    return x>0 && x<=65535 && y>0 && y<=65535 && z<=15;
+}
+
+
+bool V35IsCallerStackRef(const V33Capture& c,uint32_t address) {
+    if(!address || !c.esp || address<c.esp) return false;
+    return static_cast<uint64_t>(address)-c.esp <= 0x1000ULL;
+}
+
+bool V35LooksPackedPosition(const V33MemSnap& s,uint16_t& x,uint16_t& y,uint8_t& z,bool& special) {
+    if(s.valid<5) return false;
+    std::memcpy(&x,s.bytes+0,2);
+    std::memcpy(&y,s.bytes+2,2);
+    z=s.bytes[4];
+    special = (x==0xFFFFu);
+    if(special) return true; // inventory/container encoded Position used by OTC clients
+    return x>0 && y>0 && z<=15;
+}
+
+
+struct V36PositionMatch {
+    bool ok=false;
+    bool confirmed=false;
+    std::string abiType;
+    std::string source;
+    size_t offset=0;
+    uint32_t x=0,y=0,z=0;
+};
+
+bool V36ReadLocalPosition(const Report& r,uint32_t& x,uint32_t& y,uint32_t& z) {
+    x=y=z=0;
+    if(!r.localPlayerPtr || r.positionRuntime.x<0 || r.positionRuntime.y<0 || r.positionRuntime.z<0) return false;
+    uint8_t zz=0;
+    if(!SafeRead(r.localPlayerPtr+r.positionRuntime.x,x) ||
+       !SafeRead(r.localPlayerPtr+r.positionRuntime.y,y) ||
+       !SafeRead(r.localPlayerPtr+r.positionRuntime.z,zz)) return false;
+    z=zz;
+    return x>0 && x<=65535 && y>0 && y<=65535 && z<=15;
+}
+
+bool V36NearLocal(const Report& r,uint32_t x,uint32_t y,uint32_t z) {
+    uint32_t lx=0,ly=0,lz=0;
+    if(!V36ReadLocalPosition(r,lx,ly,lz)) return false;
+    const uint32_t dx=(x>lx)?(x-lx):(lx-x);
+    const uint32_t dy=(y>ly)?(y-ly):(ly-y);
+    const uint32_t dz=(z>lz)?(z-lz):(lz-z);
+    return dx<=32 && dy<=32 && dz<=1;
+}
+
+bool V36ScanPackedPosition(const Report& r,const V33MemSnap& snap,const std::string& source,
+                           const std::string& abiType,V36PositionMatch& out) {
+    if(snap.valid<5) return false;
+    const size_t maxOff=std::min<size_t>(snap.valid-5,24);
+    for(size_t off=0;off<=maxOff;++off) {
+        uint16_t x16=0,y16=0; uint8_t z8=0;
+        std::memcpy(&x16,snap.bytes+off,2);
+        std::memcpy(&y16,snap.bytes+off+2,2);
+        z8=snap.bytes[off+4];
+        if(!x16 || !y16 || z8>15) continue;
+        if(!V36NearLocal(r,x16,y16,z8)) continue;
+        out.ok=true; out.confirmed=true; out.source=source; out.abiType=abiType;
+        out.offset=off; out.x=x16; out.y=y16; out.z=z8;
+        return true;
+    }
+    return false;
+}
+
+bool V36ScanU32Position(const Report& r,const V33MemSnap& snap,const std::string& source,
+                        const std::string& abiType,V36PositionMatch& out) {
+    if(snap.valid<12) return false;
+    const size_t maxOff=std::min<size_t>(snap.valid-12,24);
+    for(size_t off=0;off<=maxOff;off+=4) {
+        uint32_t x=0,y=0,z=0;
+        std::memcpy(&x,snap.bytes+off,4);
+        std::memcpy(&y,snap.bytes+off+4,4);
+        std::memcpy(&z,snap.bytes+off+8,4);
+        if(!x || !y || x>65535 || y>65535 || z>15) continue;
+        if(!V36NearLocal(r,x,y,z)) continue;
+        out.ok=true; out.confirmed=true; out.source=source; out.abiType=abiType;
+        out.offset=off; out.x=x; out.y=y; out.z=z;
+        return true;
+    }
+    return false;
+}
+
+
+bool V37ScanU32U32U8Position(const Report& r,const V33MemSnap& snap,const std::string& source,
+                              const std::string& abiType,V36PositionMatch& out) {
+    if(snap.valid<9) return false;
+    const size_t maxOff=std::min<size_t>(snap.valid-9,24);
+    for(size_t off=0;off<=maxOff;++off) {
+        uint32_t x=0,y=0; uint8_t z=0;
+        std::memcpy(&x,snap.bytes+off,4);
+        std::memcpy(&y,snap.bytes+off+4,4);
+        z=snap.bytes[off+8];
+        if(!x || !y || x>65535 || y>65535 || z>15) continue;
+        if(!V36NearLocal(r,x,y,z)) continue;
+        out.ok=true; out.confirmed=true; out.source=source; out.abiType=abiType;
+        out.offset=off; out.x=x; out.y=y; out.z=z;
+        return true;
+    }
+    return false;
+}
+
+V36PositionMatch V36FindMovePosition(const Report& r,const V33Capture& c,int idx) {
+    V36PositionMatch out;
+    if(idx<0 || idx>=6) return out;
+    const uint32_t raw=c.stack[idx+1];
+    if(!V35IsCallerStackRef(c,raw)) return out;
+
+    // V36 runtime evidence on this exact Ramonia build showed:
+    //   32 03 00 00 43 07 00 00 07 ...
+    // => x=818 (u32), y=1859 (u32), z=7 (u8), one SQM from LocalPlayer.
+    // Keep the detector generic by validating the decoded xyz against live LP position.
+    if(V37ScanU32U32U8Position(r,c.argSnap[idx],"direct","position_u32_u32_u8_ref",out)) return out;
+    if(V36ScanPackedPosition(r,c.argSnap[idx],"direct","position_u16_u16_u8_ref",out)) return out;
+    if(V36ScanU32Position(r,c.argSnap[idx],"direct","position_u32x3_ref",out)) return out;
+
+    if(V37ScanU32U32U8Position(r,c.argNested0[idx],"p0","position_ptr_u32_u32_u8_ref",out)) return out;
+    if(V36ScanPackedPosition(r,c.argNested0[idx],"p0","position_ptr_u16_u16_u8_ref",out)) return out;
+    if(V36ScanU32Position(r,c.argNested0[idx],"p0","position_ptr_u32x3_ref",out)) return out;
+
+    if(V37ScanU32U32U8Position(r,c.argNested1[idx],"p1","position_second_ptr_u32_u32_u8_ref",out)) return out;
+    if(V36ScanPackedPosition(r,c.argNested1[idx],"p1","position_second_ptr_u16_u16_u8_ref",out)) return out;
+    if(V36ScanU32Position(r,c.argNested1[idx],"p1","position_second_ptr_u32x3_ref",out)) return out;
+    return out;
+}
+
+std::string V36HexBytes(const V33MemSnap& s,size_t maxBytes=32) {
+    std::ostringstream os;
+    const size_t n=std::min<size_t>(s.valid,maxBytes);
+    for(size_t i=0;i<n;++i) {
+        if(i) os << ' ';
+        os << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+           << static_cast<unsigned>(s.bytes[i]);
+    }
+    return os.str();
+}
+
+void V36PrintMoveArg2Evidence(const Report& r,const V33Capture& c) {
+    const int idx=1;
+    const V36PositionMatch m=V36FindMovePosition(r,c,idx);
+    uint32_t lx=0,ly=0,lz=0;
+    const bool lp=V36ReadLocalPosition(r,lx,ly,lz);
+    std::cout << "    [V37 MOVE ARG2] raw=" << HexU32(c.stack[idx+1]);
+    if(lp) std::cout << " localPos={" << lx << "," << ly << "," << lz << "}";
+    std::cout << "\n"
+              << "      direct@" << HexU32(c.argSnap[idx].address)
+              << " bytes=" << V36HexBytes(c.argSnap[idx]) << "\n"
+              << "      p0@" << HexU32(c.argNested0[idx].address)
+              << " bytes=" << V36HexBytes(c.argNested0[idx]) << "\n"
+              << "      p1@" << HexU32(c.argNested1[idx].address)
+              << " bytes=" << V36HexBytes(c.argNested1[idx]) << "\n";
+    if(m.ok) {
+        std::cout << "      POSITION MATCH source=" << m.source
+                  << " offset=+" << HexU32(static_cast<uint32_t>(m.offset))
+                  << " xyz={" << m.x << "," << m.y << "," << m.z << "}"
+                  << " abiType=" << m.abiType
+                  << " status=" << (m.confirmed?"runtime_confirmed":"runtime_observed") << "\n";
+    } else {
+        std::cout << "      POSITION MATCH: not found\n";
+    }
+}
+
+bool V35LooksDirectionVector(const V33MemSnap& vec,const V33MemSnap& data,
+                             uint32_t& count,uint32_t& sampled) {
+    uint32_t begin=0,end=0,cap=0;
+    count=sampled=0;
+    if(!V33LooksVector3(vec,begin,end,cap) || !begin || end<=begin) return false;
+    const uint32_t bytes=end-begin;
+    if(bytes%4u!=0) return false;
+    count=bytes/4u;
+    if(count==0 || count>512) return false;
+    sampled=std::min<uint32_t>(count,data.valid/4u);
+    if(sampled==0) return false;
+    for(uint32_t i=0;i<sampled;++i) {
+        uint32_t d=0;
+        std::memcpy(&d,data.bytes+i*4u,4);
+        if(d>7u) return false;
+    }
+    return true;
+}
+
+bool V35HolderObject(const Report& r,const V33Capture& c,int idx,std::string& cls) {
+    cls.clear();
+    if(idx<0 || idx>=6) return false;
+    const uint32_t raw=c.stack[idx+1];
+    if(!V35IsCallerStackRef(c,raw)) return false;
+    cls=V33ClassFromSnap(r,c.argNested0[idx]);
+    return !cls.empty();
+}
+
+bool V35ActionAlreadyConfirmed(const Report& r,const std::string& token) {
+    auto a=r.actionAbi.find(token);
+    if(a!=r.actionAbi.end() && a->second.status=="runtime_confirmed") return true;
+    auto raw=r.actionAbiRaw.find(token);
+    if(raw==r.actionAbiRaw.end()) return false;
+    return JsonStringValue(raw->second,"status")=="runtime_confirmed";
+}
+
+bool V34LooksMsvcString(const V33MemSnap& s,const V33MemSnap& nested0) {
+    if(s.valid<24) return false;
+    const uint32_t sz=V33SnapDword(s,0x10), cp=V33SnapDword(s,0x14);
+    if(sz>0x400 || cp<sz || cp>0x100000) return false;
+    if(cp<16) return true;
+    return nested0.valid>0;
+}
+
+ActionAbiArgV34 V34ClassifyArg(const Report& r,const std::string& token,int idx,const V33Capture& c) {
+    ActionAbiArgV34 out;
+    out.index=idx;
+    out.semantic="Unknown";
+    out.abiType="unknown";
+    out.status="runtime_observed";
+
+    if(idx<0 || idx>=6) return out;
+    const V33MemSnap& snap=c.argSnap[idx];
+    const V33MemSnap& n0s=c.argNested0[idx];
+    const uint32_t raw=c.stack[idx+1];
+    const std::string direct=V33ClassFromSnap(r,snap);
+
+    if(token=="talkChannel") {
+        if(idx==0) { out.semantic="MessageMode"; out.abiType="u32"; out.status="runtime_confirmed"; return out; }
+        if(idx==1) { out.semantic="Channel"; out.abiType="u32"; out.status="runtime_confirmed"; return out; }
+        if(idx==2 && V34LooksMsvcString(snap,n0s)) {
+            out.semantic="Message"; out.abiType="msvc_string_ref"; out.status="runtime_confirmed"; return out;
+        }
+    }
+
+    if((token=="attack" || token=="follow") && idx==0 && V34CreatureFamily(direct)) {
+        // Game::attack/follow receive CreaturePtr by value on this OTC family.
+        // shared_object_ptr is pointer-sized, so the stack slot contains the
+        // Creature* bits directly even though ownership semantics are NOT raw.
+        // The caller must add_ref before the call; the callee releases its
+        // by-value parameter when it returns.
+        out.semantic="Creature";
+        out.abiType="shared_object_ptr_value";
+        out.status="runtime_confirmed";
+        out.rtti=direct;
+        // This OTC family uses stdext::shared_object as LuaObject base:
+        // x86 primary vptr at +0x0, intrusive refcount at +0x4.
+        out.hasRefCountOffset=true;
+        out.refCountOffset=0x4;
+        out.ownership="caller_add_ref_callee_release";
+        return out;
+    }
+
+    if(token=="attack" && idx==1 && raw<=1u) {
+        out.semantic="Cancel";
+        out.abiType="bool";
+        out.status="runtime_confirmed";
+        out.hasObservedBool=true;
+        out.observedBool=(raw!=0);
+        return out;
+    }
+
+    if(token=="autoWalk" && idx==0) {
+        uint32_t count=0,sampled=0;
+        if(V35LooksDirectionVector(snap,n0s,count,sampled)) {
+            out.semantic="Directions";
+            out.abiType="vector_direction_u32_ref";
+            out.status="runtime_confirmed";
+            return out;
+        }
+        uint32_t vb=0,ve=0,vc=0;
+        if(V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
+            out.semantic="Directions"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
+        }
+    }
+
+    if(token=="move" && idx==2) {
+        out.semantic="Count"; out.abiType="u32";
+        out.status=(raw>0 && raw<=0xFFFFu)?"runtime_confirmed":"runtime_observed";
+        return out;
+    }
+
+    if(token=="move" && idx==1) {
+        const V36PositionMatch pm=V36FindMovePosition(r,c,idx);
+        if(pm.ok) {
+            out.semantic="Position";
+            out.abiType=pm.abiType;
+            out.status=pm.confirmed?"runtime_confirmed":"runtime_observed";
+            return out;
+        }
+    }
+
+    std::string holderCls;
+    if(V35HolderObject(r,c,idx,holderCls)) {
+        if(token=="useWith" && idx==1)
+            out.semantic="Thing";
+        else
+            out.semantic=V34CreatureFamily(holderCls)?"Creature":holderCls;
+        out.abiType="shared_object_ptr_ref";
+        out.status="runtime_confirmed";
+        out.rtti=holderCls;
+        return out;
+    }
+
+    uint32_t x=0,y=0,z=0;
+    if(V34LooksPosition(snap,x,y,z)) {
+        out.semantic="Position"; out.abiType="position_u32x3_ref"; out.status="runtime_observed"; return out;
+    }
+
+    if(!direct.empty()) {
+        out.semantic=V34CreatureFamily(direct)?"Creature":direct;
+        out.abiType="raw_ptr";
+        out.status="runtime_observed";
+        out.rtti=direct;
+        return out;
+    }
+
+    if(V34LooksMsvcString(snap,n0s)) {
+        out.semantic="String"; out.abiType="msvc_string_ref"; out.status="runtime_observed"; return out;
+    }
+
+    uint32_t vb=0,ve=0,vc=0;
+    if(V33LooksVector3(snap,vb,ve,vc) && (vb || ve || vc)) {
+        out.semantic="Vector"; out.abiType="vector_ref"; out.status="runtime_observed"; return out;
+    }
+
+    out.semantic="Scalar";
+    out.abiType="u32";
+    return out;
+}
+
+ActionAbiArgV34 V38ClassifyAutoWalkStartPositionValue(const Report& r,const V33Capture& c) {
+    ActionAbiArgV34 out;
+    out.index=1;
+    out.semantic="Position";
+    out.abiType="position_u32_u32_u8_value";
+    out.status="runtime_observed";
+
+    // Candidate OTCv8-family layout after the Directions reference:
+    //   [ESP+8]  = startPos.x (u32)
+    //   [ESP+12] = startPos.y (u32)
+    //   [ESP+16] = startPos.z in the low byte (+ struct padding)
+    const uint32_t x=c.stack[2];
+    const uint32_t y=c.stack[3];
+    const uint32_t z=c.stack[4] & 0xFFu;
+
+    uint32_t lx=0,ly=0,lz=0;
+    const bool localOk=V36ReadLocalPosition(r,lx,ly,lz);
+    const uint32_t dx=localOk ? ((x>lx)?(x-lx):(lx-x)) : 0xFFFFFFFFu;
+    const uint32_t dy=localOk ? ((y>ly)?(y-ly):(ly-y)) : 0xFFFFFFFFu;
+
+    const bool plausible=
+        x>0 && x<=65535 &&
+        y>0 && y<=65535 &&
+        z<=15 &&
+        localOk &&
+        z==lz &&
+        dx<=32 && dy<=32;
+
+    std::cout << "    [V38 AUTOWALK STARTPOS] stack={"
+              << x << "," << y << "," << z << "}";
+    if(localOk)
+        std::cout << " local={" << lx << "," << ly << "," << lz
+                  << "} delta={" << dx << "," << dy << "}";
+    else
+        std::cout << " local=<unavailable>";
+    std::cout << " status=" << (plausible?"runtime_confirmed":"runtime_observed") << "\n";
+
+    if(plausible) out.status="runtime_confirmed";
+    return out;
+}
+
+void V34PromoteCapture(Report& r,const std::string& token) {
+    auto bit=r.binds.find(token);
+    if(bit==r.binds.end() || !bit->second.selectedOk) return;
+
+    ActionAbiV34 a;
+    a.name=token;
+    a.methodRva=bit->second.selected.methodRva;
+    a.ownerRva=bit->second.selected.ownerRva;
+    const bool thisOk = r.gameOwnerRva &&
+        g_v33Capture.ecx==static_cast<uint32_t>(r.module.base+r.gameOwnerRva);
+
+    if(token=="autoWalk") {
+        // V40 deep scan + natural callsite proved the complete x86 ABI:
+        // ECX=Game, Directions& at +8, Position value across +C/+10/+14,
+        // and callee cleanup with RET 16.
+        a.callingConvention="x86_ecx_callee_pop_16";
+        a.args.push_back(V34ClassifyArg(r,token,0,g_v33Capture));
+        a.args.push_back(V38ClassifyAutoWalkStartPositionValue(r,g_v33Capture));
+    } else {
+        const int argc=V33ExpectedArgs(token);
+        for(int i=0;i<argc && i<6;++i)
+            a.args.push_back(V34ClassifyArg(r,token,i,g_v33Capture));
+    }
+
+    a.status = thisOk ? "runtime_observed" : "runtime_this_mismatch";
+    bool allArgsConfirmed=!a.args.empty();
+    for(const auto& arg:a.args) if(arg.status!="runtime_confirmed") allArgsConfirmed=false;
+    if(thisOk && allArgsConfirmed) a.status="runtime_confirmed";
+
+    r.actionAbi[token]=a;
+    r.actionAbiRaw.erase(token);
+
+    std::cout << "    [V40 ABI] " << token
+              << " status=" << a.status
+              << " cc=" << a.callingConvention << "\n";
+    for(const auto& arg:a.args) {
+        std::cout << "      arg" << (arg.index+1)
+                  << " semantic=" << arg.semantic
+                  << " abiType=" << arg.abiType
+                  << " status=" << arg.status;
+        if(!arg.rtti.empty()) std::cout << " rtti=" << arg.rtti;
+        std::cout << "\n";
+    }
+}
+
 std::string V33AsciiPreview(const uint8_t* p,size_t n) {
     std::string out;
     for(size_t i=0;i<n && i<40;++i) {
@@ -8639,18 +9417,31 @@ void V33DescribeArg(const Report& r,const std::string& token,int idx,const V33Me
         }
     }
 
+    uint16_t px=0,py=0; uint8_t pz=0; bool special=false;
+    if(V35LooksPackedPosition(s,px,py,pz,special)) {
+        std::cout << " packedPos?{x=" << px << ",y=" << py << ",z=" << static_cast<unsigned>(pz)
+                  << (special?",special":"") << "}";
+    }
+
     uint32_t vb=0,ve=0,vc=0;
     if(V33LooksVector3(s,vb,ve,vc) && (vb || ve || vc)) {
         std::cout << " vectorLike?{" << HexU32(vb) << "," << HexU32(ve) << "," << HexU32(vc)
                   << ",bytes=" << (ve>=vb?ve-vb:0) << "}";
+        uint32_t cnt=0,sampled=0;
+        if(V35LooksDirectionVector(s,nested0,cnt,sampled))
+            std::cout << " directionVector{count=" << cnt << ",sampled=" << sampled << "}";
     }
     std::cout << "\n";
 }
 
 int V33ExpectedArgs(const std::string& token) {
+    // V40 prints arg1 via the generic classifier; the 12-byte Position value
+    // is reconstructed from stack[2..4] by the dedicated classifier.
+    if(token=="autoWalk") return 1;
     if(token=="move") return 3;
     if(token=="useWith") return 2;
     if(token=="talkChannel") return 3;
+    if(token=="attack") return 2;
     return 1;
 }
 
@@ -8665,6 +9456,63 @@ const char* V33Instruction(const std::string& token) {
     if(token=="talk") return "Fale uma mensagem curta e unica, por exemplo: v33test.";
     if(token=="talkChannel") return "Fale uma mensagem curta; Game::talk chama talkChannel internamente nesta build.";
     return "Execute a acao normalmente pelo cliente.";
+}
+
+void V40PrintAutoWalkCallerEvidence(const Report& r,const V33Capture& c) {
+    if(!c.stack[0] || !r.module.inModule(c.stack[0])) {
+        std::cout << "    [V40 CALLSITE] return address outside module\n";
+        return;
+    }
+
+    const uintptr_t ret=static_cast<uintptr_t>(c.stack[0]);
+    const uint32_t retRva=r.module.rva(ret);
+    uint8_t before[64]{};
+    uint8_t after[24]{};
+    const uintptr_t beforeAt=ret>=sizeof(before)?ret-sizeof(before):ret;
+    const bool beforeOk=SafeCopy(beforeAt,before,sizeof(before));
+    const bool afterOk=SafeCopy(ret,after,sizeof(after));
+
+    std::cout << "    [V40 CALLSITE] returnRva=" << HexU32(retRva);
+    if(ret>=r.module.base+5) {
+        uint8_t call[5]{};
+        if(SafeCopy(ret-5,call,sizeof(call)) && call[0]==0xE8) {
+            int32_t rel=0; std::memcpy(&rel,call+1,4);
+            const uintptr_t dst=ret+static_cast<int64_t>(rel);
+            if(r.module.inModule(dst))
+                std::cout << " directCallTargetRva=" << HexU32(r.module.rva(dst));
+        }
+    }
+    std::cout << "\n";
+
+    if(beforeOk) {
+        std::cout << "    [V40 PRECALL 64B]";
+        for(size_t i=0;i<sizeof(before);++i) {
+            if(i && i%16==0) std::cout << "\n                       ";
+            std::cout << " " << std::uppercase << std::hex << std::setw(2)
+                      << std::setfill('0') << static_cast<unsigned>(before[i])
+                      << std::dec << std::setfill(' ');
+        }
+        std::cout << "\n";
+    }
+
+    if(afterOk) {
+        std::cout << "    [V40 POSTCALL 24B]";
+        for(size_t i=0;i<sizeof(after);++i)
+            std::cout << " " << std::uppercase << std::hex << std::setw(2)
+                      << std::setfill('0') << static_cast<unsigned>(after[i])
+                      << std::dec << std::setfill(' ');
+        std::cout << "\n";
+
+        if(after[0]==0x83 && after[1]==0xC4) {
+            std::cout << "    [V40 CALLER CLEANUP] add esp,"
+                      << static_cast<unsigned>(after[2]) << " bytes\n";
+        } else if(after[0]==0x81 && after[1]==0xC4) {
+            uint32_t imm=0; std::memcpy(&imm,after+2,4);
+            std::cout << "    [V40 CALLER CLEANUP] add esp," << imm << " bytes\n";
+        } else {
+            std::cout << "    [V40 CALLER CLEANUP] no immediate add esp after CALL\n";
+        }
+    }
 }
 
 void V33PrintCapture(const Report& r,const std::string& token) {
@@ -8689,8 +9537,13 @@ void V33PrintCapture(const Report& r,const std::string& token) {
         V33DescribeArg(r,token,i,c.argSnap[i],c.argNested0[i],c.argNested1[i]);
 
     std::cout << "    raw stack:";
-    for(int i=0;i<=std::min(argc+1,7);++i) std::cout << " [ESP+" << HexU32(i*4) << "]=" << HexU32(c.stack[i]);
+    const int rawLast=(token=="autoWalk")?5:std::min(argc+1,7);
+    for(int i=0;i<=rawLast;++i)
+        std::cout << " [ESP+" << HexU32(i*4) << "]=" << HexU32(c.stack[i]);
     std::cout << "\n";
+
+    if(token=="autoWalk")
+        V40PrintAutoWalkCallerEvidence(r,c);
 }
 
 void V33CaptureAction(Report& r,const std::string& token) {
@@ -8715,6 +9568,9 @@ void V33CaptureAction(Report& r,const std::string& token) {
         V33Disarm();
         if(InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0) {
             V33PrintCapture(r,token);
+            if(token=="move") V36PrintMoveArg2Evidence(r,g_v33Capture);
+            V34PromoteCapture(r,token);
+            SaveCheckpoint(r,std::string("action_abi_")+token);
             return;
         }
         std::cout << "[V33.1 MISS] o metodo nao foi atingido nesta tentativa.\n";
@@ -8730,32 +9586,200 @@ void RunGameActionRuntimeCaptureV33(Report& r) {
               << "[MODE] nenhuma chamada interna do jogo feita pelo probe.\n"
               << "[MODE] um INT3 temporario por vez; byte restaurado no hit; protecao restaurada fora do VEH.\n"
               << "[CAPTURE] ECX + pilha de entrada + snapshots via ReadProcessMemory; nenhuma VirtualProtect dentro do VEH.\n"
-              << "[RULE] ainda NAO promove assinatura ativa; primeiro classificamos raw pointer/ref/smart holder/string/vector.\n";
+              << "[RULE] V40 recaptura autoWalk e imprime caller/callee cleanup antes de qualquer nova mudanca de ABI.\n";
 
-    for(const char* tok:{"autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"})
+    for(const char* tok:ramonia_baseline::gameActions) {
+        const bool alreadyConfirmed=V35ActionAlreadyConfirmed(r,tok);
+        if(alreadyConfirmed && std::string(tok)!="autoWalk") {
+            std::cout << "[V40 SKIP] " << tok << " ja runtime-confirmed no profile.\n";
+            continue;
+        }
+        if(alreadyConfirmed && std::string(tok)=="autoWalk") {
+            std::cout << "[V40 RECAPTURE] autoWalk sera capturado apenas para fechar stack cleanup/callsite.\n";
+        }
+        // Game::talk is bypassed by the normal UI path in this build; talkChannel is the live route.
+        if(std::string(tok)=="talk" && r.actionAbiRaw.count("talkChannel")) {
+            std::cout << "[V40 SKIP] talk nao e atingido pela UI normal; usando talkChannel como contrato ativo.\n";
+            continue;
+        }
         V33CaptureAction(r,tok);
+    }
 
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
-    std::cout << "\n[V33.1 COMPLETE] envie o bloco GAME ACTION ABI RUNTIME CAPTURE V33.1 inteiro.\n";
+    std::cout << "\n[V40 COMPLETE] diagnostico autoWalk capturado; aguarde revisao antes de alterar ABI ativa.\n";
 }
+
+
+void RunTopMoveAbiBaseline(Report& r) {
+    const auto bind=r.binds.find("getTopMoveThing");
+    const uint32_t rva=bind!=r.binds.end() && bind->second.selectedOk
+        ? bind->second.selected.methodRva : 0;
+    const auto old=r.actionAbiRaw.find("getTopMoveThing");
+    if(old!=r.actionAbiRaw.end() && TopMoveContractMatches(old->second,rva)) {
+        std::cout << "[PIPE BASELINE] Tile::getTopMoveThing ABI/return/refcount "
+                     "confirmados no profile da mesma build e mesmo bind.\n";
+        return;
+    }
+    // Discovery never imports a known RVA or treats a RET/entry hit as proof
+    // of returned ownership. A changed bind invalidates prior confirmation.
+    r.actionAbi.erase("getTopMoveThing");
+    bool tileThisObserved=false,hiddenStorageObserved=false;
+    if(rva && r.localPlayerPtr &&
+       AskYesNo("Capturar entrada natural de Tile::getTopMoveThing para ABI?")=='s') {
+        if(V33InstallOneShot(r.module.base+rva,rva)) {
+            std::cout << "[TOPMOVE ABI] Arraste um item do chao normalmente. "
+                         "Depois volte ao console. Nenhuma chamada interna feita pelo probe.\n";
+            WaitEnter("ENTER apos a acao... ");
+            V33Disarm();
+            if(InterlockedCompareExchange(&g_v33Capture.hit,0,0)!=0) {
+                const auto& c=g_v33Capture;
+                tileThisObserved=V33ClassFromSnap(r,c.ecxSnap)=="Tile";
+                hiddenStorageObserved=V35IsCallerStackRef(c,c.stack[1]) &&
+                    c.argSnap[0].valid>=4;
+                std::cout << "[TOPMOVE ENTRY] ECX=" << HexU32(c.ecx)
+                          << " TileRTTI=" << tileThisObserved
+                          << " hiddenStorage[ESP+4]=" << HexU32(c.stack[1])
+                          << " callerStack=" << hiddenStorageObserved << "\n";
+            }
+        }
+        V33Disarm();
+        if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
+    }
+    std::ostringstream o;
+    o << "{\"methodRva\":\"" << HexU32(rva)
+      << "\",\"callingConvention\":\"pending\","
+      << "\"status\":\"" << (rva?"abi_validation_required":"discovery_required") << "\","
+      << "\"this\":{\"semantic\":\"Tile\",\"location\":\"ecx\",\"status\":\""
+      << (tileThisObserved?"runtime_observed":"pending") << "\"},"
+      << "\"args\":[],\"return\":{\"expectedAbiType\":\"shared_object_ptr<Thing>\","
+      << "\"status\":\"pending\",\"hiddenStorage\":{\"expectedEntryLocation\":\"[esp+4]\","
+      << "\"expectedFrameLocation\":\"[ebp+8]\",\"status\":\""
+      << (hiddenStorageObserved?"runtime_observed":"pending")
+      << "\"},\"refCount\":{\"status\":\"pending\"},"
+      << "\"tileMembership\":\"pending\"},"
+      << "\"validationRequired\":[\"callee_cleanup\",\"returned_ThingPtr\","
+      << "\"same_tile_membership\",\"refcount_increment_and_release\"],"
+      << "\"validationRoute\":\"runtime_return_capture_or_build_matched_bridge_topmoveat\"}";
+    r.actionAbiRaw["getTopMoveThing"]=o.str();
+    std::cout << "[PIPE BASELINE] getTopMoveThing pendente: confirmar retorno, "
+                 "RET, Tile::things e refcount. Entrada sozinha nao promove ABI.\n";
+}
+
+std::vector<std::string> GuidedSavedObservations(const std::string& json) {
+    std::vector<std::string> objects;
+    const auto key=json.find("\"observations\"");
+    if(key==std::string::npos) return objects;
+    const auto start=json.find('[',key);
+    if(start==std::string::npos) return objects;
+    size_t objectStart=0;
+    int depth=0;
+    bool quoted=false,escaped=false;
+    for(size_t i=start+1;i<json.size();++i) {
+        const char c=json[i];
+        if(quoted) {
+            if(escaped) escaped=false;
+            else if(c=='\\') escaped=true;
+            else if(c=='"') quoted=false;
+            continue;
+        }
+        if(c=='"') { quoted=true; continue; }
+        if(c=='{' && depth++==0) objectStart=i;
+        else if(c=='}') {
+            if(depth<=0) return {};
+            if(--depth==0) objects.push_back(json.substr(objectStart,i-objectStart+1));
+        } else if(c==']' && depth==0) return objects;
+    }
+    return {}; // Reject truncated snapshots instead of retaining partial JSON.
+}
+
+std::string GuidedCandidateSignature(const BindResult& bind) {
+    auto addresses=guided_discovery::candidates(bind);
+    std::sort(addresses.begin(),addresses.end());
+    std::ostringstream o;
+    for(uint32_t address:addresses) {
+        o << HexU32(address) << ":";
+        std::set<uint32_t> owners;
+        if(bind.selectedOk && bind.selected.methodRva==address) owners.insert(bind.selected.ownerRva);
+        for(const auto& candidate:bind.candidates)
+            if(candidate.methodRva==address) owners.insert(candidate.ownerRva);
+        for(uint32_t owner:owners) o << HexU32(owner) << "/";
+        o << ";";
+    }
+    return o.str();
+}
+
+std::string GuidedSnapshotJson(const V33MemSnap& snap) {
+    std::ostringstream o;
+    const size_t valid=std::min<size_t>(snap.valid,sizeof(snap.bytes));
+    o << "{\"address\":\"" << HexU32(snap.address) << "\",\"validBytes\":" << valid << ",\"bytesHex\":\"";
+    for(size_t i=0;i<valid;++i)
+        o << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(snap.bytes[i]);
+    o << "\"}";
+    return o.str();
+}
+
+std::string GuidedCaptureJson(const Report& r,const V33Capture& c) {
+    std::ostringstream o;
+    o << "{\"pid\":" << GetCurrentProcessId() << ",\"moduleBase\":\"" << HexU64(r.module.base)
+      << "\",\"threadId\":" << c.threadId << ",\"methodRva\":\"" << HexU32(c.methodRva)
+      << "\",\"registers\":{\"eax\":\"" << HexU32(c.eax) << "\",\"ecx\":\"" << HexU32(c.ecx)
+      << "\",\"edx\":\"" << HexU32(c.edx) << "\",\"esp\":\"" << HexU32(c.esp)
+      << "\",\"ebp\":\"" << HexU32(c.ebp) << "\"},\"stack\":[";
+    for(size_t i=0;i<8;++i) { if(i) o << ","; o << "\"" << HexU32(c.stack[i]) << "\""; }
+    o << "],\"thisSnapshot\":" << GuidedSnapshotJson(c.ecxSnap) << ",\"arguments\":[";
+    for(size_t i=0;i<6;++i) {
+        if(i) o << ",";
+        o << "{\"direct\":" << GuidedSnapshotJson(c.argSnap[i])
+          << ",\"nested0\":" << GuidedSnapshotJson(c.argNested0[i])
+          << ",\"nested1\":" << GuidedSnapshotJson(c.argNested1[i]) << "}";
+    }
+    o << "],\"thisClassObserved\":\"" << JsonEscape(V33ClassFromSnap(r,c.ecxSnap))
+      << "\",\"thisMatchesGame\":"
+      << ((r.gameOwnerRva && c.ecx==r.module.base+r.gameOwnerRva)?"true":"false")
+      << ",\"callerRva\":\"" << HexU32(r.module.inModule(c.stack[0])?r.module.rva(c.stack[0]):0)
+      << "\",\"savedPointersAreHistorical\":true}";
+    return o.str();
+}
+
+std::string GuidedMethodJson(const std::string& signature,const std::vector<std::string>& observations,
+                            const std::string& status) {
+    std::ostringstream o;
+    o << "{\"candidateSignature\":\"" << JsonEscape(signature) << "\",\"status\":\"" << status
+      << "\",\"callable\":false,\"contractComplete\":false,\"activeCallValidated\":false,"
+      << "\"pending\":[\"typed_argument_comparison\",\"return_and_stack_cleanup\","
+      << "\"ownership_if_applicable\",\"game_thread_dispatch\",\"active_call\"],\"observations\":[";
+    for(size_t i=0;i<observations.size();++i) { if(i) o << ","; o << observations[i]; }
+    o << "]}";
+    return o.str();
+}
+
+bool GuidedExecutableRva(const ModuleView& module,uint32_t rva) {
+    if(!rva || rva>=module.sizeOfImage) return false;
+    const uintptr_t address=module.base+rva;
+    for(const auto& section:module.sections)
+        if(section.executable() && address>=section.start && address<section.end) return true;
+    return false;
+}
+
+#include "GroupedObservation.hpp"
 
 DWORD WINAPI Worker(LPVOID) {
     OpenConsole();
+    SetConsoleOutputCP(CP_UTF8);
+    probe_console::Session presentation(g_self);
+    probe_console::ui()<<"Crome - Descoberta x86 R4\nBuscando estruturas do cliente...\n"
+        <<"Detalhes tecnicos: ResearchProbeDiagnostic.log ao lado da DLL.\n";
     PrintHeader();
 
     Report r;
     if (!BuildModuleView(r.module)) {
-        std::cout << "[STOP] Executavel nao e PE32/i386 valido.\n";
+        std::cout << "[STOP] Esta DLL e x86: exige executavel PE32/i386 valido.\n"
+                  << "Para clientes x64, use o BuildExplorer/ABIBuilder x64.\n";
         WaitEnter("ENTER para descarregar... ");
-        FreeLibraryAndExitThread(g_self, 0);
-    }
-
-    if (Lower(r.module.path).find("ramonia") == std::string::npos) {
-        std::cout << "[STOP] Esta DLL de pesquisa e exclusiva para Ramonia.\n"
-                  << "Executable: " << r.module.path << "\n";
-        WaitEnter("ENTER para descarregar... ");
-        FreeLibraryAndExitThread(g_self, 0);
+        presentation.close();
+        if(grouped_observation::veh){FreeConsole();return 0;} // Retain delayed INT3 handler until client shutdown.
+    FreeLibraryAndExitThread(g_self, 0);
     }
 
     r.fp = FingerprintTextFromDisk(r.module.path);
@@ -8820,7 +9844,7 @@ DWORD WINAPI Worker(LPVOID) {
               << "============================================================\n"
               << "Method: exact token\\0 -> immediate xref -> PUSH owner + PUSH method\n";
 
-    const std::vector<std::string> tokens = {
+    std::vector<std::string> tokens = {
         "autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel",
         "getTile","getCreatureById","getCreatureByName","getTopUseThing",
         "getPosition","getThings","getThing","getThingCount","getGround","getTopThing","getTopLookThing","getTopMoveThing","getTopCreature","isWalkable","isPathable",
@@ -8835,7 +9859,13 @@ DWORD WINAPI Worker(LPVOID) {
         "getContainer","getContainers","openContainer","closeContainer","getName","setName",
         "getFirstIndex","setFirstIndex","isUnlocked","setUnlocked","hasPages","setHasPages"
     };
+    for (const char* required : ramonia_baseline::requiredBinds)
+        if(std::find(tokens.begin(),tokens.end(),required)==tokens.end())
+            tokens.emplace_back(required);
+    BuildSemanticStringIndex(r.module,tokens);
+    size_t tokenProgress=0;
     for (const auto& token : tokens) {
+        std::cout << "[BUSCANDO METODO " << ++tokenProgress << "/" << tokens.size() << "] " << token << "\n" << std::flush;
         BindResult br;
         br.name = token;
         br.candidates = ResolveBindCandidates(r.module, token);
@@ -8877,6 +9907,7 @@ DWORD WINAPI Worker(LPVOID) {
             }),br.candidates.end());
         }
         r.binds[token] = br;
+        PrintAllBindCandidates(br);
     }
 
     if (r.binds["getTopUseThing"].candidates.empty()) {
@@ -8891,9 +9922,8 @@ DWORD WINAPI Worker(LPVOID) {
         }
     }
 
-    const std::vector<std::string> gameTokens = {
-        "autoWalk","attack","follow","look","move","use","useWith","talk","talkChannel"
-    };
+    const std::vector<std::string> gameTokens(
+        ramonia_baseline::gameActions.begin(),ramonia_baseline::gameActions.end());
     r.gameOwnerRva = ChooseOwnerCluster(r.binds, gameTokens, 4);
     r.mapOwnerRva = ChooseOwnerCluster(r.binds, {"getTile","getCreatureById"}, 2);
 
@@ -8918,16 +9948,19 @@ DWORD WINAPI Worker(LPVOID) {
               << "Game owner RVA : " << HexU32(r.gameOwnerRva) << "\n"
               << "Map owner RVA  : " << HexU32(r.mapOwnerRva) << "\n";
 
-    const auto lightStrings = FindAsciiStringsContaining(r.module, "light");
-    std::cout << "\n[LIGHT SEMANTIC HINTS] strings containing 'light'=" << lightStrings.size() << "\n";
-    for (size_t i=0; i<lightStrings.size() && i<24; ++i)
-        std::cout << "  " << lightStrings[i] << "\n";
-
     uint32_t attackRva = 0, followRva = 0;
     if (r.binds["attack"].selectedOk) attackRva = r.binds["attack"].selected.methodRva;
     if (r.binds["follow"].selectedOk) followRva = r.binds["follow"].selected.methodRva;
     r.gameLayout = InferGameLayout(r.module, attackRva, followRva);
     ApplyLoadedProfile(r, cached);
+    std::cout << "\n[CONTINUANDO] Buscando hints de luz em blocos de memoria...\n" << std::flush;
+    const auto lightStrings = FindAsciiStringsContaining(r.module, "light");
+    std::cout << "\n[LIGHT SEMANTIC HINTS] strings containing 'light'=" << lightStrings.size() << "\n";
+    for (size_t i=0; i<lightStrings.size() && i<24; ++i)
+        std::cout << "  " << lightStrings[i] << "\n";
+
+    // Validate the imported Tile ABI before any discovery checkpoint can save it.
+    RunTopMoveAbiBaseline(r);
     RunUiMapLightStaticDiscoveryV13(r);
     r.gameLayout.inferred = r.gameLayout.localPlayer >= 0 && r.gameLayout.attackTarget >= 0 &&
                             r.gameLayout.followTarget >= 0 &&
@@ -8974,79 +10007,8 @@ DWORD WINAPI Worker(LPVOID) {
               << "LP VTable RVA   : " << HexU32(r.localPlayerVtableRva) << "\n"
               << "RTTI match      : " << (r.localPlayerVtableMatch?"YES":"NO") << "\n";
 
+    bool activitySessionsStarted=false;
     if (r.localPlayerPtr && r.localPlayerVtableMatch) {
-        if (r.gameOwnerRva) {
-            const uintptr_t game = r.module.base + r.gameOwnerRva;
-            const bool attackKnown = r.gameLayout.attackTarget >= 0 && EvidenceScore(r.attackTargetSource) >= 90;
-            const bool followKnown = r.gameLayout.followTarget >= 0 && EvidenceScore(r.followTargetSource) >= 90;
-            if (attackKnown) std::cout << "[SKIP] AttackTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.attackTarget) << "\n";
-            if (followKnown) std::cout << "[SKIP] FollowTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.followTarget) << "\n";
-            r.gameRuntime = RunGameTargetValidation(game, r.gameLayout.localPlayer, r.module, r.rtti, !attackKnown, !followKnown);
-            if (r.gameRuntime.attackTarget >= 0) { r.gameLayout.attackTarget = r.gameRuntime.attackTarget; r.attackTargetSource = "runtime_transition"; }
-            if (r.gameRuntime.followTarget >= 0) { r.gameLayout.followTarget = r.gameRuntime.followTarget; r.followTargetSource = "runtime_transition"; }
-            r.gameLayout.inferred = r.gameLayout.localPlayer >= 0 && r.gameLayout.attackTarget >= 0 &&
-                                    r.gameLayout.followTarget >= 0 &&
-                                    r.gameLayout.localPlayer != r.gameLayout.attackTarget &&
-                                    r.gameLayout.attackTarget != r.gameLayout.followTarget;
-            SaveCheckpoint(r, "game_layout");
-            std::cout << "\n[GAME LAYOUT RUNTIME RESULT]\n"
-                      << "LocalPlayer : +" << poff(r.gameLayout.localPlayer) << "\n"
-                      << "AttackTarget: +" << poff(r.gameLayout.attackTarget)
-                      << (EvidenceScore(r.attackTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n"
-                      << "FollowTarget: +" << poff(r.gameLayout.followTarget)
-                      << (EvidenceScore(r.followTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n";
-        }
-
-        uint32_t qx=0,qy=0; uint8_t qz=0;
-        const bool loadedPositionOk = EvidenceScore(r.positionSource) >= 90 &&
-                                      QuickCheckPosition(r.localPlayerPtr,r.positionRuntime,&qx,&qy,&qz);
-        if (loadedPositionOk) {
-            std::cout << "\n[POSITION QUICK-CHECK] OK -> " << qx << "," << qy << "," << static_cast<int>(qz)
-                      << " offsets +" << HexU32(r.positionRuntime.x) << "/+" << HexU32(r.positionRuntime.y)
-                      << "/+" << HexU32(r.positionRuntime.z) << " dir +" << HexU32(r.positionRuntime.direction) << "\n"
-                      << "[SKIP] Position calibration ja confirmada para esta fingerprint.\n";
-        } else {
-            r.positionCandidates = FindPositionCandidates(r.localPlayerPtr);
-            std::cout << "\n[POSITION STRUCTURAL CANDIDATES]\n";
-            for (const auto& c : r.positionCandidates) {
-                std::cout << "  +" << HexU32(c.offset)
-                          << " -> " << c.x << "," << c.y << "," << static_cast<int>(c.z)
-                          << " score=" << c.score << "\n";
-            }
-            r.positionRuntime = RunPositionValidation(r.localPlayerPtr, r.positionCandidates);
-            if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0)
-                r.positionSource = r.positionRuntime.xyzPromotedByAdjacency ? "runtime_transition_plus_xyz_adjacency" : "runtime_transition";
-        }
-        std::cout << "\n[POSITION RESULT]\n"
-                  << "X         : +" << poff(r.positionRuntime.x) << "\n"
-                  << "Y         : +" << poff(r.positionRuntime.y) << "\n"
-                  << "Z         : +" << poff(r.positionRuntime.z) << "\n"
-                  << "Direction : +" << poff(r.positionRuntime.direction) << "\n";
-        if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0) SaveCheckpoint(r,"position");
-
-        if (r.mapOwnerRva) {
-            const uintptr_t mapObj = r.module.base + r.mapOwnerRva;
-            const bool loadedMapOk = r.mapCenterOffset>=0 && EvidenceScore(r.mapCenterStatus)>=80 &&
-                                     QuickCheckMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime,r.mapCenterOffset);
-            if (loadedMapOk) {
-                std::cout << "\n[MAP CENTER QUICK-CHECK] +" << HexU32(r.mapCenterOffset)
-                          << " == LocalPlayer Position [OK]\n"
-                          << "[SKIP] Map.Center calibration ja confirmada para esta fingerprint.\n";
-            } else {
-                r.mapCenters = FindMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime);
-                std::cout << "\n[MAP CENTER CANDIDATES]\n";
-                if (r.mapCenters.empty()) std::cout << "  <none>\n";
-                for (const auto& c : r.mapCenters) std::cout << "  +" << HexU32(c.offset) << " (X/Y/Z contiguous)\n";
-                if (!r.mapCenters.empty() && AskYesNo("Validar Map.Center por transicoes runtime agora?")=='s') {
-                    r.mapCenterOffset = ValidateMapCenterV3(mapObj, r.mapCenters, r.mapCenterStatus);
-                }
-            }
-            std::cout << "[MAP CENTER RESULT] "
-                      << (r.mapCenterOffset>=0 ? ("+"+HexU32(r.mapCenterOffset)) : std::string("<pending>"))
-                      << " [" << r.mapCenterStatus << "]\n";
-            if (r.mapCenterOffset>=0) SaveCheckpoint(r,"map_center");
-        }
-
         PrintLoadedFieldQuickChecks(r);
         const auto knownField=[&](const std::string& n){ auto it=r.selectedFields.find(n); return it!=r.selectedFields.end() && it->second.offset>=0; };
         const bool numericCoreComplete = knownField("health") && knownField("maxHealth") &&
@@ -9156,6 +10118,81 @@ DWORD WINAPI Worker(LPVOID) {
             SaveCheckpoint(r,"numeric_fields");
         }
 
+        if (r.gameOwnerRva) {
+            const uintptr_t game = r.module.base + r.gameOwnerRva;
+            const bool attackKnown = r.gameLayout.attackTarget >= 0 && EvidenceScore(r.attackTargetSource) >= 90;
+            const bool followKnown = r.gameLayout.followTarget >= 0 && EvidenceScore(r.followTargetSource) >= 90;
+            if (attackKnown) std::cout << "[SKIP] AttackTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.attackTarget) << "\n";
+            if (followKnown) std::cout << "[SKIP] FollowTarget ja runtime-confirmed no profile: +" << HexU32(r.gameLayout.followTarget) << "\n";
+            r.gameRuntime = RunGameTargetValidation(game, r.gameLayout.localPlayer, r.module, r.rtti, !attackKnown, !followKnown);
+            if (r.gameRuntime.attackTarget >= 0) { r.gameLayout.attackTarget = r.gameRuntime.attackTarget; r.attackTargetSource = "runtime_transition"; }
+            if (r.gameRuntime.followTarget >= 0) { r.gameLayout.followTarget = r.gameRuntime.followTarget; r.followTargetSource = "runtime_transition"; }
+            r.gameLayout.inferred = r.gameLayout.localPlayer >= 0 && r.gameLayout.attackTarget >= 0 &&
+                                    r.gameLayout.followTarget >= 0 &&
+                                    r.gameLayout.localPlayer != r.gameLayout.attackTarget &&
+                                    r.gameLayout.attackTarget != r.gameLayout.followTarget;
+            SaveCheckpoint(r, "game_layout");
+            std::cout << "\n[GAME LAYOUT RUNTIME RESULT]\n"
+                      << "LocalPlayer : +" << poff(r.gameLayout.localPlayer) << "\n"
+                      << "AttackTarget: +" << poff(r.gameLayout.attackTarget)
+                      << (EvidenceScore(r.attackTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n"
+                      << "FollowTarget: +" << poff(r.gameLayout.followTarget)
+                      << (EvidenceScore(r.followTargetSource)>=90?" [runtime/profile]":" [offline]") << "\n";
+        }
+
+        uint32_t qx=0,qy=0; uint8_t qz=0;
+        const bool loadedPositionOk = EvidenceScore(r.positionSource) >= 90 &&
+                                      QuickCheckPosition(r.localPlayerPtr,r.positionRuntime,&qx,&qy,&qz);
+        if (loadedPositionOk) {
+            std::cout << "\n[POSITION QUICK-CHECK] OK -> " << qx << "," << qy << "," << static_cast<int>(qz)
+                      << " offsets +" << HexU32(r.positionRuntime.x) << "/+" << HexU32(r.positionRuntime.y)
+                      << "/+" << HexU32(r.positionRuntime.z) << " dir +" << HexU32(r.positionRuntime.direction) << "\n"
+                      << "[SKIP] Position calibration ja confirmada para esta fingerprint.\n";
+        } else {
+            r.positionCandidates = FindPositionCandidates(r.localPlayerPtr);
+            std::cout << "\n[POSITION STRUCTURAL CANDIDATES]\n";
+            for (const auto& c : r.positionCandidates) {
+                std::cout << "  +" << HexU32(c.offset)
+                          << " -> " << c.x << "," << c.y << "," << static_cast<int>(c.z)
+                          << " score=" << c.score << "\n";
+            }
+            r.positionRuntime = RunPositionValidation(r.localPlayerPtr, r.positionCandidates);
+            if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0)
+                r.positionSource = r.positionRuntime.xyzPromotedByAdjacency ? "runtime_transition_plus_xyz_adjacency" : "runtime_transition";
+        }
+        std::cout << "\n[POSITION RESULT]\n"
+                  << "X         : +" << poff(r.positionRuntime.x) << "\n"
+                  << "Y         : +" << poff(r.positionRuntime.y) << "\n"
+                  << "Z         : +" << poff(r.positionRuntime.z) << "\n"
+                  << "Direction : +" << poff(r.positionRuntime.direction) << "\n";
+        if (r.positionRuntime.x>=0 && r.positionRuntime.y>=0 && r.positionRuntime.z>=0) SaveCheckpoint(r,"position");
+
+        if (r.mapOwnerRva) {
+            const uintptr_t mapObj = r.module.base + r.mapOwnerRva;
+            const bool loadedMapOk = r.mapCenterOffset>=0 && EvidenceScore(r.mapCenterStatus)>=80 &&
+                                     QuickCheckMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime,r.mapCenterOffset);
+            if (loadedMapOk) {
+                std::cout << "\n[MAP CENTER QUICK-CHECK] +" << HexU32(r.mapCenterOffset)
+                          << " == LocalPlayer Position [OK]\n"
+                          << "[SKIP] Map.Center calibration ja confirmada para esta fingerprint.\n";
+            } else {
+                r.mapCenters = FindMapCenter(mapObj,r.localPlayerPtr,r.positionRuntime);
+                std::cout << "\n[MAP CENTER CANDIDATES]\n";
+                if (r.mapCenters.empty()) std::cout << "  <none>\n";
+                for (const auto& c : r.mapCenters) std::cout << "  +" << HexU32(c.offset) << " (X/Y/Z contiguous)\n";
+                if (!r.mapCenters.empty() && AskYesNo("Validar Map.Center por transicoes runtime agora?")=='s') {
+                    r.mapCenterOffset = ValidateMapCenterV3(mapObj, r.mapCenters, r.mapCenterStatus);
+                }
+            }
+            std::cout << "[MAP CENTER RESULT] "
+                      << (r.mapCenterOffset>=0 ? ("+"+HexU32(r.mapCenterOffset)) : std::string("<pending>"))
+                      << " [" << r.mapCenterStatus << "]\n";
+            if (r.mapCenterOffset>=0) SaveCheckpoint(r,"map_center");
+        }
+
+        RunGuidedDiscoveryValidation(r);
+        activitySessionsStarted=true;
+        if(AskYesNo("Executar tambem a descoberta detalhada de layouts/ABI (testes adicionais)?") == 's') {
         RunCreatureLayoutDiscovery(r);
         RunCreatureIdDiscoveryV18(r);
         RunCreatureSemanticFieldsV18(r);
@@ -9163,14 +10200,18 @@ DWORD WINAPI Worker(LPVOID) {
         RunInventoryItemDiscoveryV24(r);
         RunTileGroundDiscoveryV30(r);
         RunGameActionAbiProbeV32(r);
-        RunGameActionRuntimeCaptureV33(r);
+        RunAutoWalkDeepAbiProbeV40(r);
+        // Group entry observations never imply a complete ABI.
         RunOpenContainerDiscoveryV24Multi(r);
         RunWorldAmbientLightDiscovery(r);
+        }
     } else {
         std::cout << "\n[NOTE] LocalPlayer nao foi promovido. O probe preserva os resultados offline\n"
                   << "       e nao executa scan cego de heap como fallback.\n";
     }
 
+    if(!activitySessionsStarted)RunGuidedDiscoveryValidation(r);
+    RunTopMoveAbiBaseline(r);
     V33Disarm();
     if(g_v33Veh) { RemoveVectoredExceptionHandler(g_v33Veh); g_v33Veh=nullptr; }
     r.checkpoint = "complete";
@@ -9228,7 +10269,14 @@ DWORD WINAPI Worker(LPVOID) {
               << "PROFILE JSON     : " << (saved.empty()?"<save failed>":saved) << "\n"
               << "============================================================\n";
 
-    WaitEnter("ENTER para descarregar a DLL... ");
+    observation_summary::basics(r);
+    observation_summary::finish();
+    probe_console::ui()<<"\nSessao encerrada. Resultados das atividades exibidos acima.\n"
+        <<"Funcoes observadas continuam aguardando validacao da ABI.\n"
+        <<"Profile: "<<saved<<"\nDetalhes: ResearchProbeDiagnostic.log\n";
+    WaitEnter("ENTER para encerrar... ");
+    presentation.close();
+    if(grouped_observation::veh){FreeConsole();return 0;} // Retain delayed INT3 handler until client shutdown.
     FreeLibraryAndExitThread(g_self, 0);
     return 0;
 }

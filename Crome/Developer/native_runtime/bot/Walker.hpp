@@ -23,6 +23,7 @@ public:
         index_ = 0;
         retries_ = 0;
         waitingForWalk_ = false;
+        approachingAction_ = false;
         waitingForTimer_ = false;
         waitingForFloorChange_ = false;
         bestDistance_ = std::numeric_limits<int>::max();
@@ -40,6 +41,7 @@ public:
         }
         running_ = true;
         waitingForWalk_ = false;
+        approachingAction_ = false;
         waitingForTimer_ = false;
         waitingForFloorChange_ = false;
         retries_ = 0;
@@ -93,7 +95,8 @@ public:
         }
 
         if (waitingForWalk_) {
-            const int tolerance = activeReachDistance();
+            const bool actionApproach = approachingAction_;
+            const int tolerance = actionApproach ? 0 : activeReachDistance();
             const int distance = distanceTo(current, activeTarget_);
 
             if (distance < bestDistance_) {
@@ -104,11 +107,17 @@ public:
             }
 
             if (reached(current, activeTarget_, tolerance)) {
-                log("[WALKER] REACHED #" + std::to_string(index_ + 1) + " " + pos(activeTarget_) +
+                log(std::string(actionApproach ? "[WALKER] APPROACH REACHED #" : "[WALKER] REACHED #") +
+                    std::to_string(index_ + 1) + " " + pos(activeTarget_) +
                     " pos=" + pos(current) + " reach=" + std::to_string(tolerance));
                 waitingForWalk_ = false;
+                approachingAction_ = false;
                 retries_ = 0;
-                advance(nowMs);
+                if (actionApproach) {
+                    nextDispatchMs_ = nowMs + 50;
+                } else {
+                    advance(nowMs);
+                }
                 return;
             }
 
@@ -119,6 +128,7 @@ public:
 
             if (timedOut || stuck) {
                 waitingForWalk_ = false;
+                approachingAction_ = false;
                 const std::string reason = timedOut ? "timeout" : (noMovement ? "no-movement" : "no-progress");
                 log("[WALKER] BLOCKED #" + std::to_string(index_ + 1) +
                     " pos=" + pos(current) + " target=" + pos(activeTarget_) +
@@ -148,6 +158,7 @@ private:
     RouteConfig route_{};
     bool running_{};
     bool waitingForWalk_{};
+    bool approachingAction_{};
     bool waitingForTimer_{};
     bool waitingForFloorChange_{};
     int floorStartZ_{};
@@ -195,6 +206,55 @@ private:
         return current.z == target.z && current.chebyshevDistance(target) <= tolerance;
     }
 
+    static Position adjacentApproachPoint(const Position& current, const Position& target) noexcept {
+        Position p = target;
+        if (current.x < target.x) --p.x;
+        else if (current.x > target.x) ++p.x;
+        if (current.y < target.y) --p.y;
+        else if (current.y > target.y) ++p.y;
+        return p;
+    }
+
+    bool approachAction(std::uint64_t nowMs, Position current, Position target, const std::string& actionName) {
+        if (current.z != target.z) {
+            log("[WALKER] STOP: " + actionName + " target em outro andar current=" +
+                pos(current) + " target=" + pos(target));
+            running_ = false;
+            return true;
+        }
+
+        if (current.chebyshevDistance(target) <= 1) return false;
+
+        const Position approach = adjacentApproachPoint(current, target);
+        activeTarget_ = approach;
+        lastPosition_ = current;
+        lastMoveMs_ = nowMs;
+        lastProgressMs_ = nowMs;
+        requestMs_ = nowMs;
+        bestDistance_ = distanceTo(current, activeTarget_);
+
+        log("[WALKER] APPROACH #" + std::to_string(index_ + 1) + " " + actionName +
+            " action_target=" + pos(target) + " stand=" + pos(approach) +
+            " dist=" + std::to_string(bestDistance_));
+
+        if (!actions_.walkTo(approach)) {
+            if (retries_ < route_.maxRetries) {
+                ++retries_;
+                nextDispatchMs_ = nowMs + route_.retryDelayMs;
+                log("[WALKER] APPROACH RETRY #" + std::to_string(index_ + 1) +
+                    " attempt=" + std::to_string(retries_));
+            } else {
+                running_ = false;
+                log("[WALKER] STOP: approach rejected #" + std::to_string(index_ + 1));
+            }
+            return true;
+        }
+
+        waitingForWalk_ = true;
+        approachingAction_ = true;
+        return true;
+    }
+
     void advance(std::uint64_t nowMs) {
         ++index_;
         if (index_ >= route_.waypoints.size()) {
@@ -238,6 +298,7 @@ private:
             index_ = target;
             retries_ = 0;
             waitingForWalk_ = false;
+            approachingAction_ = false;
             waitingForTimer_ = false;
             waitingForFloorChange_ = false;
             nextDispatchMs_ = nowMs + 50;
@@ -276,14 +337,21 @@ private:
         if (w.type == RouteWaypointType::Use || w.type == RouteWaypointType::UseWithSelf) {
             const Item item{w.itemId, 0, 1};
             const bool useWithSelf = w.type == RouteWaypointType::UseWithSelf;
+            Position target = w.position;
+            if (w.useCurrentZ) target.z = current.z;
+
+            std::string detail = useWithSelf ? " USE_WITH_SELF item=" : " USE item=";
+            detail += std::to_string(w.itemId);
+            if (!useWithSelf && w.hasPosition) detail += " target=" + pos(target);
             log("[WALKER] ACTION #" + std::to_string(index_ + 1) + "/" +
-                std::to_string(route_.waypoints.size()) +
-                (useWithSelf ? " USE_WITH_SELF item=" : " USE item=") +
-                std::to_string(w.itemId));
+                std::to_string(route_.waypoints.size()) + detail);
+
+            if (!useWithSelf && w.hasPosition && approachAction(nowMs, current, target, "USE"))
+                return;
 
             const bool accepted = useWithSelf
                 ? actions_.useWith(item, current)
-                : actions_.use(item);
+                : (w.hasPosition ? actions_.useGroundObject(w.itemId, target) : actions_.use(item));
 
             if (!accepted) {
                 if (retries_ < route_.maxRetries) {
@@ -314,6 +382,7 @@ private:
             log("[WALKER] ACTION #" + std::to_string(index_ + 1) + "/" +
                 std::to_string(route_.waypoints.size()) + " LADDER item=" +
                 std::to_string(w.itemId) + " target=" + pos(target));
+            if (approachAction(nowMs, current, target, "LADDER")) return;
             if (!actions_.useGroundObject(w.itemId, target)) {
                 if (retries_ < route_.maxRetries) { ++retries_; nextDispatchMs_ = nowMs + route_.retryDelayMs; }
                 else { running_ = false; log("[WALKER] STOP: ladder use failed"); }
@@ -344,6 +413,10 @@ private:
                 " target=" + pos(actionTarget) +
                 (w.useCurrentZ ? " z=current" : ""));
 
+            if (w.type != RouteWaypointType::Fish &&
+                approachAction(nowMs, current, actionTarget, actionName))
+                return;
+
             const bool accepted = actions_.useWithGround(item, actionTarget);
             if (!accepted) {
                 if (retries_ < route_.maxRetries) {
@@ -361,11 +434,19 @@ private:
             }
 
             retries_ = 0;
-            const auto delay = w.actionWaitMs > 0 ? w.actionWaitMs : route_.actionWaitMs;
-            waitingForTimer_ = true;
-            waitUntilMs_ = nowMs + delay;
-            log("[WALKER] ACTION ACCEPTED #" + std::to_string(index_ + 1) +
-                " after_ms=" + std::to_string(delay));
+            if (w.type == RouteWaypointType::Rope) {
+                floorStartZ_ = current.z;
+                floorDeadlineMs_ = nowMs + 2500;
+                waitingForFloorChange_ = true;
+                log("[WALKER] ACTION ACCEPTED #" + std::to_string(index_ + 1) +
+                    " waiting_floor_change");
+            } else {
+                const auto delay = w.actionWaitMs > 0 ? w.actionWaitMs : route_.actionWaitMs;
+                waitingForTimer_ = true;
+                waitUntilMs_ = nowMs + delay;
+                log("[WALKER] ACTION ACCEPTED #" + std::to_string(index_ + 1) +
+                    " after_ms=" + std::to_string(delay));
+            }
             return;
         }
 

@@ -62,11 +62,13 @@
       "below_or_equal": 50,
       "cooldown_ms": 650,
       "enabled": false,
-      "item_id": 0,
+      "item_id": 15552,
       "min_mana": 0,
       "name": "mana_fluid",
       "priority": 500,
       "trigger": "mana_percent"
     }
-  ]
+  ],
+  "ramonia_spell_backend": "bridge_v23_talkChannel",
+  "ramonia_item_backend": "bridge_v24_useWithSelf"
 }

@@ -1,5 +1,26 @@
 # OTCLab BuildExplorer V2.7 EXTERNAL PORT
 
+Esta pasta agora inclui a descoberta guiada V2.8. O nome da pasta e do EXE
+foram preservados para manter os caminhos existentes. Execute `build.bat`
+para gerar `Build/OTCLab_BuildExplorer_V2_7_EXTERNAL_PORT.exe` atualizado.
+
+Depois de selecionar o LocalPlayer, a nova etapa explica como mudar cada
+atributo e compara os candidatos antes/depois. Confirma um campo por leitura
+somente após duas mudanças reais e um único candidato. Testes impossíveis
+agora podem ser pulados; suas pendências são guardadas em `guidedFields`.
+Tipos double, float, uint32 e uint64 são considerados, sem escalas presumidas.
+O formato antigo `localPlayer.fields` conserva somente candidatos double
+únicos; consumidores antigos não passam automaticamente a ler outros tipos.
+
+A entrada da descoberta deixou de exigir quatro atributos double simultâneos.
+Vida máxima também serve de âncora estrutural se a vida mudar durante o scan.
+Isso gera candidatos para investigação; não confirma o objeto nem uma ABI.
+Escolha explícita continua necessária se houver vários LocalPlayers.
+
+Teste local: compile `tests/guided_fields_tests.cpp` como C++17 x64 e execute.
+O builder permanece externo e somente leitura. Não relogue durante a etapa
+guiada; uma mudança detectada no caminho do personagem interrompe a leitura.
+
 Port externo da linha V2.7 para clientes que nao aceitam a DLL/injecao.
 
 ## Objetivo

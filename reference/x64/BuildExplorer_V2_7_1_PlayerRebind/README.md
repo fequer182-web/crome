@@ -1,5 +1,7 @@
 # OTCLab BuildExplorer V2.7 — x64 Look AUTO + Player Light
 
+O export agora inclui `pipeDiscovery`: catálogo de métodos buscados na build atual, sem habilitar chamadas. Veja [padrão de descoberta do pipe x64](../PIPE_DISCOVERY.md). Use o JSON recém-gerado no ABIBuilder atualizado.
+
 Esta versao parte da V2.6/V4.9.1 que ja validou Look + Light no Classico e preserva o core V4.9 DIRECT BIND. A mudanca principal e que **builds x64 novas nao precisam mais de um probe separado apenas para descobrir o ABI do Look**.
 
 ## Compilar

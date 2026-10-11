@@ -1,0 +1,13 @@
+{
+  "friend_hp": 70,
+  "your_hp": 80,
+  "follow_friends": false,
+  "uh_friends": false,
+  "party_mode": false,
+  "friends_csv": "Friend1, Friend2, Friend3",
+  "backend": "prepared_only",
+  "future_follow_action": "follow_friend_by_name",
+  "future_uh_action": "useWith_uh_on_friend",
+  "future_sio_action": "exura sio \"{name}\"",
+  "party_semantic": "green_shield_or_green_skull_pending_runtime_validation"
+}

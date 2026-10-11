@@ -10,6 +10,10 @@
 #include "../bot/Walker.hpp"
 #include "../profiles/ProfileConfig.hpp"
 #include "../sdk/Conditions.hpp"
+#include "../runtime/OldersBaseline.hpp"
+#include "../runtime/OldersPipe.hpp"
+#include "../runtime/LegacyWindowsPath.hpp"
+#include "../runtime/LockedLogBuffer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -32,13 +36,15 @@ std::uintptr_t g_base{};
 std::string moduleDirectory(HMODULE mod) {
     char path[MAX_PATH]{};
     GetModuleFileNameA(mod, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path().string();
+    const std::string value(path);const auto slash=value.find_last_of("\\/");
+    return slash==std::string::npos?std::string{}:value.substr(0,slash);
 }
 
 std::string currentExecutableName() {
     char path[MAX_PATH]{};
     GetModuleFileNameA(nullptr, path, MAX_PATH);
-    return std::filesystem::path(path).filename().string();
+    const std::string value(path);const auto slash=value.find_last_of("\\/");
+    return slash==std::string::npos?value:value.substr(slash+1);
 }
 
 std::uint32_t currentImageSize() {
@@ -218,6 +224,7 @@ FishingConfig loadFishingConfig(const std::string& path) {
 
 
 struct ToolsConfig {
+    crome::ChangeGoldConfig changeGold;
     bool foodEnabled{false}; std::vector<std::uint32_t> foodIds{}; std::uint32_t foodIntervalMs{60000};
     bool manaEnabled{false}; std::string manaSpell{"utamo vita"}; std::uint32_t manaIntervalMs{170000};
     bool paraEnabled{false}; std::string paraSpell{"exura"};
@@ -228,6 +235,7 @@ ToolsConfig loadToolsConfig(const std::string& path) {
     ToolsConfig out;
     const auto root = crome::json::parse(crome::readRouteText(path));
     if (!root.isObject()) return out;
+    out.changeGold=crome::parseChangeGoldConfig(root.get("change_gold"));
     auto parseIds=[&](const crome::json::Value* obj,const char* key,std::vector<std::uint32_t>& dst){ if(!obj||!obj->isObject())return; if(const auto* a=obj->get(key);a&&a->isArray()){ dst.clear(); for(const auto& v:a->array()) if(v.isNumber()){ auto id=(std::uint32_t)v.number(); if(id) dst.push_back(id);} } };
     if(const auto* o=root.get("food");o&&o->isObject()){ if(const auto* v=o->get("enabled");v&&v->isBool())out.foodEnabled=v->boolean(); out.foodIntervalMs=crome::jsonU32(o->get("interval_ms"),out.foodIntervalMs); parseIds(o,"item_ids",out.foodIds); }
     if(const auto* o=root.get("mana_shield");o&&o->isObject()){ if(const auto* v=o->get("enabled");v&&v->isBool())out.manaEnabled=v->boolean(); if(const auto* v=o->get("spell");v&&v->isString())out.manaSpell=v->string(); out.manaIntervalMs=crome::jsonU32(o->get("fallback_interval_ms"),out.manaIntervalMs); }
@@ -294,10 +302,12 @@ void printRouteFlowWarnings(const crome::RouteConfig& route) {
 }
 
 DWORD WINAPI worker(LPVOID) {
-    const auto baseDirEarly = moduleDirectory(g_module);
-    const auto logPathEarly = baseDirEarly + "\\CromeRuntime.log";
-    std::freopen(logPathEarly.c_str(), "a", stdout);
-    std::freopen(logPathEarly.c_str(), "a", stderr);
+    wchar_t modulePath[32768]{};GetModuleFileNameW(g_module,modulePath,32768);
+    const auto baseDirWide=std::filesystem::path(modulePath).parent_path();
+    std::ofstream runtimeLog(baseDirWide/L"CromeRuntime.log",std::ios::app);
+    crome::LockedLogBuffer lockedLog(runtimeLog.rdbuf());
+    auto* priorOut=std::cout.rdbuf(); auto* priorError=std::cerr.rdbuf();
+    if(runtimeLog){std::cout.rdbuf(&lockedLog);std::cerr.rdbuf(&lockedLog);}
 
     std::cout << "\n============================================================\n"
               << "       CROME SDK V21.6 - FOLLOW BLOCKER / SAFE CHASE / HEALING / WALKER\n"
@@ -315,11 +325,16 @@ DWORD WINAPI worker(LPVOID) {
         const auto healingPath = baseDir + "\\config\\healing.json";
         const auto targetingPath = baseDir + "\\config\\targeting.json";
         const auto fishingPath = baseDir + "\\config\\fishing.json";
+        const auto lootPath = baseDir + "\\config\\loot.json";
         const auto toolsPath = baseDir + "\\config\\tools.json";
         const auto inspectRequestPath = baseDir + "\\config\\inspect_request.json";
         const auto inspectResultPath = baseDir + "\\config\\inspect_result.json";
         const auto lookResultPath = baseDir + "\\config\\look_result.json";
 
+        wchar_t executable[32768]{};
+        if(!GetModuleFileNameW(nullptr,executable,32768)||!crome::olders_baseline::matchesExecutable(executable)){
+            std::cout<<"[STOP] Legacy Olders runtime requires exact timestamp/size/disk text hash.\n"; goto done;
+        }
         auto profiles = crome::profiles::loadProfiles(profilesPath);
         const auto* profile = selectInternalProfile(profiles);
         if (!profile) {
@@ -378,6 +393,9 @@ DWORD WINAPI worker(LPVOID) {
         }
         if (!g_running) goto done;
 
+        crome::olders_pipe::Server pipeServer{baseDirWide};
+        pipeServer.start(); pipeServer.setReady(true);
+        std::cout<<"[PIPE READY] Olders legacy actions connected.\n";
         crome::RouteConfig route = crome::loadRouteConfig(routePath);
         walker.setRoute(route);
         std::cout << "[OK] Waypoints carregados: " << route.waypoints.size()
@@ -396,6 +414,10 @@ DWORD WINAPI worker(LPVOID) {
         bool targetingEnabled = targetingConfig.enabled;
         actions.setManualInteractionPauseMs(targetingConfig.manualInputPauseMs);
         std::uint64_t nextTargetingPoll = 0;
+        crome::OldersLootConfig lootConfig{};
+        std::uint64_t nextLootReloadMs=0,nextLootPollMs=0;
+        bool walkerPausedByLoot=false,resumeWalkerAfterLoot=false;
+        std::string lastLootStatus;
         bool walkerPausedByTarget = false;
         bool resumeWalkerAfterTarget = false;
         std::uint64_t targetMissingSince = 0;
@@ -428,6 +450,7 @@ DWORD WINAPI worker(LPVOID) {
         std::uint64_t nextFishingReloadMs = 0;
         ToolsConfig toolsConfig{}; try { toolsConfig=loadToolsConfig(toolsPath); } catch(...) {}
         std::uint64_t nextToolsReloadMs=0, nextFoodMs=0, nextManaMs=0, nextHasteMs=0, nextParaMs=0;
+        std::uint64_t nextChangeGoldMs=0;
         std::cout << "[OK] Fishing config: enabled=" << (fishingConfig.enabled?"true":"false")
                   << " rod=" << fishingConfig.rodId << " waterIds=" << fishingConfig.waterIds.size()
                   << " range=" << fishingConfig.range << " delay=" << fishingConfig.minDelayMs << "-" << fishingConfig.maxDelayMs << "ms\n";
@@ -475,7 +498,7 @@ DWORD WINAPI worker(LPVOID) {
 
         auto safeWriteTime = [](const std::string& path) {
             std::error_code ec;
-            auto t = std::filesystem::last_write_time(path, ec);
+            auto t = std::filesystem::last_write_time(crome::legacyWindowsPath(path), ec);
             return ec ? std::filesystem::file_time_type::min() : t;
         };
         auto routeMtime = safeWriteTime(routePath);
@@ -523,7 +546,7 @@ DWORD WINAPI worker(LPVOID) {
             if (t >= nextInspectPoll) {
                 nextInspectPoll = t + 150;
                 try {
-                    if (std::filesystem::exists(inspectRequestPath)) {
+                    if (std::filesystem::exists(crome::legacyWindowsPath(inspectRequestPath))) {
                         const auto rootReq = crome::json::parse(crome::readRouteText(inspectRequestPath));
                         if (rootReq.isObject()) {
                             const auto seq = static_cast<std::uint64_t>(crome::jsonU32(rootReq.get("seq"), 0));
@@ -682,6 +705,7 @@ DWORD WINAPI worker(LPVOID) {
             }
 
             if (f8 && !oldF8) {
+                if(walkerPausedByLoot){resumeWalkerAfterLoot=false;}
                 walker.toggle(t, p);
                 std::cout << "[F8] Walker=" << (walker.running() ? "RUNNING" : "PAUSED") << "\n";
             }
@@ -874,6 +898,12 @@ DWORD WINAPI worker(LPVOID) {
                 } else nextFishingMs = t + 250;
             }
 
+            if (toolsConfig.changeGold.enabled && t >= nextChangeGoldMs) {
+                if (!actions.itemActionPending() && !actions.manualInteractionActive())
+                    actions.changeGold(toolsConfig.changeGold.itemIds);
+                nextChangeGoldMs=t+toolsConfig.changeGold.intervalMs;
+            }
+
             if (healingEnabled && t >= nextHealingPoll) {
                 nextHealingPoll = t + healingConfig.pollMs;
                 if (const auto self = actions.localPlayerSnapshot()) {
@@ -969,13 +999,17 @@ DWORD WINAPI worker(LPVOID) {
 
                             if (targetingConfig.chaseEnabled) {
                                 const int dist = selfNow.chebyshevDistance(it->position);
-                                if (dist <= targetingConfig.chaseDistance) {
+                                const auto modeDestination = targetPositionDestination(selfNow, it->position,
+                                                                                       targetingConfig.movementMode);
+                                const bool positioned = targetingConfig.movementMode >= 0
+                                    ? !modeDestination.has_value() : dist <= targetingConfig.chaseDistance;
+                                if (positioned) {
                                     haveLastChaseDestination = false;
                                     lastChaseRemaining = 9999;
                                     lastChaseProgressMs = t;
                                 } else if (!actions.walkPending() && !actions.manualInteractionActive()) {
-                                    const auto dest = chaseDestination(selfNow, it->position,
-                                                                       targetingConfig.chaseDistance);
+                                    const auto dest = modeDestination.value_or(chaseDestination(selfNow, it->position,
+                                                                       targetingConfig.chaseDistance));
                                     if (dest.z == selfNow.z && dest.x > 0 && dest.y > 0) {
                                         const int remaining = haveLastChaseDestination
                                             ? selfNow.chebyshevDistance(lastChaseDestination) : 9999;
@@ -990,7 +1024,7 @@ DWORD WINAPI worker(LPVOID) {
                                         const bool first = !haveLastChaseDestination;
                                         const bool reachedOld = haveLastChaseDestination && remaining <= 1;
                                         const bool targetMovedEnough = haveLastChaseDestination &&
-                                            destShift >= 2 && t - lastChaseMs >= targetingConfig.chaseRepathMs;
+                                            destShift >= (targetingConfig.movementMode >= 0 ? 1 : 2) && t - lastChaseMs >= targetingConfig.chaseRepathMs;
                                         const bool stalePath = haveLastChaseDestination &&
                                             t - lastChaseProgressMs >= targetingConfig.chaseForceRefreshMs;
                                         const bool intervalReady = t - lastChaseMs >= targetingConfig.chaseIntervalMs;
@@ -1071,7 +1105,8 @@ DWORD WINAPI worker(LPVOID) {
                 } // !manualInteractionActive
 
                 if (hasCombatTarget && targetingConfig.pauseWalker && !walkerPausedByTarget) {
-                    resumeWalkerAfterTarget = walker.running();
+                    resumeWalkerAfterTarget = walker.running() || resumeWalkerAfterLoot;
+                    walkerPausedByLoot=false;resumeWalkerAfterLoot=false;
                     if (walker.running()) walker.pause();
                     walkerPausedByTarget = true;
                     std::cout << "[TARGET] Walker pausado durante combate/chase.\n";
@@ -1087,6 +1122,26 @@ DWORD WINAPI worker(LPVOID) {
                 }
             }
 
+            if(t>=nextLootReloadMs){
+                nextLootReloadMs=t+750;
+                try {lootConfig=crome::parseOldersLoot(crome::json::parse(crome::readRouteText(lootPath)));}
+                catch(...) {lootConfig={};}
+            }
+            if(t>=nextLootPollMs && !targeter.hasLock() && !walkerPausedByTarget &&
+               !manualFollowActive && !actions.currentAttackTargetAddress() && !actions.manualInteractionActive() && !actions.walkPending()){
+                nextLootPollMs=t+600;
+                const auto loot=actions.lootStep(lootConfig);
+                if(loot.status!=lastLootStatus){std::cout<<"[LOOT] "<<loot.status<<"\n"<<std::flush;lastLootStatus=loot.status;}
+                if(loot.active){
+                    if(!walkerPausedByLoot){resumeWalkerAfterLoot=walker.running();walkerPausedByLoot=true;}
+                    if(walker.running())walker.pause();
+                    if(loot.walk)actions.walkTo(loot.position);
+                }else if(walkerPausedByLoot){
+                    if(resumeWalkerAfterLoot && route.enabled && !walker.running())walker.start(t,p);
+                    walkerPausedByLoot=false;resumeWalkerAfterLoot=false;
+                }
+            }
+            if(walkerPausedByLoot && walker.running())walker.pause();
             walker.tick(t, p);
 
             if (end && !oldEnd) g_running = false;
@@ -1097,6 +1152,7 @@ DWORD WINAPI worker(LPVOID) {
             Sleep(20);
         }
 
+        pipeServer.stop();
         actions.uninstallDispatcher();
     } catch (const std::exception& e) {
         std::cout << "[-] Exception: " << e.what() << "\n";
@@ -1105,8 +1161,8 @@ DWORD WINAPI worker(LPVOID) {
 done:
     std::cout << "\n[UNLOAD] Encerrando Crome SDK V21.6...\n";
     Sleep(150);
-    std::fflush(stdout);
-    std::fflush(stderr);
+    std::cout.flush();std::cerr.flush();
+    std::cout.rdbuf(priorOut);std::cerr.rdbuf(priorError);runtimeLog.close();
     FreeLibraryAndExitThread(g_module, 0);
     return 0;
 }

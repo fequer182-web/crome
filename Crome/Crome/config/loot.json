@@ -2,15 +2,25 @@
   "drop_item": {
     "destination": "ground_near_corpse",
     "enabled": false,
-    "item_ids": []
+    "item_ids": [],
+    "status": "requires_native_move_backend"
   },
   "enabled": false,
   "item_ids": [
-    3031,
-    3035
+    2148
   ],
   "loot_on_screen": false,
   "max_weight": 3155,
-  "only_list": false,
-  "radius": 3
+  "only_list": true,
+  "radius": 3,
+  "target_container_id": 0,
+  "corpse_item_ids": [
+    2813
+  ],
+  "auto_detect_corpse": true,
+  "learned_corpse_ids": [
+    2813
+  ],
+  "nested_container_ids": [],
+  "recursive_container_depth": 3
 }
