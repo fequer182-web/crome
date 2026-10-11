@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <filesystem>
+#include "GuidedFields.hpp"
 
 namespace {
 
@@ -32,6 +34,8 @@ uintptr_t g_moduleEnd = 0;
 uintptr_t g_textBegin = 0;
 uintptr_t g_textEnd = 0;
 std::string g_processPath;
+std::map<std::string,guided::Evidence> g_guided;
+uintptr_t g_guidedDirect=0,g_guidedIndirect=0,g_guidedOwnerOffset=0;
 
 struct BuildInfo {
     DWORD timestamp = 0;
@@ -133,9 +137,9 @@ std::string Hex(uint64_t v) {
 }
 
 std::string ExeDirectory() {
-    char path[MAX_PATH]{};
-    GetModuleFileNameA(nullptr, path, MAX_PATH);
-    std::string s = path;
+    wchar_t path[32768]{};
+    if(!GetModuleFileNameW(nullptr,path,32768)) throw std::runtime_error("Nao consegui localizar a pasta do programa.");
+    std::string s=std::filesystem::path(path).u8string();
     auto p = s.find_last_of("\\/");
     if (p == std::string::npos) return ".";
     return s.substr(0, p);
@@ -165,7 +169,7 @@ double AskDouble(const std::string& msg) {
         std::string s;
         std::getline(std::cin, s);
         std::replace(s.begin(), s.end(), ',', '.');
-        try { return std::stod(s); } catch (...) {}
+        try { size_t used=0;double v=std::stod(s,&used);if(used==s.size() && std::isfinite(v) && v>=0 && v<=9007199254740991.0)return v; } catch (...) {}
         std::cout << "[INPUT] Numero invalido.\n";
     }
 }
@@ -455,7 +459,12 @@ std::vector<LocalCandidate> DiscoverCandidates(const StatsInput& in) {
 
     auto healthHits = ScanDouble(in.health);
     auto maxHits = ScanDouble(in.maxHealth);
-    if (healthHits.empty() || maxHits.empty()) return {};
+    if (maxHits.empty()) return {};
+    // HP may regenerate while the two full-memory scans run. Max HP also
+    // anchors structural candidates; guided observations decide the real fields.
+    healthHits.insert(healthHits.end(),maxHits.begin(),maxHits.end());
+    std::sort(healthHits.begin(),healthHits.end());
+    healthHits.erase(std::unique(healthHits.begin(),healthHits.end()),healthHits.end());
 
     const auto sections = GetSections();
     std::set<uintptr_t> seen;
@@ -495,8 +504,9 @@ std::vector<LocalCandidate> DiscoverCandidates(const StatsInput& in) {
                 for (const auto& kv:c.fieldOffsets) {
                     if (!kv.second.empty()) { ++fields; if (kv.second.size()==1) ++unique; }
                 }
-                if (fields < 4) continue;
-                c.score = fields*20 + unique*8 + PositionShapeScore(base);
+                int positionShape=PositionShapeScore(base);
+                if (!guided::SeedAllowed(!c.fieldOffsets["maxHealth"].empty(),fields,positionShape)) continue;
+                c.score = fields*20 + unique*8 + positionShape;
                 if (h>=base && h-base<0x1200) c.score += 8;
                 if (m>=base && m-base<0x1200) c.score += 8;
                 seen.insert(base);
@@ -532,12 +542,69 @@ void PrintCandidate(const LocalCandidate& c, size_t index) {
 
 size_t AskCandidateIndex(size_t count) {
     for (;;) {
-        std::cout << "Escolha o candidato LocalPlayer (0.." << (count-1) << ") [ENTER=0]: ";
+        if(count==1)return 0;
+        std::cout << "Escolha explicitamente o candidato LocalPlayer (0.." << (count-1) << "): ";
         std::string s; std::getline(std::cin,s);
-        if (s.empty()) return 0;
         try { size_t v=static_cast<size_t>(std::stoul(s)); if (v<count) return v; } catch (...) {}
         std::cout << "[INPUT] Indice invalido.\n";
     }
+}
+
+std::vector<uint8_t> ReadGuidedSnapshot(const LocalCandidate& lc) {
+    auto samePlayer=[&](){
+        if(g_guidedDirect)return ReadPtr(g_moduleBase+g_guidedDirect)==lc.base;
+        if(g_guidedIndirect){auto owner=ReadPtr(g_moduleBase+g_guidedIndirect);return owner && ReadPtr(owner+g_guidedOwnerOffset)==lc.base;}
+        return false;
+    };
+    if(!samePlayer())throw std::runtime_error("O caminho do LocalPlayer mudou ou nao pode ser validado. Reinicie a descoberta.");
+    if(ReadPtr(lc.base)!=lc.vtable) throw std::runtime_error("LocalPlayer mudou ou ficou indisponivel. Reinicie a descoberta apos entrar no personagem.");
+    std::vector<uint8_t> bytes(0x1200);
+    if(!ReadBytes(lc.base,bytes.data(),bytes.size()) || ReadPtr(lc.base)!=lc.vtable || !samePlayer()) throw std::runtime_error("Falha na leitura do personagem. Nenhum zero artificial sera usado como evidencia.");
+    return bytes;
+}
+
+void GuideStats(LocalCandidate& lc) {
+    struct Step {const char* key;const char* label;const char* action;};
+    const Step steps[]={
+        {"health","Vida atual","Tome um pouco de dano ou recupere vida. Espere estabilizar; nao se coloque em risco."},
+        {"mana","Mana atual","Gaste mana com uma magia e espere estabilizar; na outra rodada recupere ou gaste mais mana."},
+        {"capacity","Capacidade livre","Mova um item de peso conhecido entre o chao e a mochila. Na outra rodada, devolva ou mova outro item."},
+        {"experience","Experiencia","Ganhe experiencia matando uma criatura. Repita com outra criatura na segunda rodada."},
+        {"maxHealth","Vida maxima","Este valor exige uma mudanca real, como subir de nivel. Pode pular se nao conseguir agora."},
+        {"maxMana","Mana maxima","Este valor exige uma mudanca real, como subir de nivel. Pode pular se nao conseguir agora."},
+        {"level","Nivel","Este valor exige subir de nivel. Pode pular; nao sera declarado confirmado sem mudanca."}
+    };
+    std::cout<<"\n=== DESCOBERTA GUIADA DOS ATRIBUTOS ===\n"
+             <<"Use os valores da tela. Nao relogue durante esta etapa. Cada campo pode ser pulado.\n"
+             <<"Confirmacao exige um unico candidato apos DUAS mudancas reais.\n";
+    for(const auto& step:steps) {
+        auto& e=g_guided[step.key];
+        std::cout<<"\n[CAMPO] "<<step.label<<"\nO que fazer: "<<step.action<<"\n";
+        double current=AskDouble(std::string("Valor ATUAL de ")+step.label+": ");
+        e.observations.push_back(current);e.candidates=guided::Find(ReadGuidedSnapshot(lc),current);
+        std::cout<<"[ANTES] "<<e.candidates.size()<<" candidatos de leitura (double, float e inteiros).\n";
+        e.reason="unchanged_value_only";
+        for(unsigned round=1;round<=3 && !(e.candidates.size()==1 && e.transitions>=2);++round) {
+            if(e.candidates.empty()){e.reason="no_matching_candidate";break;}
+            if(!AskYesNo("Pode mudar este valor agora? [S/N]: ")){e.reason="user_skipped_changes";break;}
+            WaitEnter(std::string("Faca a acao indicada para ")+step.label+"; espere estabilizar e pressione ENTER...");
+            double value=AskDouble("Novo valor mostrado no jogo: ");
+            if(std::abs(value-e.observations.back())<=0.0051) {std::cout<<"[SEM MUDANCA] Isso nao confirma o campo.\n";e.reason="value_did_not_change";continue;}
+            guided::Narrow(e,ReadGuidedSnapshot(lc),value);
+            std::cout<<"[COMPARACAO] "<<e.candidates.size()<<" candidatos restantes; "<<e.transitions<<" mudancas observadas.\n";
+        }
+        auto& offsets=lc.fieldOffsets[step.key];offsets.clear();
+        // Legacy consumers only understand double. Typed candidates remain in guidedFields.
+        if(e.candidates.size()==1 && e.candidates[0].type=="float64")offsets.push_back(e.candidates[0].offset);
+        std::cout<<"[RESULTADO] "<<step.label<<": "<<(e.status()=="confirmed_read_transition"?"CONFIRMADO POR LEITURA":e.status()=="ambiguous"?"AINDA AMBIGUO":e.status()=="pending"?"NAO ENCONTRADO":"CANDIDATO; FALTA CONFIRMAR")<<"\n";
+        if(e.candidates.size()==1)std::cout<<"  Offset +"<<Hex(e.candidates[0].offset)<<"; tipo "<<e.candidates[0].type<<"\n";
+    }
+}
+
+void PrintGuidedSummary() {
+    std::cout<<"\n=== RESUMO DOS ATRIBUTOS ===\n";
+    for(const auto& kv:g_guided)std::cout<<kv.first<<": "<<kv.second.status()<<" | candidatos="<<kv.second.candidates.size()<<" | mudancas="<<kv.second.transitions<<"\n";
+    std::cout<<"Confirmado por leitura NAO significa ABI de funcao validada.\n";
 }
 
 std::vector<uint32_t> SnapshotU32(uintptr_t base, uintptr_t end=0x120) {
@@ -761,7 +828,7 @@ uintptr_t DiscoverZeroObjectZeroOffset(uintptr_t gameBase,const std::string&labe
     return 0;
 }
 
-GameDiscovery DiscoverGameExternal(uintptr_t localPlayer,const PointerPath&pp){
+GameDiscovery DiscoverGameExternal(uintptr_t,const PointerPath&pp){
     GameDiscovery g{};
     if(pp.directGlobalRva){
         g.available=true;g.runtimeBase=g_moduleBase+pp.directGlobalRva;g.globalRva=pp.directGlobalRva;g.localPlayerOffset=0;g.source="module_direct_field";
@@ -817,13 +884,23 @@ MapCenterDiscovery DiscoverMapCenterExternal(uintptr_t localPlayer,const PosFiel
 }
 
 bool ReadWholeText(std::vector<uint8_t>&out){
-    if(g_textEnd<=g_textBegin)return false;size_t sz=static_cast<size_t>(g_textEnd-g_textBegin);out.resize(sz);
+    if(g_textEnd<=g_textBegin)return false;
+    size_t sz=static_cast<size_t>(g_textEnd-g_textBegin);out.resize(sz);
     size_t done=0;const size_t chunk=4u*1024u*1024u;
     while(done<sz){size_t want=std::min(chunk,sz-done);SIZE_T got=0;if(!ReadProcessMemory(g_process,reinterpret_cast<LPCVOID>(g_textBegin+done),out.data()+done,want,&got)||got==0)return false;done+=got;if(got<want)return false;}
     return true;
 }
 
-std::string ReadFileText(const std::string&path){std::ifstream f(path,std::ios::binary);if(!f)return{};return std::string((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());}
+std::string ReadFileText(const std::string&path){std::ifstream f(std::filesystem::u8path(path),std::ios::binary);if(!f)return{};return std::string((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());}
+std::vector<std::string> LoadReferenceProfiles() {
+    auto root=std::filesystem::u8path(ExeDirectory());auto dir=root/"profiles"/"reference";
+    if(!std::filesystem::exists(dir))dir=root/".."/"profiles"/"reference";
+    std::vector<std::string> refs;
+    if(std::filesystem::exists(dir))for(const auto& file:std::filesystem::directory_iterator(dir)) {
+        if(file.is_regular_file() && file.path().extension()==".json") {auto raw=ReadFileText(file.path().u8string());if(!raw.empty())refs.push_back(std::move(raw));}
+    }
+    return refs;
+}
 std::string ExtractJsonString(const std::string&s,const std::string&key){
     std::string needle="\""+key+"\"";size_t p=s.find(needle);if(p==std::string::npos)return{};p=s.find(':',p+needle.size());if(p==std::string::npos)return{};p=s.find('"',p+1);if(p==std::string::npos)return{};++p;std::string out;bool esc=false;
     for(;p<s.size();++p){char c=s[p];if(esc){out+=c;esc=false;continue;}if(c=='\\'){esc=true;continue;}if(c=='"')break;out+=c;}return out;
@@ -838,8 +915,7 @@ std::vector<FunctionResolution> ResolveFunctionsExternal(){
         {"Game::autoWalk","sigGameAutoWalk"},{"LocalPlayer::autoWalk","sigLocalPlayerAutoWalk"},{"Game::attack","sigGameAttack"},{"Game::follow","sigGameFollow"},{"Game::look","sigGameLook"},{"Game::detailedLook","sigGameDetailedLook"},{"Game::move","sigGameMove"},{"Game::use","sigGameUse"},{"Game::useWith","sigGameUseWith"},{"Game::talk","sigGameTalk"},{"Map::getTile","sigMapGetTile"},{"Map::getCreatureById","sigMapGetCreatureById"},{"Map::getCreatureByName","sigMapGetCreatureByName"},{"Container::getItem","sigContainerGetItem"}
     };
     std::vector<uint8_t> text;if(!ReadWholeText(text)){std::cout<<"[FUNCTIONS] Falha lendo .text remoto.\n";return specs;}
-    std::string dir=ExeDirectory()+"\\..\\profiles\\reference";std::string mask=dir+"\\*.json";WIN32_FIND_DATAA fd{};HANDLE h=FindFirstFileA(mask.c_str(),&fd);
-    std::vector<std::string> refs;if(h!=INVALID_HANDLE_VALUE){do{if(!(fd.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))refs.push_back(ReadFileText(dir+"\\"+fd.cFileName));}while(FindNextFileA(h,&fd));FindClose(h);} 
+    auto refs=LoadReferenceProfiles();
     std::cout<<"\n============================================================\n          EXTERNAL STATIC FUNCTION SIGNATURES\n============================================================\n";
     std::cout<<"Reference profiles loaded: "<<refs.size()<<"\n";
     for(auto&sp:specs){std::set<uintptr_t> uniqueRvas;int totalMatches=0;
@@ -908,9 +984,11 @@ void WriteOffsetsJson(std::ofstream& f,const char*name,const std::vector<uintptr
 
 std::string SaveProfile(const BuildInfo& b,const LocalCandidate& lc,const PosFields& pos,const PointerPath& path,const GameDiscovery& game,const MapCenterDiscovery& mapCenter,const std::vector<FunctionResolution>&functions,const std::vector<LightCandidate>&lights){
     std::string dir=ExeDirectory()+"\\Build";
-    CreateDirectoryA(dir.c_str(),nullptr);
+    std::filesystem::create_directories(std::filesystem::u8path(dir));
     std::string file=dir+"\\OTCLab_EXTERNAL_Profile_"+Hex(b.timestamp).substr(2)+"_"+Hex(b.textHash).substr(2)+".json";
-    std::ofstream f(file,std::ios::binary);
+    const auto target=std::filesystem::u8path(file), temp=std::filesystem::u8path(file+".tmp");
+    std::ofstream f(temp,std::ios::binary);
+    if(!f)throw std::runtime_error("Nao consegui abrir o arquivo de perfil para gravacao.");
     f << "{\n";
     f << "  \"schema\": \"otclab-external-v27-port-v1\",\n";
     f << "  \"mode\": \"external_read_only\",\n";
@@ -928,6 +1006,17 @@ std::string SaveProfile(const BuildInfo& b,const LocalCandidate& lc,const PosFie
     const char* names[]={"health","maxHealth","mana","maxMana","experience","level","capacity"};
     for(size_t i=0;i<7;++i){auto it=lc.fieldOffsets.find(names[i]);std::vector<uintptr_t> empty;WriteOffsetsJson(f,names[i],it==lc.fieldOffsets.end()?empty:it->second,i!=6);}
     f << "    }\n  },\n";
+    f << "  \"guidedFields\": {\n";
+    size_t written=0;
+    for(const auto& kv:g_guided) {
+        const auto& e=kv.second;
+        f<<"    \""<<kv.first<<"\": {\"status\": \""<<e.status()<<"\", \"reason\": \""<<e.reason<<"\", \"transitions\": "<<e.transitions<<", \"observations\": [";
+        for(size_t i=0;i<e.observations.size();++i){if(i)f<<", ";f<<std::setprecision(17)<<e.observations[i];}
+        f<<"], \"candidates\": [";
+        for(size_t i=0;i<e.candidates.size();++i){if(i)f<<", ";f<<"{\"offset\": \""<<Hex(e.candidates[i].offset)<<"\", \"type\": \""<<e.candidates[i].type<<"\"}";}
+        f<<"]}"<<(++written<g_guided.size()?",":"")<<"\n";
+    }
+    f << "  },\n";
     f << "  \"game\": {\"status\": \""<<(game.available?"external_owner_resolved":"pending")<<"\", \"globalRva\": \""<<Hex(game.globalRva)<<"\", \"localPlayerOffset\": \""<<Hex(game.localPlayerOffset)<<"\", \"attackTargetOffset\": \""<<Hex(game.attackTargetOffset)<<"\", \"followTargetOffset\": \""<<Hex(game.followTargetOffset)<<"\", \"source\": \""<<game.source<<"\"},\n";
     f << "  \"map\": {\"status\": \""<<(mapCenter.confirmed?"confirmed_external_center_transition":"pending")<<"\", \"centerRva\": \""<<Hex(mapCenter.centerRva)<<"\", \"candidateMapRva\": \""<<Hex(mapCenter.candidateMapRva)<<"\"},\n";
     f << "  \"functions\": {\n";
@@ -939,6 +1028,8 @@ std::string SaveProfile(const BuildInfo& b,const LocalCandidate& lc,const PosFie
     uintptr_t lookRva=0;std::string lookFn="pending";for(const auto&fn:functions){if(fn.name=="Game::detailedLook"&&fn.rva){lookRva=fn.rva;lookFn="gameDetailedLook";break;}}if(!lookRva){for(const auto&fn:functions){if(fn.name=="Game::look"&&fn.rva){lookRva=fn.rva;lookFn="gameLook";break;}}}
     f << "  \"look\": {\"status\": \""<<(lookRva?"candidate_static_external":"pending")<<"\", \"hookFunction\": \""<<lookFn<<"\", \"hookRva\": \""<<Hex(lookRva)<<"\", \"runtimeAbi\": \"pending_external_read_only\", \"referenceItemDefaults\": [3031,3552], \"note\": \"No injection/hook: ABI remains pending; static candidate comes only from remote .text signature evidence.\"}\n";
     f << "}\n";
+    f.flush();if(!f)throw std::runtime_error("Falha ao gravar perfil; arquivo anterior preservado.");f.close();
+    if(!MoveFileExW(temp.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Falha ao finalizar perfil; arquivo anterior preservado.");
     return file;
 }
 
@@ -962,10 +1053,10 @@ void RuntimeWatch(uintptr_t base,const LocalCandidate&lc,const PosFields&pos){
 
 } // namespace
 
-int main(){
-    SetConsoleTitleA("OTCLab BuildExplorer V2.7 EXTERNAL PORT");
+int main() try {
+    SetConsoleTitleA("OTCLab External Builder V2.8 - Descoberta Guiada");
     std::cout << "============================================================\n"
-              << "        OTCLab BuildExplorer V2.7 EXTERNAL PORT\n"
+              << "        OTCLab External Builder V2.8 - GUIADO\n"
               << "============================================================\n"
               << "PORT EXTERNO DA V2.7 / SEM DLL / SEM INJECAO / SEM HOOK / SEM WRITE\n"
               << "Usa apenas OpenProcess + ReadProcessMemory.\n"
@@ -1014,8 +1105,11 @@ int main(){
     LocalCandidate chosen=candidates[idx];
     std::cout<<"[SELECTED] LocalPlayer="<<Hex(chosen.base)<<" VTableRVA="<<Hex(chosen.vtable-g_moduleBase)<<"\n";
 
-    PosFields pos=CalibratePosition(chosen.base);
     PointerPath pp=FindPointerPaths(chosen.base);
+    g_guidedDirect=pp.directGlobalRva;g_guidedIndirect=pp.indirectGlobalRva;g_guidedOwnerOffset=pp.ownerOffset;
+    GuideStats(chosen);
+
+    PosFields pos=CalibratePosition(chosen.base);
     std::cout << "\n[POINTER PATH]\nDirect refs no modulo: "<<pp.allDirectRvas.size()<<"\n";
     for(auto r:pp.allDirectRvas)std::cout<<"  DIRECT RVA "<<Hex(r)<<"\n";
     if(pp.indirectGlobalRva)std::cout<<"Selected INDIRECT globalRva="<<Hex(pp.indirectGlobalRva)<<" owner="<<Hex(pp.indirectOwner)<<" LPoff=+"<<Hex(pp.ownerOffset)<<"\n";
@@ -1025,6 +1119,7 @@ int main(){
     MapCenterDiscovery mapCenter=DiscoverMapCenterExternal(chosen.base,pos);
     auto functions=ResolveFunctionsExternal();
     auto lights=CalibrateLightReadOnly(chosen.base);
+    PrintGuidedSummary();
     std::string saved=SaveProfile(build,chosen,pos,pp,game,mapCenter,functions,lights);
     std::cout << "\n[SAVE] "<<saved<<"\n";
 
@@ -1039,4 +1134,8 @@ int main(){
     if(g_process) CloseHandle(g_process);
     WaitEnter("ENTER para sair...");
     return 0;
+} catch(const std::exception& e) {
+    std::cout<<"\n[INTERROMPIDO] "<<e.what()<<"\n";
+    if(g_process)CloseHandle(g_process);
+    WaitEnter("ENTER para sair...");return 4;
 }

@@ -1,3 +1,14 @@
+V2.8 GUIADO — integrado na pasta V2.7 ExternalPort
+================================================
+- Descoberta guiada de atributos com duas mudanças reais para confirmação.
+- Candidatos double/float/uint32/uint64 e evidências persistidas em guidedFields.
+- Seleção explícita quando há vários LocalPlayers; nenhuma escolha automática.
+- Âncora por vida máxima e gate estrutural que tolera HP regenerando no scan.
+- Validação do caminho/vtable durante a etapa guiada; falhas não viram zeros.
+- Perfis de referência e gravação final suportam caminhos com acentos.
+- Gravação temporária antes de substituir o JSON existente.
+- Mantidos nome do EXE, build.bat, testes anteriores e modo sem escrita/injeção.
+
 V2.7 EXTERNAL PORT
 ==================
 
