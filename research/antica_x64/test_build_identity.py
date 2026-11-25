@@ -1,4 +1,4 @@
-"""Synthetic PE fixtures: run with `py -3 -m unittest test_build_identity.py\`."""
+"""Synthetic PE fixtures: run with py -3 -m unittest test_build_identity.py."""
 from pathlib import Path
 import shutil
 import struct
