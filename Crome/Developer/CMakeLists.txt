@@ -23,6 +23,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 add_library(crome_core STATIC
     core/profile/ProfileLoader.cpp
     core/profile/ProfileValidator.cpp
+    core/profile/CodeIdentity.cpp
     core/profile/ProfileRegistry.cpp
     core/readers/ProfileBackedPlayerReader.cpp
     core/runtime/WindowsProcessMemory.cpp
@@ -40,6 +41,9 @@ add_library(crome_core STATIC
 
 target_include_directories(crome_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(crome_core PUBLIC nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(crome_core PRIVATE bcrypt)
+endif()
 
 if(NOT WIN32)
     message(FATAL_ERROR "Crome UI atualmente e destinada ao Windows.")
