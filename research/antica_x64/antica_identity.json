@@ -1,0 +1,14 @@
+{
+  "id": "antica_retro_x64_6B06FF0F_code_identity",
+  "timestamp": "0x6B06FF0F",
+  "sizeOfImage": "0xF38000",
+  "textRva": "0x1000",
+  "textRawSize": "0x980200",
+  "textSha256": "6244c268981a4c46791fbc660c96f0f22644806f4e0494ad5244d48e32a94bb0",
+  "textFnv1a64": "0xB33D4DF01BF6C755",
+  "installationSha256Examples": [
+    "a6bc688a1ba697fa0bfdce31a3a916916301aa000fc7d3bcc9f26a8cdf3fc884",
+    "818ba2fb392e6083b74d361d05eba156370f87333249f963620ff5ce0dfe59ab"
+  ],
+  "nativeActionsReady": false
+}

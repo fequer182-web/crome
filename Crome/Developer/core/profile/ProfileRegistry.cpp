@@ -1,6 +1,14 @@
 #include "core/profile/ProfileRegistry.hpp"
 #include "core/profile/ProfileLoader.hpp"
+#include <algorithm>
+#include <cctype>
 namespace crome {
+static std::string normalizeHash(std::string hash) {
+    std::transform(hash.begin(), hash.end(), hash.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return hash;
+}
 void ProfileRegistry::loadDirectory(const std::filesystem::path& dir){
     profiles_.clear();
     if(!std::filesystem::exists(dir)) return;
@@ -11,7 +19,21 @@ void ProfileRegistry::loadDirectory(const std::filesystem::path& dir){
 }
 const BuildProfile* ProfileRegistry::find(const BuildFingerprint& fp) const{
     for(const auto& p:profiles_){
-        if(p.build.timestamp==fp.timestamp && p.build.sizeOfImage==fp.sizeOfImage && p.build.textHash==fp.textHash) return &p;
+        if (p.build.timestamp != fp.timestamp || p.build.sizeOfImage != fp.sizeOfImage)
+            continue;
+        if (p.build.textRva && fp.textRva && p.build.textRva != fp.textRva)
+            continue;
+        if (p.build.textSize && fp.textSize && p.build.textSize != fp.textSize)
+            continue;
+        // Prefer SHA256 when the profile requires it. Legacy profiles use FNV1A64.
+        if (!p.build.textHashSha256.empty()) {
+            if (fp.textSha256.empty() || normalizeHash(p.build.textHashSha256) != normalizeHash(fp.textSha256))
+                continue;
+        } else if (p.build.textHash.empty() || fp.textHash.empty() ||
+                   normalizeHash(p.build.textHash) != normalizeHash(fp.textHash)) {
+            continue;
+        }
+        return &p;
     }
     return nullptr;
 }

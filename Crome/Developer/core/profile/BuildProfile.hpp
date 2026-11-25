@@ -17,7 +17,7 @@ struct FieldSpec { uint64_t offset{}; std::string type; FieldStatus status{Field
 struct ActionSpec { uint64_t rva{}; std::string signature; FieldStatus status{FieldStatus::Missing}; bool available() const { return rva != 0; } };
 struct BuildInfo {
     std::string profileName, profileStatus, exe, architecture, rendererHint;
-    uint32_t pointerSize{}; uint64_t timestamp{}, sizeOfImage{}, entryPointRva{}, textRva{}, textSize{}; std::string textHash;
+    uint32_t pointerSize{}; uint64_t timestamp{}, sizeOfImage{}, entryPointRva{}, textRva{}, textSize{}; std::string textHash, textHashSha256;
 };
 struct LocalPlayerLayout { uint64_t vtableRva{}, directGlobalRva{}, indirectGlobalRva{}, indirectOwnerOffset{}; std::map<std::string,FieldSpec> fields; };
 struct CreatureLayout { std::map<std::string,FieldSpec> fields; uint64_t monsterVtableRva{}, playerVtableRva{}, npcVtableRva{}; };

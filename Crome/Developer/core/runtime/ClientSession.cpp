@@ -1,9 +1,12 @@
 #include "core/runtime/ClientSession.hpp"
+#include "core/profile/CodeIdentity.hpp"
 #ifdef _WIN32
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <algorithm>
 #include <cwchar>
+#include <vector>
+#include <system_error>
 #endif
 #include <chrono>
 
@@ -20,6 +23,13 @@ void ClientSession::closeProcess(){
 #endif
     memory_.set(nullptr);
     runtime_ = {};
+    identityPid_ = 0;
+    identityProfile_ = nullptr;
+    identityExe_.clear();
+    identityFileSize_ = 0;
+    identityChecked_ = false;
+    identityOk_ = false;
+    identityMessage_.clear();
 }
 
 bool ClientSession::loadProfiles(const std::filesystem::path& dir){
@@ -74,19 +84,69 @@ bool ClientSession::refresh(bool force){
     }
     runtime_.moduleBase=found.base; runtime_.profile=found.profile;
     status_.processFound=true; status_.memoryOpen=true; status_.pid=found.pid; status_.moduleBase=found.base; status_.exe=found.exe;
-    status_.profileMatched=true; status_.profileName=found.profile->build.profileName;
+    status_.profileMatched=false; status_.profileName=found.profile->build.profileName;
 
-    // Validate PE timestamp + image size in memory when possible.
+    // Fail closed if the mapped executable cannot be checked in memory.
     IMAGE_DOS_HEADER dos{}; IMAGE_NT_HEADERS64 nt{};
-    if(memory_.readT(found.base,dos) && dos.e_magic==IMAGE_DOS_SIGNATURE &&
-       memory_.read(found.base+dos.e_lfanew,&nt,sizeof(nt)) && nt.Signature==IMAGE_NT_SIGNATURE){
-        if(found.profile->build.timestamp && nt.FileHeader.TimeDateStamp!=found.profile->build.timestamp){
-            status_.message="Processo encontrado, mas timestamp nao confere com o profile"; runtime_.profile=nullptr; return false;
-        }
-        if(found.profile->build.sizeOfImage && nt.OptionalHeader.SizeOfImage!=found.profile->build.sizeOfImage){
-            status_.message="Processo encontrado, mas SizeOfImage nao confere com o profile"; runtime_.profile=nullptr; return false;
-        }
+    if (!memory_.readT(found.base,dos) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+        dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000 ||
+        !memory_.read(found.base+dos.e_lfanew,&nt,sizeof(nt)) ||
+        nt.Signature != IMAGE_NT_SIGNATURE ||
+        nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        status_.message="PE em memoria nao pode ser validado";
+        runtime_.profile=nullptr;
+        return false;
     }
+    if(found.profile->build.timestamp &&
+       nt.FileHeader.TimeDateStamp != found.profile->build.timestamp){
+        status_.message="Processo encontrado, mas timestamp nao confere com o profile";
+        runtime_.profile=nullptr; return false;
+    }
+    if(found.profile->build.sizeOfImage &&
+       nt.OptionalHeader.SizeOfImage != found.profile->build.sizeOfImage){
+        status_.message="Processo encontrado, mas SizeOfImage nao confere com o profile";
+        runtime_.profile=nullptr; return false;
+    }
+
+    // Look up the *running PID's* path. Never use the profile's install path
+    // as proof that this process is running those bytes.
+    std::vector<wchar_t> exeBuffer(32768);
+    DWORD exeLength = static_cast<DWORD>(exeBuffer.size());
+    if (!QueryFullProcessImageNameW(process_, 0, exeBuffer.data(), &exeLength)
+        || exeLength == 0) {
+        status_.message="Nao foi possivel identificar o EXE do processo";
+        runtime_.profile=nullptr; return false;
+    }
+    const std::filesystem::path exePath(std::wstring(exeBuffer.data(), exeLength));
+    std::error_code ec;
+    const auto modified = std::filesystem::last_write_time(exePath, ec);
+    if (ec) {
+        status_.message="Nao foi possivel consultar a data do EXE";
+        runtime_.profile=nullptr; return false;
+    }
+    const auto filesize = std::filesystem::file_size(exePath, ec);
+    if (ec) {
+        status_.message="Nao foi possivel consultar o tamanho do EXE";
+        runtime_.profile=nullptr; return false;
+    }
+    if (!identityChecked_ || identityPid_ != found.pid ||
+        identityProfile_ != found.profile || identityExe_ != exePath ||
+        identityWriteTime_ != modified || identityFileSize_ != filesize) {
+        const auto report = CodeIdentity::checkFile(exePath, found.profile->build);
+        identityPid_ = found.pid;
+        identityProfile_ = found.profile;
+        identityExe_ = exePath;
+        identityWriteTime_ = modified;
+        identityFileSize_ = filesize;
+        identityChecked_ = true;
+        identityOk_ = report.compatible;
+        identityMessage_ = report.reason;
+    }
+    if (!identityOk_) {
+        status_.message="Identidade da build: "+identityMessage_;
+        runtime_.profile=nullptr; return false;
+    }
+    status_.profileMatched=true;
     return resolveRuntime();
 #else
     status_.message="ClientSession requer Windows"; return false;

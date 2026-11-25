@@ -34,6 +34,15 @@ class ClientSession {
     HANDLE process_{};
 #endif
     uint64_t lastRefreshMs_{};
+    // Cache the expensive raw .text hash for the current process and on-disk image.
+    uint32_t identityPid_{};
+    const BuildProfile* identityProfile_{};
+    std::filesystem::path identityExe_{};
+    std::filesystem::file_time_type identityWriteTime_{};
+    std::uintmax_t identityFileSize_{};
+    bool identityChecked_{};
+    bool identityOk_{};
+    std::string identityMessage_;
 
     void closeProcess();
     bool resolveRuntime();
