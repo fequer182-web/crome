@@ -84,6 +84,10 @@ if(CROME_BUILD_DEV_TOOLS)
 
     add_executable(profile_inspector tools/profile_inspector.cpp)
     target_link_libraries(profile_inspector PRIVATE crome_core)
+
+    # Verificador apenas de arquivo, sem abrir PID nem carregar o runtime.
+    add_executable(code_identity_probe tools/code_identity_probe.cpp)
+    target_link_libraries(code_identity_probe PRIVATE crome_core)
 endif()
 
 # Native Olders runtime restored from the previously validated Crome SDK v21.6.
