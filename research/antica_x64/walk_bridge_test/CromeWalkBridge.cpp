@@ -41,9 +41,8 @@ extern "C" int WINAPI CromeWalkBridge_Reset() {
 extern "C" int WINAPI CromeWalkBridge_WalkRelative(int dx, int dy, int dz) {
     // Teste deliberadamente restrito a um único comando de 1 a 2 SQMs
     // no mesmo andar. Não há fallback para teclado.
-    const int manhattan = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-    if (dz != 0 || manhattan < 1 || manhattan > 2 ||
-        (dx != 0 && dy != 0))
+    if (dz != 0 || dx < -2 || dx > 2 || dy < -2 || dy > 2 ||
+        (dx != 0 && dy != 0) || (dx == 0 && dy == 0))
         return CromeWalkInvalidArgument;
 
     void* context = nullptr;
