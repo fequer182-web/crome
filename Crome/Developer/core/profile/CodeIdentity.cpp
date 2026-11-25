@@ -73,7 +73,7 @@ std::string sha256(const Bytes& bytes) {
     result = BCryptHash(algorithm, nullptr, 0,
                         const_cast<PUCHAR>(bytes.data()),
                         static_cast<ULONG>(bytes.size()), digest.data(),
-                        static_cast<ULONG>(digest.size()), 0);
+                        static_cast<ULONG>(digest.size()));
     BCryptCloseAlgorithmProvider(algorithm, 0);
     if (result < 0) throw std::runtime_error("BCryptHash falhou");
     std::ostringstream out;
