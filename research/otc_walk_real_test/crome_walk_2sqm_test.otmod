@@ -1,0 +1,9 @@
+Module
+  name: crome_walk_2sqm_test
+  description: Crome - validated real 2 SQM autoWalk test on owned OTC
+  author: Crome
+  sandboxed: true
+  autoload: true
+  scripts: [walk]
+  @onLoad: init()
+  @onUnload: terminate()
