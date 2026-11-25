@@ -11,7 +11,21 @@ void ProfileRegistry::loadDirectory(const std::filesystem::path& dir){
 }
 const BuildProfile* ProfileRegistry::find(const BuildFingerprint& fp) const{
     for(const auto& p:profiles_){
-        if(p.build.timestamp==fp.timestamp && p.build.sizeOfImage==fp.sizeOfImage && p.build.textHash==fp.textHash) return &p;
+        if (p.build.timestamp != fp.timestamp || p.build.sizeOfImage != fp.sizeOfImage)
+            continue;
+        if (p.build.textRva && fp.textRva && p.build.textRva != fp.textRva)
+            continue;
+        if (p.build.textSize && fp.textSize && p.build.textSize != fp.textSize)
+            continue;
+        // Prefer SHA256 when the profile requires it. Legacy profiles use FNV1A64.
+        if (!p.build.textHashSha256.empty()) {
+            if (fp.textSha256.empty() || p.build.textHashSha256 != fp.textSha256)
+                continue;
+        } else if (p.build.textHash.empty() || fp.textHash.empty() ||
+                   p.build.textHash != fp.textHash) {
+            continue;
+        }
+        return &p;
     }
     return nullptr;
 }
