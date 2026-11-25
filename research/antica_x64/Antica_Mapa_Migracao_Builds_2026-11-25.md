@@ -38,3 +38,18 @@ As builds do cliente **0x6B06B118** e **0x6B06FF0F** apresentam **rotinas funcio
 3. Reencontrar os globais LocalPlayer/target/follow por referências ao código, em vez de assumir deslocamento fixo.
 4. Registrar para cada RVA o status `candidate`, `static_evidence` ou `runtime_validated`.
 5. Isolar testes antes de habilitar funções no Crome principal.
+
+
+## Verificacao adicional — 25/11/2026: nova build
+
+Comparacao byte a byte dos executaveis originais `Meu servidor.exe` (antigo) e `Antica Retro opengl.exe` (novo):
+- SHA-256 novo: `a6bc688a1ba697fa0bfdce31a3a916916301aa000fc7d3bcc9f26a8cdf3fc884`.
+- Hash FNV-1a da secao `.text`: `0xB33D4DF01BF6C755`.
+- VTable LocalPlayer: `0xB0BE08` -> `0xB0EE08`, comparadas as entradas de funcoes.
+- VTable Creature: `0xB187E8` -> `0xB1B7E8`, comparadas as entradas de funcoes.
+- Routine de liberacao de referencia: `0x110950` -> `0x1109D0` (candidato estatico).
+- Dois call sites ao ataque em `0x139A6C` e `0x232D1C`; a chamada de AutoWalk em `0x15F71E`.
+- Os quatro alvos attack, follow, autoWalk e envio de caminho mantiveram os primeiros 16 bytes de codigo iguais nas duas builds. Nem todos os bytes do corpo sao iguais, e os deslocamentos variam.
+- Um verificador estatico offline passou em 12 checagens de assinatura, CALL e VTables. **Isso nao confirma ABI em runtime.**
+
+O proximo passo e validar os ponteiros do jogador e do Cave Rat na memoria da nova build **somente por leitura**, antes de qualquer teste de acao nativa. O perfil permanece `nativeActionsReady=false`.
