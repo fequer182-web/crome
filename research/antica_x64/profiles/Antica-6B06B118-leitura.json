@@ -1,0 +1,139 @@
+{
+  "schema": "otclab-build-profile-v2",
+  "schemaVersion": 2,
+  "mode": "external_read_only",
+  "capabilities": {
+    "strictConsumerReady": false,
+    "readOnlyCoreReady": true,
+    "nativeActionsReady": false
+  },
+  "build": {
+    "fingerprint": {
+      "timestamp": "0x6b06b118",
+      "sizeOfImage": "0xf33000",
+      "entryPointRva": "0x55bb10",
+      "textRva": "0x1000",
+      "textSize": "0x97d400",
+      "textHashFNV1A64": "0x19646f257541e470"
+    },
+    "architecture": "x64",
+    "exe": "Antica Retro opengl.exe",
+    "pointerSize": 8,
+    "sha256": "c2b09f400d2ed634325b7bb1bdb707c05a3737aa4d26b51dc2453f393699af70"
+  },
+  "values": {
+    "localPlayer": {
+      "directGlobalRva": "0xea5760",
+      "fields": {
+        "health": {
+          "offset": "0x6B0",
+          "status": "confirmed",
+          "type": "double",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "maxHealth": {
+          "offset": "0x6B8",
+          "status": "confirmed",
+          "type": "double",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "experience": {
+          "offset": "0x6D0",
+          "status": "confirmed",
+          "type": "double",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "level": {
+          "offset": "0x6D8",
+          "status": "confirmed",
+          "type": "double",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "x": {
+          "offset": "0x20",
+          "status": "confirmed",
+          "type": "i32",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "y": {
+          "offset": "0x24",
+          "status": "confirmed",
+          "type": "i32",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "z": {
+          "offset": "0x28",
+          "status": "confirmed",
+          "type": "u8",
+          "method": "Live read against this build; controlled coordinate transition tracked separately."
+        },
+        "mana": {
+          "method": "Live read against this build; controlled coordinate transition tracked separately.",
+          "status": "confirmed",
+          "offset": "0x6E8",
+          "type": "double"
+        },
+        "maxMana": {
+          "method": "Live read against this build; controlled coordinate transition tracked separately.",
+          "status": "confirmed",
+          "offset": "0x6F0",
+          "type": "double"
+        }
+      },
+      "vtableRva": "0xb0be08"
+    }
+  },
+  "profileName": "Antica Retro externo - 0x6b06b118",
+  "profileStatus": "partial",
+  "validation": {
+    "readOnly": true,
+    "pending": [
+      "controlled coordinate transition on this build"
+    ],
+    "observations": {
+      "creatureTree": {
+        "rva": "0xEA5C60",
+        "matchedLocalPlayer": true
+      },
+      "map": {
+        "rva": "0xEA5B60",
+        "tileVtableRva": "0xB18EA0",
+        "containsLocalPlayer": true
+      },
+      "containers": {
+        "rva": "0xEA57A0",
+        "containerVtableRva": "0xB0B0D0",
+        "itemVtableRva": "0xB0BA38",
+        "liveInventoryReadVerified": true
+      }
+    },
+    "originalUi": {
+      "connected": true,
+      "health": [
+        210,
+        210
+      ],
+      "mana": [
+        185,
+        185
+      ]
+    },
+    "restart": {
+      "localPlayerReadVerified": true,
+      "manualAttackTarget": {
+        "rva": "0xEA5770",
+        "initial": "clear",
+        "selectedName": "Rat",
+        "afterCancellation": "clear"
+      }
+    }
+  },
+  "externalTargetRead": {
+    "status": "selection_and_cancellation_observed",
+    "targetSlotRva": "0xEA5770",
+    "targetVtableRva": "0xb187e8",
+    "nameOffset": "0x48",
+    "observedName": "Rat",
+    "callable": false
+  }
+}
