@@ -8,6 +8,7 @@ Repositório principal do Crome e das ferramentas de pesquisa/build usadas para 
   - `Developer/` — código-fonte, CMake, módulos, testes e scripts de build.
   - `Crome/` — distribuição/runtime usada pelo usuário.
 - `research/ramonia_x86/` — pesquisa atual da build Ramonia x86 e profile correspondente.
+- [Antica Retro OpenGL x64](research/antica_x64/) — builds verificadas, perfil de leitura e procedimento de validação.
 - `reference/x64/` — ferramentas e projetos x64 mantidos como referência técnica.
 - `docs/` — estado geral do projeto e notas de organização.
 
