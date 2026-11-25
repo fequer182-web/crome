@@ -57,6 +57,7 @@ def run():
     p = argparse.ArgumentParser()
     p.add_argument("--exe",type=Path,required=True)
     p.add_argument("--out",type=Path,required=True)
+    p.add_argument("--extended",action="store_true",help="Desmontar regiao mais ampla da construcao do caminho.")
     a = p.parse_args()
     lines = ["CROME ANTICA X64 — AUTOWALK ABI OFFLINE",
              "NENHUMA INJECAO. NENHUM ACESSO A PROCESSO. NENHUM MOVIMENTO.",
@@ -87,8 +88,8 @@ def run():
             raise ValueError("Alvo nao corresponde a autoWalk candidata")
         lines.append("[OK] CALL aponta para Game::autoWalk candidato.")
         for label,start,stop in [
-            ("CALLER",rva-0xA0,rva+0x30),
-            ("CALLEE",target,target+0xC0)
+            ("CALLER",rva-(0x700 if a.extended else 0xA0),rva+0x50),
+            ("CALLEE",target,target+(0x800 if a.extended else 0xC0))
         ]:
             lines += ["",f"==== {label} RVA 0x{start:X}..0x{stop:X} ===="]
             window = get_bytes(data,sections,start,stop-start)
@@ -103,7 +104,7 @@ def run():
                        "--stop-address",f"0x{base+stop:X}",str(a.exe)]
                 proc = subprocess.run(cmd,capture_output=True,text=True,errors="replace")
                 lines.append("OBJDUMP exit="+str(proc.returncode))
-                lines.extend(proc.stdout.splitlines()[-220:])
+                lines.extend(proc.stdout.splitlines() if a.extended else proc.stdout.splitlines()[-220:])
                 if proc.returncode:
                     lines.extend(proc.stderr.splitlines()[-10:])
             else:
