@@ -1,5 +1,6 @@
 #include "core/profile/CodeIdentity.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
