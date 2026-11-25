@@ -4,7 +4,7 @@
 #include <optional>
 #include <vector>
 namespace crome {
-struct BuildFingerprint { uint64_t timestamp{}, sizeOfImage{}; std::string textHash; };
+struct BuildFingerprint { uint64_t timestamp{}, sizeOfImage{}; std::string textHash, textSha256; uint64_t textRva{}, textSize{}; };
 class ProfileRegistry {
     std::vector<BuildProfile> profiles_;
 public:
